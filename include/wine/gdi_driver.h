@@ -305,6 +305,8 @@ struct window_surface
     LONG                               ref;   /* reference count */
     HWND                               hwnd;  /* window the surface was created for */
     RECT                               rect;  /* constant, no locking needed */
+    BOOL                               eager_flush; /* flush after each drawing op (constant); for surfaces
+                                                     * drawn by threads that never pump messages */
 
     pthread_mutex_t                    mutex;        /* mutex needed for any field below */
     RECT                               bounds;       /* dirty area rectangle */
