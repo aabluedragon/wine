@@ -6573,7 +6573,7 @@ static void update_external_font_keys(void)
     struct gdi_font_face *face;
     DWORD len, i = 0;
     WCHAR value[LF_FULLFACESIZE + 12], *tmp, *path;
-    char buffer[2048];
+    char buffer[2048], qbuffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[MAX_PATH * sizeof(WCHAR)])];
     KEY_VALUE_FULL_INFORMATION *info = (KEY_VALUE_FULL_INFORMATION *)buffer;
     WCHAR *file;
     HKEY hkey;
@@ -6598,9 +6598,16 @@ static void update_external_font_keys(void)
         {
             if (!wcsicmp( face->file, path ))
             {
-                face->flags |= ADDFONT_EXTERNAL_FOUND;
-                free( path );
-                continue;
+                /* make sure the winnt key entry still exists: it is lost when the
+                 * system registry gets recreated, and then needs to be re-added */
+                if (tmp && !*tmp) *tmp = ' ';
+                if (query_reg_value( winnt_key, value,
+                                     (KEY_VALUE_PARTIAL_INFORMATION *)qbuffer, sizeof(qbuffer) ))
+                {
+                    face->flags |= ADDFONT_EXTERNAL_FOUND;
+                    free( path );
+                    continue;
+                }
             }
             if (!(face->flags & ADDFONT_EXTERNAL_FONT))
             {
