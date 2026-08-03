@@ -1947,6 +1947,12 @@ PROC WINAPI wglGetProcAddress( LPCSTR name )
         if (ctx->base.extensions[*ext]) return func->func;
     }
 
+    /* Native Windows drivers return entry points regardless of the current
+     * context version.  glGetStringi in particular is needed by applications
+     * lured onto GL3 paths by legacy contexts that answer GL_NUM_EXTENSIONS
+     * (e.g. macOS), and the macOS driver emulates it for such contexts. */
+    if (!strcmp( name, "glGetStringi" )) return func->func;
+
     WARN( "Extensions required for %s not supported\n", name );
     return NULL;
 }

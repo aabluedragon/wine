@@ -2011,6 +2011,62 @@ static const GLubyte *macdrv_glGetString(GLenum name)
 
 
 /**********************************************************************
+ *              macdrv_glGetStringi
+ *
+ * Emulate glGetStringi on legacy (GL 2.1) contexts.  Apple's GL-on-Metal
+ * driver answers GL_NUM_EXTENSIONS even on 2.1 contexts, so applications
+ * take the GL3 extension-enumeration path and then crash calling the
+ * missing glGetStringi.  Tokenize the classic extension string instead.
+ */
+static char **extension_tokens;
+static unsigned int extension_token_count;
+static pthread_once_t extension_tokens_once = PTHREAD_ONCE_INIT;
+
+static void init_extension_tokens(void)
+{
+    const char *str = (const char *)macdrv_glGetString(GL_EXTENSIONS);
+    char *copy, *tok, *saveptr = NULL;
+    unsigned int capacity = 64, count = 0;
+    char **list;
+
+    if (!str) return;
+    if (!(copy = strdup(str))) return;
+    if (!(list = malloc(capacity * sizeof(*list)))) return;
+
+    for (tok = strtok_r(copy, " ", &saveptr); tok; tok = strtok_r(NULL, " ", &saveptr))
+    {
+        if (count == capacity)
+        {
+            char **new_list = realloc(list, (capacity *= 2) * sizeof(*list));
+            if (!new_list) break;
+            list = new_list;
+        }
+        list[count++] = tok;
+    }
+    extension_token_count = count;
+    extension_tokens = list;
+}
+
+static const GLubyte *macdrv_glGetStringi(GLenum name, GLuint index)
+{
+    static const GLubyte *(*host_glGetStringi)(GLenum, GLuint);
+
+    if (name != GL_EXTENSIONS)
+    {
+        if (!host_glGetStringi) host_glGetStringi = dlsym(opengl_handle, "glGetStringi");
+        return host_glGetStringi ? host_glGetStringi(name, index) : NULL;
+    }
+    pthread_once(&extension_tokens_once, init_extension_tokens);
+    if (!extension_tokens) return (const GLubyte *)"";
+    /* never return NULL for extension queries: legacy contexts may report a
+     * GL_NUM_EXTENSIONS that differs slightly from the classic string's token
+     * count, and applications rarely null-check the result */
+    if (index >= extension_token_count) return (const GLubyte *)"";
+    return (const GLubyte *)extension_tokens[index];
+}
+
+
+/**********************************************************************
  *              macdrv_glReadPixels
  *
  * Hook into glReadPixels as part of the implementation of
@@ -2524,6 +2580,12 @@ static void macdrv_init_extensions(struct opengl_funcs *funcs, BOOLEAN extension
     if (gluCheckExtension((GLubyte*)"GL_ARB_multisample", (GLubyte*)gl_info.glExtensions))
         extensions[WGL_ARB_multisample] = 1;
 
+    /* Legacy (GL 2.1) contexts: expose ARB_vertex_array_object backed by the
+     * functionally equivalent APPLE extension; the ARB-named entry points are
+     * aliased to the APPLE ones in macdrv_get_proc_address. */
+    if (gluCheckExtension((GLubyte*)"GL_APPLE_vertex_array_object", (GLubyte*)gl_info.glExtensions))
+        extensions[GL_ARB_vertex_array_object] = 1;
+
     if (gluCheckExtension((GLubyte*)"GL_ARB_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
         extensions[WGL_ARB_framebuffer_sRGB] = 1;
 
@@ -2707,11 +2769,26 @@ static void *macdrv_get_proc_address(const char *name)
     /* redirect some standard OpenGL functions */
     if (!strcmp(name, "glCopyPixels")) return macdrv_glCopyPixels;
     if (!strcmp(name, "glGetString")) return macdrv_glGetString;
+    if (!strcmp(name, "glGetStringi")) return macdrv_glGetStringi;
     if (!strcmp(name, "glReadPixels")) return macdrv_glReadPixels;
 
     /* redirect some OpenGL extension functions */
     if (!strcmp(name, "glCopyColorTable")) return macdrv_glCopyColorTable;
-    return dlsym(opengl_handle, name);
+
+    {
+        void *ret = dlsym(opengl_handle, name);
+        if (ret) return ret;
+    }
+
+    /* Legacy (GL 2.1) context fallbacks: Apple's GL-on-Metal driver answers
+     * GL3 queries like GL_NUM_EXTENSIONS on 2.1 contexts, luring applications
+     * onto GL3 code paths whose entry points don't exist there.  Provide the
+     * commonly needed ones instead of letting apps crash on NULL calls. */
+    if (!strcmp(name, "glGenVertexArrays")) return dlsym(opengl_handle, "glGenVertexArraysAPPLE");
+    if (!strcmp(name, "glBindVertexArray")) return dlsym(opengl_handle, "glBindVertexArrayAPPLE");
+    if (!strcmp(name, "glDeleteVertexArrays")) return dlsym(opengl_handle, "glDeleteVertexArraysAPPLE");
+    if (!strcmp(name, "glIsVertexArray")) return dlsym(opengl_handle, "glIsVertexArrayAPPLE");
+    return NULL;
 }
 
 static BOOL macdrv_surface_swap(struct opengl_drawable *base)
