@@ -91,7 +91,18 @@ patching is needed.
 
 - **OpenGL**: winemac.drv offers at most GL 2.1 in compatibility mode (4.1
   core-only). Apps requiring a GL 3+ compatibility context cannot work; apps
-  fine with 2.1 work correctly with this fork's extension fix.
+  fine with 2.1 work correctly with this fork's extension fix. Two further
+  gaps in that 2.1 profile are papered over by this fork, because Windows
+  drivers expose both on compatibility contexts and applications assume they
+  are always present:
+  - **Sampler objects** are emulated on top of texture parameters, so
+    `GL_ARB_sampler_objects` is advertised and usable (Build engine ports such
+    as NetDuke32 load the entry points only when the extension is present, but
+    call them unconditionally, and crash on the resulting NULL pointers).
+  - **Unknown context attributes** no longer fail context creation;
+    `WGL_CONTEXT_OPENGL_NO_ERROR_ARB` and the robustness reset-notification
+    strategy are accepted and ignored. SDL2 requests the former, and rejecting
+    it made SDL fall back to 8-bpp software rendering.
 - **Audio**: Wine's DirectSound path is more reliable than WASAPI on macOS;
   for SDL-based games prefer `SDL_AUDIODRIVER=directsound` (note some engines
   override this with their own cvar).
