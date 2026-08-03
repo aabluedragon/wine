@@ -1007,7 +1007,8 @@ BOOL WINAPI NtGdiUnrealizeObject( HGDIOBJ obj )
  */
 BOOL WINAPI NtGdiFlush(void)
 {
-    return TRUE;  /* FIXME */
+    flush_window_surfaces( TRUE );
+    return TRUE;
 }
 
 

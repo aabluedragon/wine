@@ -2223,6 +2223,8 @@ static LRESULT handle_internal_message( HWND hwnd, UINT msg, WPARAM wparam, LPAR
     case WM_WINE_SETCURSOR:
         FIXME( "Unexpected non-hardware WM_WINE_SETCURSOR message\n" );
         return FALSE;
+    case WM_WINE_UPDATEFOREIGNSURFACE:
+        return update_foreign_window_surface( hwnd, (HANDLE)wparam );
     case WM_WINE_IME_NOTIFY:
     {
         HWND ime_hwnd = get_default_ime_window( hwnd );
