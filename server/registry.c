@@ -1799,7 +1799,7 @@ static void load_registry( struct key *key, obj_handle_t handle )
     }
 }
 
-/* load one of the initial registry files */
+/* load one of the initial registry files; returns -1 if the file exists but is invalid */
 static int load_init_registry_from_file( const char *filename, struct key *key )
 {
     FILE *f;
@@ -1811,7 +1811,7 @@ static int load_init_registry_from_file( const char *filename, struct key *key )
         if (get_error() == STATUS_NOT_REGISTRY_FILE)
         {
             fprintf( stderr, "%s is not a valid registry file\n", filename );
-            return 1;
+            return -1;
         }
     }
 
@@ -1926,8 +1926,9 @@ void init_registry(void)
     if (!(hklm = create_key_recursive( root_key, &HKLM_name, current_time )))
         fatal_error( "could not create Machine registry key\n" );
 
-    if (!load_init_registry_from_file( "system.reg", hklm ))
+    switch (load_init_registry_from_file( "system.reg", hklm ))
     {
+    case 0:  /* doesn't exist yet */
         if ((p = getenv( "WINEARCH" )) && !strcmp( p, "win32" ))
             prefix_type = PREFIX_32BIT;
         else
@@ -1939,9 +1940,20 @@ void init_registry(void)
             set_value( key, &symlink_str, REG_LINK, controlset001_path, sizeof(controlset001_path) );
             release_object( key );
         }
+        break;
+    case -1:  /* exists but corrupt: don't assume win32, that would make a 64-bit installation unusable */
+        if (prefix_type == PREFIX_UNKNOWN)
+        {
+            if ((p = getenv( "WINEARCH" )) && !strcmp( p, "win32" ))
+                prefix_type = PREFIX_32BIT;
+            else
+                prefix_type = sizeof(void *) > sizeof(int) ? PREFIX_64BIT : PREFIX_32BIT;
+        }
+        break;
+    default:  /* loaded; a valid pre-#arch file is an old 32-bit prefix */
+        if (prefix_type == PREFIX_UNKNOWN) prefix_type = PREFIX_32BIT;
+        break;
     }
-    else if (prefix_type == PREFIX_UNKNOWN)
-        prefix_type = PREFIX_32BIT;
 
     init_supported_machines();
 
