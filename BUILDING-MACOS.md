@@ -98,5 +98,26 @@ patching is needed.
 - **Performance**: GL-heavy renderers pay a per-call cost through Wine's
   PE→Unix boundary under Rosetta; software renderers presenting a single
   texture are often dramatically faster.
+- **Direct3D renderer**: this fork defaults wined3d to the Vulkan renderer
+  (`HKCU\Software\Wine\Direct3D` `renderer=vulkan`, installed by wine.inf;
+  delete or override per-app to go back to GL). The winemac GL renderer is
+  capped at GL 2.1 compatibility contexts and cannot present to
+  cross-process windows; wined3d-on-MoltenVK presents through Metal layers
+  everywhere, including other processes' top-level windows (exported CAContext
+  remote layers hosted by the owner via CALayerHost).
+- **Electron/Chromium apps** work out of the box with two fork changes:
+  1. With the Vulkan renderer above, ANGLE's D3D11 backend initializes
+     cleanly in the GPU process (no GPU-process crash/fallback loop).
+  2. Chromium's viz compositor runs in the GPU *process* and blits
+     software-composited frames into a window owned by the browser process,
+     which stock winemac cannot show (no server-side drawables on macOS,
+     unlike X11). This fork adds cross-process window surfaces in win32u —
+     drawing to another process's window lands in a shared-memory surface
+     whose flush notifies the owner to blit into the real window surface.
+
+  Note many Electron apps (e.g. ones calling
+  `app.disableHardwareAcceleration()`) choose software compositing
+  themselves; the cross-process surface path is what puts those frames on
+  screen.
 - First prefix creation shows Mono/Gecko installer dialogs; for headless use
   set `WINEDLLOVERRIDES="mscoree,mshtml="`.

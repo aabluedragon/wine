@@ -416,6 +416,10 @@ HKCU,Software\Wine\Debug,"RelayExclude",2,"ntdll.RtlEnterCriticalSection;ntdll.R
 HKCU,Software\Wine\Debug,"RelayFromExclude",2,"winex11.drv;winemac.drv;user32;gdi32;advapi32;kernel32"
 
 [DirectX]
+; macOS fork default: the winemac GL renderer is capped at GL 2.1 compatibility
+; contexts and cannot present to cross-process windows; wined3d's Vulkan
+; renderer (MoltenVK) supports Metal layer presentation everywhere.
+HKCU,Software\Wine\Direct3D,"renderer",2,"vulkan"
 HKLM,Software\Microsoft\DirectX,"Version",,"4.09.00.0904"
 HKLM,Software\Microsoft\DirectX,"InstalledVersion",1,00,00,00,09,00,00,00,00
 HKLM,Software\Microsoft\DirectMusic,GMFilePath,,"%12%\gm.dls"
