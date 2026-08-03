@@ -1,0 +1,102 @@
+# Building Wine for macOS (Apple Silicon)
+
+This fork is optimized for building and running Wine on macOS. It is based on
+`wine-11.14` and carries a fix for a legacy-OpenGL extension bug that breaks
+GL 1.x/2.x applications on macOS (see the commit history), plus this recipe.
+
+The result is a self-contained, movable `wine-macos/` install that runs 32-bit
+and 64-bit Windows apps on Apple Silicon via Rosetta 2, with Vulkan (MoltenVK),
+TrueType fonts (freetype) and TLS (gnutls) working out of the box.
+
+## Prerequisites
+
+- Xcode Command Line Tools
+- Rosetta 2 (`softwareupdate --install-rosetta`)
+- Homebrew (arm64) packages: `brew install bison mingw-w64`
+  (system bison 2.3 is too old; mingw-w64 provides the PE cross-compilers)
+
+## 1. Build x86_64 Unix-side dependencies
+
+Wine's Unix side must be x86_64, so its libraries must be too — arm64 Homebrew
+libraries won't link. `macos-build-deps.sh` builds freetype, gmp, nettle and
+gnutls from source into `deps/` as x86_64 dylibs:
+
+```sh
+./macos-build-deps.sh   # edit ROOT at the top first
+```
+
+## 2. Configure and build Wine
+
+```sh
+mkdir build && cd build
+PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+PKG_CONFIG_PATH=<deps>/lib/pkgconfig \
+CPPFLAGS="-I<deps>/include" LDFLAGS="-L<deps>/lib" \
+MACOSX_DEPLOYMENT_TARGET=12.0 \
+arch -x86_64 ../configure --prefix=<install-dir> \
+  --enable-archs=i386,x86_64 --disable-tests --without-x
+arch -x86_64 make -j$(sysctl -n hw.ncpu)
+arch -x86_64 make install
+```
+
+`--enable-archs=i386,x86_64` enables the new WoW64 mode so 32-bit Windows
+programs work without 32-bit Unix libraries (macOS has none).
+
+## 3. Bundle the dependency dylibs (make the install movable)
+
+Wine dlopens freetype/gnutls by SONAME, which dyld can't find in a custom
+prefix. Bundle them next to Wine's Unix libraries and reference them via
+`@rpath` (every Wine .so carries an `@loader_path/` rpath):
+
+```sh
+U=<install-dir>/lib/wine/x86_64-unix
+cp <deps>/lib/{libfreetype.6,libgnutls.30,libnettle.8,libhogweed.6,libgmp.10}.dylib "$U/"
+cd "$U"
+for l in *.dylib; do
+  install_name_tool -id "@rpath/$l" "$l"
+  for dep in libnettle.8.dylib libhogweed.6.dylib libgmp.10.dylib; do
+    install_name_tool -change <deps>/lib/$dep "@loader_path/$dep" "$l" 2>/dev/null
+  done
+  codesign -f -s - "$l"
+done
+```
+
+Then point the build's `include/config.h` at the bundled names **before**
+`make` (or re-run make after editing and reinstall):
+
+```c
+#define SONAME_LIBFREETYPE "@rpath/libfreetype.6.dylib"
+#define SONAME_LIBGNUTLS "@rpath/libgnutls.30.dylib"
+```
+
+## 4. Vulkan via MoltenVK
+
+Download `MoltenVK-macos.tar` from the Khronos MoltenVK releases, then:
+
+```sh
+lipo MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib -thin x86_64 -output "$U/libMoltenVK.dylib"
+codesign -f -s - "$U/libMoltenVK.dylib"
+```
+
+and add to `include/config.h` (rebuild + reinstall afterwards):
+
+```c
+#define SONAME_LIBVULKAN "@rpath/libMoltenVK.dylib"
+```
+
+MoltenVK's install name is already `@rpath/libMoltenVK.dylib`, so no further
+patching is needed.
+
+## Notes and gotchas
+
+- **OpenGL**: winemac.drv offers at most GL 2.1 in compatibility mode (4.1
+  core-only). Apps requiring a GL 3+ compatibility context cannot work; apps
+  fine with 2.1 work correctly with this fork's extension fix.
+- **Audio**: Wine's DirectSound path is more reliable than WASAPI on macOS;
+  for SDL-based games prefer `SDL_AUDIODRIVER=directsound` (note some engines
+  override this with their own cvar).
+- **Performance**: GL-heavy renderers pay a per-call cost through Wine's
+  PE→Unix boundary under Rosetta; software renderers presenting a single
+  texture are often dramatically faster.
+- First prefix creation shows Mono/Gecko installer dialogs; for headless use
+  set `WINEDLLOVERRIDES="mscoree,mshtml="`.
