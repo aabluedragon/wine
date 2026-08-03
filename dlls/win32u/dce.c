@@ -150,18 +150,49 @@ static void create_offscreen_window_surface( HWND hwnd, const RECT *surface_rect
  * viz compositor) visible on drivers without server-side drawables.
  */
 
+struct foreign_surface_header
+{
+    LONG lock;          /* interlocked guard for the dirty rect */
+    LONG pending;       /* an update message is queued to the owner */
+    RECT dirty;         /* accumulated dirty rect, reset when consumed */
+    UINT width;         /* surface dimensions, for sanity checking */
+    UINT height;
+};
+
+#define FOREIGN_SURFACE_BITS_OFFSET 64
+C_ASSERT( sizeof(struct foreign_surface_header) <= FOREIGN_SURFACE_BITS_OFFSET );
+
 struct foreign_window_surface
 {
     struct window_surface header;
     struct list cache_entry;  /* entry in foreign_surfaces, protected by foreign_surfaces_lock */
     HANDLE section;           /* shared section handle in this process */
     HANDLE owner_section;     /* section handle duplicated into the owner process */
-    void *shared_bits;
+    struct foreign_surface_header *shared;
     SIZE_T shared_size;
 };
 
 static struct list foreign_surfaces = LIST_INIT( foreign_surfaces );
 static pthread_mutex_t foreign_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void foreign_header_lock( struct foreign_surface_header *hdr )
+{
+    while (InterlockedCompareExchange( &hdr->lock, 1, 0 )) YieldProcessor();
+}
+
+static void foreign_header_unlock( struct foreign_surface_header *hdr )
+{
+    InterlockedExchange( &hdr->lock, 0 );
+}
+
+static void copy_surface_rows( char *dst, const char *src, UINT stride, const RECT *rect )
+{
+    UINT offset = rect->top * stride + rect->left * 4, row_size = (rect->right - rect->left) * 4;
+    int y;
+
+    for (y = rect->top; y < rect->bottom; y++, offset += stride)
+        memcpy( dst + offset, src + offset, row_size );
+}
 
 static struct foreign_window_surface *get_foreign_surface( struct window_surface *surface )
 {
@@ -177,16 +208,22 @@ static BOOL foreign_window_surface_flush( struct window_surface *window_surface,
                                           const BITMAPINFO *shape_info, const void *shape_bits )
 {
     struct foreign_window_surface *surface = get_foreign_surface( window_surface );
+    struct foreign_surface_header *hdr = surface->shared;
     UINT stride = color_info->bmiHeader.biSizeImage / abs( color_info->bmiHeader.biHeight );
-    SIZE_T offset = (SIZE_T)max( dirty->top, 0 ) * stride;
-    SIZE_T size = (SIZE_T)max( dirty->bottom - max( dirty->top, 0 ), 0 ) * stride;
+    RECT clipped, bounds = {0, 0, hdr->width, hdr->height};
 
-    if (offset >= surface->shared_size) return TRUE;
-    size = min( size, surface->shared_size - offset );
-    memcpy( (char *)surface->shared_bits + offset, (const char *)color_bits + offset, size );
+    if (!intersect_rect( &clipped, dirty, &bounds )) return TRUE;
 
-    NtUserPostMessage( window_surface->hwnd, WM_WINE_UPDATEFOREIGNSURFACE,
-                       (WPARAM)surface->owner_section, 0 );
+    copy_surface_rows( (char *)hdr + FOREIGN_SURFACE_BITS_OFFSET, color_bits, stride, &clipped );
+
+    foreign_header_lock( hdr );
+    add_bounds_rect( &hdr->dirty, &clipped );
+    foreign_header_unlock( hdr );
+
+    /* coalesce notifications: skip the post if the owner hasn't consumed the previous one yet */
+    if (!InterlockedExchange( &hdr->pending, 1 ))
+        NtUserPostMessage( window_surface->hwnd, WM_WINE_UPDATEFOREIGNSURFACE,
+                           (WPARAM)surface->owner_section, 0 );
     return TRUE;
 }
 
@@ -194,9 +231,9 @@ static void foreign_window_surface_destroy( struct window_surface *window_surfac
 {
     struct foreign_window_surface *surface = get_foreign_surface( window_surface );
 
-    if (surface->shared_bits) NtUnmapViewOfSection( GetCurrentProcess(), surface->shared_bits );
+    if (surface->shared) NtUnmapViewOfSection( GetCurrentProcess(), surface->shared );
     if (surface->section) NtClose( surface->section );
-    /* owner_section is intentionally left open in the owner process */
+    /* the owner closes owner_section when it sees a new section for the window */
 }
 
 static const struct window_surface_funcs foreign_window_surface_funcs =
@@ -253,7 +290,7 @@ static struct window_surface *get_foreign_window_surface( HWND hwnd, const RECT 
     info->bmiHeader.biSizeImage   = get_dib_image_size( info );
     info->bmiHeader.biCompression = BI_RGB;
 
-    section_size.QuadPart = info->bmiHeader.biSizeImage;
+    section_size.QuadPart = FOREIGN_SURFACE_BITS_OFFSET + info->bmiHeader.biSizeImage;
     if (NtCreateSection( &section, SECTION_MAP_READ | SECTION_MAP_WRITE, NULL, &section_size,
                          PAGE_READWRITE, SEC_COMMIT, 0 ))
         return NULL;
@@ -275,10 +312,16 @@ static struct window_surface *get_foreign_window_surface( HWND hwnd, const RECT 
         goto failed;
 
     surface = get_foreign_surface( window_surface );
+    /* renderers drawing cross-process (e.g. Chromium's viz compositor) usually don't
+     * pump messages on the drawing thread, so present every frame as it completes */
+    window_surface->eager_flush = TRUE;
     surface->section = section;
     surface->owner_section = owner_section;
-    surface->shared_bits = bits;
+    surface->shared = bits;
     surface->shared_size = view_size;
+    reset_bounds( &surface->shared->dirty );
+    surface->shared->width = rect.right;
+    surface->shared->height = rect.bottom;
 
     register_window_surface( NULL, window_surface );
 
@@ -886,6 +929,61 @@ void window_surface_set_shape( struct window_surface *surface, HRGN shape_region
     window_surface_flush( surface );
 }
 
+/* owner-side cached mappings of foreign surface sections */
+struct foreign_surface_mapping
+{
+    struct list entry;
+    HWND hwnd;
+    HANDLE section;
+    struct foreign_surface_header *shared;
+    SIZE_T size;
+};
+
+static struct list foreign_mappings = LIST_INIT( foreign_mappings );
+
+static struct foreign_surface_mapping *get_foreign_surface_mapping( HWND hwnd, HANDLE section )
+{
+    struct foreign_surface_mapping *mapping;
+    SIZE_T view_size = 0;
+    void *bits = NULL;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    LIST_FOR_EACH_ENTRY( mapping, &foreign_mappings, struct foreign_surface_mapping, entry )
+    {
+        if (mapping->hwnd != hwnd) continue;
+        if (mapping->section == section)
+        {
+            pthread_mutex_unlock( &foreign_surfaces_lock );
+            return mapping;
+        }
+        /* the surface was recreated (e.g. resized): drop the stale mapping */
+        NtUnmapViewOfSection( GetCurrentProcess(), mapping->shared );
+        NtClose( mapping->section );
+        list_remove( &mapping->entry );
+        free( mapping );
+        break;
+    }
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+
+    if (NtMapViewOfSection( section, GetCurrentProcess(), &bits, 0, 0, NULL, &view_size,
+                            ViewShare, 0, PAGE_READWRITE ))
+        return NULL;
+    if (view_size <= FOREIGN_SURFACE_BITS_OFFSET || !(mapping = malloc( sizeof(*mapping) )))
+    {
+        NtUnmapViewOfSection( GetCurrentProcess(), bits );
+        return NULL;
+    }
+    mapping->hwnd = hwnd;
+    mapping->section = section;
+    mapping->shared = bits;
+    mapping->size = view_size;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    list_add_tail( &foreign_mappings, &mapping->entry );
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+    return mapping;
+}
+
 /***********************************************************************
  *           update_foreign_window_surface
  *
@@ -896,31 +994,46 @@ LRESULT update_foreign_window_surface( HWND hwnd, HANDLE section )
 {
     char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
     BITMAPINFO *info = (BITMAPINFO *)buffer;
+    struct foreign_surface_mapping *mapping;
+    struct foreign_surface_header *hdr;
     struct window_surface *surface = NULL;
-    SIZE_T view_size = 0;
-    void *bits = NULL, *color_bits;
+    RECT dirty, bounds;
+    void *color_bits;
     WND *win;
+
+    if (!(mapping = get_foreign_surface_mapping( hwnd, section ))) return 0;
+    hdr = mapping->shared;
+
+    /* allow the renderer to queue the next notification from here on */
+    InterlockedExchange( &hdr->pending, 0 );
+
+    foreign_header_lock( hdr );
+    dirty = hdr->dirty;
+    reset_bounds( &hdr->dirty );
+    foreign_header_unlock( hdr );
+    if (IsRectEmpty( &dirty )) return 0;  /* already consumed by a coalesced update */
 
     if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return 0;
     if ((surface = win->surface)) window_surface_add_ref( surface );
     release_win_ptr( win );
     if (!surface) return 0;
 
-    if (surface != &dummy_surface &&
-        !NtMapViewOfSection( section, GetCurrentProcess(), &bits, 0, 0, NULL, &view_size,
-                             ViewShare, 0, PAGE_READONLY ))
+    if (surface != &dummy_surface)
     {
         window_surface_lock( surface );
         if ((color_bits = window_surface_get_color( surface, info )))
         {
-            RECT rect = surface->rect;
-            SIZE_T size = min( (SIZE_T)info->bmiHeader.biSizeImage, view_size );
-            memcpy( color_bits, bits, size );
-            OffsetRect( &rect, -rect.left, -rect.top );
-            add_bounds_rect( &surface->bounds, &rect );
+            UINT stride = info->bmiHeader.biSizeImage / abs( info->bmiHeader.biHeight );
+            SetRect( &bounds, 0, 0, hdr->width, hdr->height );
+            if (info->bmiHeader.biWidth == hdr->width && abs( info->bmiHeader.biHeight ) == hdr->height &&
+                (SIZE_T)FOREIGN_SURFACE_BITS_OFFSET + info->bmiHeader.biSizeImage <= mapping->size &&
+                intersect_rect( &dirty, &dirty, &bounds ))
+            {
+                copy_surface_rows( color_bits, (char *)hdr + FOREIGN_SURFACE_BITS_OFFSET, stride, &dirty );
+                add_bounds_rect( &surface->bounds, &dirty );
+            }
         }
         window_surface_unlock( surface );
-        NtUnmapViewOfSection( GetCurrentProcess(), bits );
         window_surface_flush( surface );
     }
     window_surface_release( surface );
