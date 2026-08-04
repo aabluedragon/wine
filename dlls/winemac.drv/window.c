@@ -1176,9 +1176,19 @@ BOOL macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
     }
     else
     {
+        HWND root = NtUserGetAncestor(hwnd, GA_ROOT);
         RECT rect;
 
-        if (NtUserGetAncestor(hwnd, GA_ROOT) != hwnd)
+        /* An application is free to destroy the window a swapchain was created
+         * for; there is nothing left to present to in that case. Don't mistake
+         * that for a window belonging to another process. */
+        if (!root)
+        {
+            WARN("Window %p no longer exists.\n", hwnd);
+            return FALSE;
+        }
+
+        if (root != hwnd)
         {
             FIXME("Cross-process child window Metal swapchains are not implemented\n");
             return FALSE;

@@ -119,15 +119,23 @@ static void wined3d_swapchain_vk_destroy_vulkan_swapchain(struct wined3d_swapcha
 
     if ((vr = VK_CALL(vkQueueWaitIdle(device_vk->graphics_queue.vk_queue))) < 0)
         ERR("Failed to wait on queue, vr %s.\n", wined3d_debug_vkresult(vr));
+    /* Reset everything we destroy here. Recreating the swapchain can fail,
+     * e.g. when the application destroyed the window it was created for, and
+     * whatever is left behind must not be destroyed a second time. */
     free(swapchain_vk->vk_images);
+    swapchain_vk->vk_images = NULL;
     for (i = 0; i < swapchain_vk->image_count; ++i)
     {
         VK_CALL(vkDestroySemaphore(device_vk->vk_device, swapchain_vk->vk_semaphores[i].available, NULL));
         VK_CALL(vkDestroySemaphore(device_vk->vk_device, swapchain_vk->vk_semaphores[i].presentable, NULL));
     }
     free(swapchain_vk->vk_semaphores);
+    swapchain_vk->vk_semaphores = NULL;
+    swapchain_vk->image_count = 0;
     VK_CALL(vkDestroySwapchainKHR(device_vk->vk_device, swapchain_vk->vk_swapchain, NULL));
+    swapchain_vk->vk_swapchain = VK_NULL_HANDLE;
     VK_CALL(vkDestroySurfaceKHR(vk_info->instance, swapchain_vk->vk_surface, NULL));
+    swapchain_vk->vk_surface = VK_NULL_HANDLE;
 }
 
 static void wined3d_swapchain_vk_destroy_object(void *object)
