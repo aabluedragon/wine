@@ -787,6 +787,14 @@ static VkImageView wined3d_view_vk_create_vk_image_view(struct wined3d_context_v
 
     device_vk = wined3d_device_vk(resource->device);
 
+    if (!wined3d_format_vk(resource->format)->vk_format)
+    {
+        /* Formats without a Vulkan equivalent have no image to view; they are
+         * handled entirely by the CPU blitter. */
+        WARN("Texture format %s has no Vulkan equivalent.\n", debug_d3dformat(resource->format->id));
+        return VK_NULL_HANDLE;
+    }
+
     if (!wined3d_texture_vk_prepare_texture(texture_vk, context_vk))
     {
         ERR("Failed to prepare texture.\n");

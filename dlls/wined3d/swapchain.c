@@ -1541,6 +1541,29 @@ static HRESULT wined3d_swapchain_state_init(struct wined3d_swapchain_state *stat
     return hr;
 }
 
+/* Older DirectDraw applications present palettised or otherwise exotic modes.
+ * Some of those have no representation at all on the adapter, in which case we
+ * can't even allocate the swapchain textures. Hold the swapchain contents in a
+ * plain 32 bit format instead, and let the blit that updates the swapchain do
+ * the conversion; that is what the CPU blitter is there for. */
+static void swapchain_adjust_backbuffer_format(struct wined3d_swapchain *swapchain,
+        const struct wined3d_adapter *adapter)
+{
+    struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
+    const struct wined3d_format *format;
+
+    if (desc->backbuffer_format == WINED3DFMT_UNKNOWN)
+        return;
+
+    format = wined3d_get_format(adapter, desc->backbuffer_format, WINED3D_BIND_RENDER_TARGET);
+    if (format->caps[WINED3D_GL_RES_TYPE_TEX_2D] & WINED3D_FORMAT_CAP_BLIT)
+        return;
+
+    WARN("Format %s is not supported by the adapter, using %s for the swapchain textures.\n",
+            debug_d3dformat(desc->backbuffer_format), debug_d3dformat(WINED3DFMT_B8G8R8X8_UNORM));
+    desc->backbuffer_format = WINED3DFMT_B8G8R8X8_UNORM;
+}
+
 static HRESULT swapchain_create_texture(struct wined3d_swapchain *swapchain,
         bool front, bool depth, struct wined3d_texture **texture)
 {
@@ -1665,6 +1688,7 @@ static HRESULT wined3d_swapchain_init(struct wined3d_swapchain *swapchain, struc
                 output_desc.desktop_rect.left, output_desc.desktop_rect.top, desc->backbuffer_width,
                 desc->backbuffer_height);
     }
+    swapchain_adjust_backbuffer_format(swapchain, device->adapter);
     wined3d_swapchain_apply_sample_count_override(swapchain, swapchain->state.desc.backbuffer_format,
             &swapchain->state.desc.multisample_type, &swapchain->state.desc.multisample_quality);
 
@@ -2093,6 +2117,7 @@ HRESULT CDECL wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapcha
     if (format_id != desc->backbuffer_format)
     {
         desc->backbuffer_format = format_id;
+        swapchain_adjust_backbuffer_format(swapchain, swapchain->device->adapter);
         recreate = true;
     }
 

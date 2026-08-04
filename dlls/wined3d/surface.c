@@ -41,7 +41,8 @@ static void get_color_masks(const struct wined3d_format *format, uint32_t *masks
 }
 
 static void convert_r32_float_r16_float(const BYTE *src, BYTE *dst,
-        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
 {
     unsigned short *dst_s;
     const float *src_f;
@@ -61,7 +62,8 @@ static void convert_r32_float_r16_float(const BYTE *src, BYTE *dst,
 }
 
 static void convert_r5g6b5_x8r8g8b8(const BYTE *src, BYTE *dst,
-        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
 {
     static const unsigned char convert_5to8[] =
     {
@@ -103,7 +105,8 @@ static void convert_r5g6b5_x8r8g8b8(const BYTE *src, BYTE *dst,
 /* We use this for both B8G8R8A8 -> B8G8R8X8 and B8G8R8X8 -> B8G8R8A8, since
  * in both cases we're just setting the X / Alpha channel to 0xff. */
 static void convert_a8r8g8b8_x8r8g8b8(const BYTE *src, BYTE *dst,
-        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
 {
     unsigned int x, y;
 
@@ -127,7 +130,8 @@ static inline BYTE cliptobyte(int x)
 }
 
 static void convert_yuy2_x8r8g8b8(const BYTE *src, BYTE *dst,
-        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
 {
     int c2, d, e, r2 = 0, g2 = 0, b2 = 0;
     unsigned int x, y;
@@ -169,7 +173,8 @@ static void convert_yuy2_x8r8g8b8(const BYTE *src, BYTE *dst,
 }
 
 static void convert_yuy2_r5g6b5(const BYTE *src, BYTE *dst,
-        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
 {
     unsigned int x, y;
     int c2, d, e, r2 = 0, g2 = 0, b2 = 0;
@@ -209,12 +214,41 @@ static void convert_yuy2_r5g6b5(const BYTE *src, BYTE *dst,
     }
 }
 
+static void convert_p8_x8r8g8b8(const BYTE *src, BYTE *dst,
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h,
+        const struct wined3d_palette *palette)
+{
+    unsigned int colours[256];
+    unsigned int x, y;
+
+    TRACE("Converting %ux%u pixels, pitches %u %u.\n", w, h, pitch_in, pitch_out);
+
+    for (x = 0; x < ARRAY_SIZE(colours); ++x)
+    {
+        if (palette && x < palette->size)
+            colours[x] = 0xff000000u | palette->colors[x].rgbRed << 16
+                    | palette->colors[x].rgbGreen << 8 | palette->colors[x].rgbBlue;
+        else
+            colours[x] = 0xff000000u;
+    }
+
+    for (y = 0; y < h; ++y)
+    {
+        const BYTE *src_line = src + y * pitch_in;
+        unsigned int *dst_line = (unsigned int *)(dst + y * pitch_out);
+
+        for (x = 0; x < w; ++x)
+            dst_line[x] = colours[src_line[x]];
+    }
+}
+
 struct d3dfmt_converter_desc
 {
     enum wined3d_format_id from, to;
     void (*convert)(const BYTE *src, BYTE *dst,
                     unsigned int pitch_in, unsigned int pitch_out,
-                    unsigned int w, unsigned int h);
+                    unsigned int w, unsigned int h,
+                    const struct wined3d_palette *palette);
 };
 
 static const struct d3dfmt_converter_desc converters[] =
@@ -225,6 +259,8 @@ static const struct d3dfmt_converter_desc converters[] =
     {WINED3DFMT_B8G8R8X8_UNORM, WINED3DFMT_B8G8R8A8_UNORM,  convert_a8r8g8b8_x8r8g8b8},
     {WINED3DFMT_YUY2,           WINED3DFMT_B8G8R8X8_UNORM,  convert_yuy2_x8r8g8b8},
     {WINED3DFMT_YUY2,           WINED3DFMT_B5G6R5_UNORM,    convert_yuy2_r5g6b5},
+    {WINED3DFMT_P8_UINT,        WINED3DFMT_B8G8R8X8_UNORM,  convert_p8_x8r8g8b8},
+    {WINED3DFMT_P8_UINT,        WINED3DFMT_B8G8R8A8_UNORM,  convert_p8_x8r8g8b8},
 };
 
 static inline const struct d3dfmt_converter_desc *find_converter(enum wined3d_format_id from,
@@ -242,7 +278,8 @@ static inline const struct d3dfmt_converter_desc *find_converter(enum wined3d_fo
 }
 
 static struct wined3d_texture *surface_convert_format(struct wined3d_texture *src_texture,
-        unsigned int sub_resource_idx, const struct wined3d_format *dst_format)
+        unsigned int sub_resource_idx, const struct wined3d_format *dst_format,
+        const struct wined3d_palette *palette)
 {
     unsigned int texture_level = sub_resource_idx % src_texture->level_count;
     const struct wined3d_format *src_format = src_texture->resource.format;
@@ -312,7 +349,7 @@ static struct wined3d_texture *surface_convert_format(struct wined3d_texture *sr
         dst = wined3d_context_map_bo_address(context, &dst_data,
                 dst_texture->sub_resources[0].size, WINED3D_MAP_WRITE);
 
-        conv->convert(src, dst, src_row_pitch, dst_row_pitch, desc.width, desc.height);
+        conv->convert(src, dst, src_row_pitch, dst_row_pitch, desc.width, desc.height, palette);
 
         range.offset = 0;
         range.size = dst_texture->sub_resources[0].size;
@@ -670,7 +707,18 @@ static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int
 
         if (!(flags & WINED3D_BLT_RAW) && dst_format->id != src_format->id)
         {
-            if (!(converted_texture = surface_convert_format(src_texture, src_sub_resource_idx, dst_format)))
+            const struct wined3d_palette *palette = NULL;
+
+            /* DirectDraw keeps the palette of a palettised primary surface on
+             * the swapchain; the destination of this blit is the swapchain
+             * texture the primary is presented through. */
+            if (dst_texture->swapchain)
+                palette = dst_texture->swapchain->palette;
+            else if (src_texture->swapchain)
+                palette = src_texture->swapchain->palette;
+
+            if (!(converted_texture = surface_convert_format(src_texture,
+                    src_sub_resource_idx, dst_format, palette)))
             {
                 FIXME("Cannot convert %s to %s.\n", debug_d3dformat(src_format->id),
                         debug_d3dformat(dst_format->id));
