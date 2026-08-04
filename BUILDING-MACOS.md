@@ -99,6 +99,12 @@ patching is needed.
     `GL_ARB_sampler_objects` is advertised and usable (Build engine ports such
     as NetDuke32 load the entry points only when the extension is present, but
     call them unconditionally, and crash on the resulting NULL pointers).
+  - **Buffer updates** avoid Apple's lack of buffer renaming: updating a
+    buffer the GPU may still be reading synchronizes with it, costing ~250us
+    per call, which reduces engines that refill a vertex buffer before every
+    draw to ~23fps. Full-buffer updates respecify the storage (orphaning) and
+    partial ones go through an unsynchronized mapping with an explicit range
+    flush (`GL_APPLE_flush_buffer_range`).
   - **Unknown context attributes** no longer fail context creation;
     `WGL_CONTEXT_OPENGL_NO_ERROR_ARB` and the robustness reset-notification
     strategy are accepted and ignored. SDL2 requests the former, and rejecting

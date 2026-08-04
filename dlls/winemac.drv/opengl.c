@@ -100,6 +100,15 @@ static void (*pglTexParameteri)(GLenum target, GLenum pname, GLint param);
 static void (*pglBindTexture)(GLenum target, GLuint texture);
 static void (*pglActiveTexture)(GLenum texture);
 static BOOL emulate_sampler_objects;
+/* used by the buffer respecification workaround */
+static PFN_glBufferSubData pglBufferSubData;
+static PFN_glBufferData pglBufferData;
+static PFN_glGetBufferParameteriv pglGetBufferParameteriv;
+static PFN_glMapBuffer pglMapBuffer;
+static PFN_glUnmapBuffer pglUnmapBuffer;
+static PFN_glBufferParameteriAPPLE pglBufferParameteriAPPLE;
+static PFN_glFlushMappedBufferRangeAPPLE pglFlushMappedBufferRangeAPPLE;
+static BOOL use_apple_buffer_range;
 
 
 struct color_mode {
@@ -1260,6 +1269,9 @@ static BOOL init_gl_info(void)
     if (allow_vsync)
         length += strlen(legacy_ext_swap_control);
     emulate_sampler_objects = !gluCheckExtension((GLubyte*)"GL_ARB_sampler_objects", (GLubyte*)str);
+    use_apple_buffer_range = gluCheckExtension((GLubyte*)"GL_APPLE_flush_buffer_range", (GLubyte*)str) &&
+                             (pglBufferParameteriAPPLE = dlsym(opengl_handle, "glBufferParameteriAPPLE")) &&
+                             (pglFlushMappedBufferRangeAPPLE = dlsym(opengl_handle, "glFlushMappedBufferRangeAPPLE"));
     if (emulate_sampler_objects)
         length += strlen(emulated_sampler_objects);
     gl_info.glExtensions = malloc(length);
@@ -2075,6 +2087,65 @@ static const GLubyte *macdrv_glGetStringi(GLenum name, GLuint index)
      * count, and applications rarely null-check the result */
     if (index >= extension_token_count) return (const GLubyte *)"";
     return (const GLubyte *)extension_tokens[index];
+}
+
+
+/**********************************************************************
+ *              macdrv_glBufferSubData
+ *
+ * Apple's GL-on-Metal driver has no buffer renaming: updating a buffer that
+ * the GPU may still be reading synchronizes with it first, which costs on the
+ * order of 250us per call and reduces engines that refill a vertex buffer
+ * before each draw (the Build engine's polymost renderer, and many other
+ * older GL renderers) to a handful of frames per second.
+ *
+ * When the update replaces the buffer's entire contents, respecify the storage
+ * instead. That has the same result, but lets the driver orphan the old
+ * storage and write into a fresh one without waiting, which is what drivers
+ * with buffer renaming do internally. Partial updates have to keep the rest of
+ * the buffer, so they go through an unsynchronized mapping instead.
+ */
+static void macdrv_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data)
+{
+    GLint buffer_size = 0;
+
+    if (size <= 0 || !data)
+    {
+        pglBufferSubData(target, offset, size, data);
+        return;
+    }
+
+    pglGetBufferParameteriv(target, GL_BUFFER_SIZE, &buffer_size);
+
+    if (!offset && buffer_size == size)
+    {
+        GLint usage = GL_DYNAMIC_DRAW;
+
+        pglGetBufferParameteriv(target, GL_BUFFER_USAGE, &usage);
+        pglBufferData(target, size, data, usage);
+        return;
+    }
+
+    /* Write through an unsynchronized mapping, flushing just the range that
+     * changed. This is the streaming update path Apple documents, and
+     * applications that rewrite part of a buffer before drawing from it are
+     * precisely the ones managing their own ring of ranges. */
+    if (use_apple_buffer_range && offset >= 0 && offset + size <= buffer_size)
+    {
+        void *ptr;
+
+        pglBufferParameteriAPPLE(target, GL_BUFFER_SERIALIZED_MODIFY_APPLE, GL_FALSE);
+        pglBufferParameteriAPPLE(target, GL_BUFFER_FLUSHING_UNMAP_APPLE, GL_FALSE);
+        if ((ptr = pglMapBuffer(target, GL_WRITE_ONLY)))
+        {
+            memcpy((char *)ptr + offset, data, size);
+            pglFlushMappedBufferRangeAPPLE(target, offset, size);
+            if (pglUnmapBuffer(target)) return;
+            /* the contents were lost, upload them the normal way below */
+        }
+    }
+
+    pglBufferSubData(target, offset, size, data);
 }
 
 
@@ -2913,6 +2984,11 @@ UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, co
     LOAD_FUNCPTR(glTexParameteri);
     LOAD_FUNCPTR(glBindTexture);
     LOAD_FUNCPTR(glActiveTexture);
+    LOAD_FUNCPTR(glBufferSubData);
+    LOAD_FUNCPTR(glBufferData);
+    LOAD_FUNCPTR(glGetBufferParameteriv);
+    LOAD_FUNCPTR(glMapBuffer);
+    LOAD_FUNCPTR(glUnmapBuffer);
 
     if (!init_gl_info())
         goto failed;
@@ -3036,6 +3112,7 @@ static void *macdrv_get_proc_address(const char *name)
     if (!strcmp(name, "glGetString")) return macdrv_glGetString;
     if (!strcmp(name, "glGetStringi")) return macdrv_glGetStringi;
     if (!strcmp(name, "glReadPixels")) return macdrv_glReadPixels;
+    if (!strcmp(name, "glBufferSubData")) return macdrv_glBufferSubData;
 
     /* sampler object emulation, and the texture state hooks it needs */
     if (!emulate_sampler_objects) { /* nothing to do, the driver implements them */ }
@@ -3072,6 +3149,7 @@ static void *macdrv_get_proc_address(const char *name)
 static BOOL macdrv_surface_swap(struct opengl_drawable *base)
 {
     struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+
 
     TRACE("%s context %p/%p/%p\n", debugstr_opengl_drawable(base), context, (context ? context->context : NULL),
           (context ? context->cglcontext : NULL));
