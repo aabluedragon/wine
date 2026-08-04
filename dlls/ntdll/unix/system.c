@@ -2564,11 +2564,25 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
     {
         host_name_port_t host = mach_host_self();
         struct host_cpu_load_info load_info;
+        vm_statistics64_data_t vm_stat;
         mach_msg_type_number_t count;
 
         count = HOST_CPU_LOAD_INFO_COUNT;
         if (host_statistics(host, HOST_CPU_LOAD_INFO, (host_info_t)&load_info, &count) == KERN_SUCCESS)
             info->IdleTime.QuadPart = (ULONGLONG)load_info.cpu_ticks[CPU_STATE_IDLE] * 100000;
+
+        count = HOST_VM_INFO64_COUNT;
+        if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS)
+        {
+            info->PageFaults      = vm_stat.faults;
+            info->WriteCopyFaults = vm_stat.cow_faults;
+            info->DemandZeroFaults = vm_stat.zero_fill_count;
+            info->TransitionFaults = vm_stat.reactivations;
+            info->PagesRead       = vm_stat.pageins;
+            info->PageReadIos     = vm_stat.pageins;
+            info->PagefilePagesWritten = vm_stat.pageouts;
+            info->PagefilePageWriteIos = vm_stat.pageouts;
+        }
         mach_port_deallocate(mach_task_self(), host);
     }
 #else
@@ -3365,8 +3379,10 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
     case SystemPerformanceInformation:  /* 2 */
     {
         SYSTEM_PERFORMANCE_INFORMATION spi;
-        static BOOL fixme_written = FALSE;
 
+        /* Only the idle time, the memory counters and, where the host provides
+         * them, the paging counters are filled in; the rest of the structure is
+         * left zeroed. */
         get_performance_info( &spi );
         len = sizeof(spi);
         if (size >= len)
@@ -3375,10 +3391,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
             else memcpy( info, &spi, len);
         }
         else ret = STATUS_INFO_LENGTH_MISMATCH;
-        if(!fixme_written) {
-            FIXME("info_class SYSTEM_PERFORMANCE_INFORMATION\n");
-            fixme_written = TRUE;
-        }
         break;
     }
 
