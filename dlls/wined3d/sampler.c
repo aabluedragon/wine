@@ -280,8 +280,11 @@ static void wined3d_sampler_vk_cs_init(void *object)
         sampler_desc.borderColor = vk_border_colour_from_wined3d((const struct wined3d_color *)desc->border_color);
     if (desc->mip_base_level)
         FIXME("Unhandled mip_base_level %u.\n", desc->mip_base_level);
-    if ((d3d_info->wined3d_creation_flags & WINED3D_SRGB_READ_WRITE_CONTROL) && !desc->srgb_decode)
-        FIXME("Unhandled srgb_decode %#x.\n", desc->srgb_decode);
+    /* Vulkan has no per-sampler sRGB decode switch; whether the conversion
+     * happens is decided by the format of the view being sampled. That gives
+     * the right result whenever the view isn't an sRGB one, which is the usual
+     * case, so complaining here would be crying wolf. The binding code checks
+     * the combination that we really can't honour. */
 
     reduction_desc.reductionMode = vk_reduction_mode_from_wined3d(desc->reduction_mode);
     if (reduction_desc.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE)

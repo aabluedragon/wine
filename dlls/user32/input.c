@@ -384,7 +384,14 @@ HKL WINAPI LoadKeyboardLayoutW( const WCHAR *name, UINT flags )
     HKEY hkey;
     HKL layout;
 
-    FIXME_(keyboard)( "name %s, flags %x, semi-stub!\n", debugstr_w( name ), flags );
+    /* KLF_ACTIVATE, KLF_SETFORPROCESS and KLF_SUBSTITUTE_OK describe what to do
+     * once the layout is loaded, which is all this does; the ordering and shell
+     * notification flags have nothing to act on with a single layout. */
+    if (flags & ~(KLF_ACTIVATE | KLF_SUBSTITUTE_OK | KLF_UNLOADPREVIOUS | KLF_REORDER
+                  | KLF_REPLACELANG | KLF_NOTELLSHELL | KLF_SETFORPROCESS))
+        FIXME_(keyboard)( "name %s, unhandled flags %#x\n", debugstr_w( name ), flags );
+    else
+        TRACE_(keyboard)( "name %s, flags %#x\n", debugstr_w( name ), flags );
 
     tmp = wcstoul( name, NULL, 16 );
     if (HIWORD( tmp )) layout = UlongToHandle( tmp );

@@ -682,9 +682,12 @@ BOOL WINAPI ImeSetCompositionString( HIMC himc, DWORD index, const void *comp, D
 {
     INPUTCONTEXT *ctx;
 
-    FIXME( "himc %p, index %lu, comp %p, comp_len %lu, read %p, read_len %lu semi-stub!\n",
+    TRACE( "himc %p, index %lu, comp %p, comp_len %lu, read %p, read_len %lu.\n",
             himc, index, comp, comp_len, read, read_len );
-    if (read && read_len) FIXME( "Read string unimplemented\n" );
+    /* The reading string is the phonetic spelling being converted. It only
+     * exists while a host input method is composing, and it doesn't reach us,
+     * so there is nothing to store for the application to read back. */
+    if (read && read_len) WARN( "Ignoring the reading string.\n" );
     if (index != SCS_SETSTR && index != SCS_CHANGECLAUSE && index != SCS_CHANGEATTR) return FALSE;
 
     if (!(ctx = ImmLockIMC( himc ))) return FALSE;
@@ -777,6 +780,14 @@ BOOL WINAPI NotifyIME( HIMC himc, DWORD action, DWORD index, DWORD value )
             FIXME( "himc %p, action %#lx, index %#lx, value %#lx stub!\n", himc, action, index, value );
             break;
         }
+        break;
+
+    case NI_OPENCANDIDATE:
+    case NI_CLOSECANDIDATE:
+        /* Composition comes from the host's input method, which shows its own
+         * candidate window; we have none of our own to open or close. */
+        TRACE( "himc %p, no candidate list to %s\n", himc,
+               action == NI_OPENCANDIDATE ? "open" : "close" );
         break;
 
     default:

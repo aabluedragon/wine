@@ -4648,6 +4648,7 @@ void wined3d_format_get_float_color_key(const struct wined3d_format *format,
 BOOL wined3d_format_is_depth_view(enum wined3d_format_id resource_format_id,
         enum wined3d_format_id view_format_id);
 uint32_t wined3d_format_pack(const struct wined3d_format *format, const struct wined3d_uvec4 *value);
+BOOL wined3d_format_is_srgb(enum wined3d_format_id format);
 BOOL wined3d_formats_are_srgb_variants(enum wined3d_format_id format1,
         enum wined3d_format_id format2);
 

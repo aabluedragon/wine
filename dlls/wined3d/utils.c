@@ -4470,6 +4470,17 @@ UINT wined3d_format_calculate_size(const struct wined3d_format *format, UINT ali
     return slice_pitch * depth;
 }
 
+/* Whether sampling this format converts from sRGB to linear. */
+BOOL wined3d_format_is_srgb(enum wined3d_format_id format)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(format_srgb_info); ++i)
+        if (format == format_srgb_info[i].srgb_format_id)
+            return TRUE;
+    return FALSE;
+}
+
 BOOL wined3d_formats_are_srgb_variants(enum wined3d_format_id format1, enum wined3d_format_id format2)
 {
     unsigned int i;

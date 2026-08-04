@@ -154,7 +154,11 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     HMODULE module;
     HRESULT hr;
 
-    FIXME("(%s, %s, %p): semi-stub\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
+    /* Only in-process activation is implemented, and only for the runtime
+     * classes registered by Wine's own components rather than any an
+     * application brings with it in its manifest. Resolving one of those is a
+     * complete answer, so say something only where it isn't. */
+    TRACE("(%s, %s, %p)\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
 
     if (!iid || !class_factory)
         return E_INVALIDARG;
@@ -165,7 +169,7 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
     if (FAILED(hr))
     {
-        ERR("Failed to find library for %s\n", debugstr_hstring(classid));
+        FIXME("No runtime class %s.\n", debugstr_hstring(classid));
         return hr;
     }
 

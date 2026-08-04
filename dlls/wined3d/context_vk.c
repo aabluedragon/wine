@@ -3887,6 +3887,20 @@ static void wined3d_context_vk_load_shader_resources(struct wined3d_context_vk *
                 }
                 else
                 {
+                    const struct wined3d_sampler *sampler;
+
+                    /* Whether sampling converts from sRGB is a property of the
+                     * view's format here, so a sampler asking for the
+                     * conversion to be skipped can only be honoured when the
+                     * view isn't an sRGB one. */
+                    if ((sampler = state->sampler[binding->shader_type][binding->resource_idx])
+                            && !sampler->desc.srgb_decode && wined3d_format_is_srgb(srv->format->id))
+                    {
+                        static unsigned int once;
+
+                        if (!once++)
+                            FIXME("Ignoring disabled sRGB decode for an sRGB view.\n");
+                    }
                     wined3d_texture_load(texture_from_resource(srv->resource), &context_vk->c, FALSE);
                 }
                 wined3d_shader_resource_view_vk_barrier(srv_vk, context_vk, WINED3D_BIND_SHADER_RESOURCE);

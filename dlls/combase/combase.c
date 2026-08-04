@@ -1876,7 +1876,13 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
     /* Finally try remote: this requires networked DCOM (a lot of work) */
     if (clscontext & CLSCTX_REMOTE_SERVER)
     {
-        FIXME ("CLSCTX_REMOTE_SERVER not supported\n");
+        /* Applications ask for every context at once; remote activation being
+         * one we don't do is only worth reporting when it was the only one
+         * asked for. */
+        if (clscontext & ~CLSCTX_REMOTE_SERVER)
+            WARN("CLSCTX_REMOTE_SERVER not supported\n");
+        else
+            FIXME("CLSCTX_REMOTE_SERVER not supported\n");
         hr = REGDB_E_CLASSNOTREG;
     }
 
