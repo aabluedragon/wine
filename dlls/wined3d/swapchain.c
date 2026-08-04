@@ -964,13 +964,19 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
         goto fail;
     }
 
-    image_count = desc->backbuffer_count;
+    /* Two images are enough to present, but not to present without waiting:
+     * the presentation engine holds on to one image while it is on screen, so
+     * the application ends up blocked in vkAcquireNextImageKHR for the rest of
+     * the refresh interval every time it gets ahead. That is felt as stutter
+     * rather than as a lower frame rate, because only some frames wait. Ask
+     * for a third image so there is always one free to draw into. */
+    image_count = max(desc->backbuffer_count, 3);
     if (image_count < surface_caps.minImageCount)
         image_count = surface_caps.minImageCount;
     else if (surface_caps.maxImageCount && image_count > surface_caps.maxImageCount)
         image_count = surface_caps.maxImageCount;
 
-    if (image_count != desc->backbuffer_count)
+    if (image_count < desc->backbuffer_count)
         WARN("Image count %u is not supported (%u-%u).\n", desc->backbuffer_count,
                 surface_caps.minImageCount, surface_caps.maxImageCount);
 
