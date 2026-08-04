@@ -418,6 +418,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 @property (readwrite, nonatomic) BOOL noForeground;
 @property (readwrite, nonatomic) BOOL preventsAppActivation;
 @property (readwrite, nonatomic) BOOL floating;
+@property (readwrite, nonatomic) BOOL wineFullscreen;
 @property (readwrite, nonatomic) BOOL drawnSinceShown;
 @property (readwrite, nonatomic) BOOL closing;
 @property (readwrite, getter=isFakingClose, nonatomic) BOOL fakingClose;
@@ -1054,6 +1055,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     static WineWindow* causing_becomeKeyWindow;
 
     @synthesize disabled, noForeground, preventsAppActivation, floating, fullscreen, fakingClose, closing, latentParentWindow, hwnd, queue;
+    @synthesize wineFullscreen;
     @synthesize drawnSinceShown;
     @synthesize shapeChangedSinceLastDraw;
     @synthesize usePerPixelAlpha;
@@ -2507,10 +2509,14 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     {
         // If a window is sized to completely cover a screen, then it's in
         // full-screen mode.  In that case, we don't allow NSWindow to constrain
-        // it.
+        // it.  The same goes for a window Wine considers fullscreen but which
+        // doesn't cover a screen, which happens when Wine reports a display
+        // mode the display can't actually be set to: pushing such a window
+        // below the menu bar would leave what it presents clipped, since the
+        // rect it presents into is positioned against the display.
         NSArray* screens = [NSScreen screens];
         NSRect contentRect = [self contentRectForFrameRect:frameRect];
-        if (!screen_covered_by_rect(contentRect, screens) &&
+        if (!wineFullscreen && !screen_covered_by_rect(contentRect, screens) &&
             frame_intersects_screens(frameRect, screens))
             frameRect = [super constrainFrameRect:frameRect toScreen:screen];
         return frameRect;
@@ -3568,11 +3574,12 @@ void macdrv_hide_cocoa_window(macdrv_window w)
  *
  * Move a Cocoa window.
  */
-void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
+void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame, int fullscreen)
 {
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
+        window.wineFullscreen = !!fullscreen;
         [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
     });
 }

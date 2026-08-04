@@ -750,7 +750,8 @@ RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp)
  *
  * Synchronize the Mac window position with the Windows one
  */
-static void sync_window_position(struct macdrv_win_data *data, UINT swp_flags, const struct window_rects *old_rects)
+static void sync_window_position(struct macdrv_win_data *data, UINT swp_flags, BOOL fullscreen,
+                                 const struct window_rects *old_rects)
 {
     CGRect frame = cgrect_from_rect(data->rects.visible);
 
@@ -762,7 +763,7 @@ static void sync_window_position(struct macdrv_win_data *data, UINT swp_flags, c
         if (frame.size.width < 1 || frame.size.height < 1)
             frame.size.width = frame.size.height = 1;
 
-        macdrv_set_cocoa_window_frame(data->cocoa_window, &frame);
+        macdrv_set_cocoa_window_frame(data->cocoa_window, &frame, fullscreen);
     }
 
     if (old_rects &&
@@ -1678,7 +1679,7 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
         (thread_data->current_event->type != WINDOW_FRAME_CHANGED &&
          thread_data->current_event->type != WINDOW_DID_UNMINIMIZE))
     {
-        sync_window_position(data, swp_flags, &old_rects);
+        sync_window_position(data, swp_flags, fullscreen, &old_rects);
         if (data->cocoa_window)
             set_cocoa_window_properties(data);
     }
@@ -2114,7 +2115,7 @@ void macdrv_reassert_window_position(HWND hwnd)
     if (data)
     {
         if (data->cocoa_window && data->on_screen)
-            sync_window_position(data, SWP_NOZORDER | SWP_NOACTIVATE, NULL);
+            sync_window_position(data, SWP_NOZORDER | SWP_NOACTIVATE, data->fullscreen, NULL);
         release_win_data(data);
     }
 }
