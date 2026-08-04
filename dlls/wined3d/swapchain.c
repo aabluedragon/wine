@@ -745,6 +745,13 @@ static VkFormat get_swapchain_fallback_format(VkFormat vk_format)
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
         case VK_FORMAT_R16G16B16A16_SFLOAT:
+        /* 16 bit modes are common in older applications, and are not usually
+         * presentable; display them through a 32 bit swapchain. */
+        case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_B5G6R5_UNORM_PACK16:
+        case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+        case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+        case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
             return VK_FORMAT_B8G8R8A8_UNORM;
         default:
             WARN("Unhandled format %#x.\n", vk_format);
