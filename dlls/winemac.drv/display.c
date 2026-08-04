@@ -699,14 +699,34 @@ static const struct { DWORD width, height; } legacy_modes[] =
 static DEVMODEW emulated_mode;
 static BOOL emulated_mode_active;
 
-static BOOL is_legacy_mode(DWORD width, DWORD height)
+/* Whether the display really is at the given size right now. macOS refuses to
+ * switch modes while the application isn't the active one and just remembers
+ * the mode for later, so a mode change reported as successful doesn't mean the
+ * display followed. */
+static BOOL display_is_at_size(CGDirectDisplayID display_id, DWORD width, DWORD height)
 {
-    unsigned int i;
+    CGDisplayModeRef display_mode;
+    size_t mode_width, mode_height;
 
-    for (i = 0; i < ARRAY_SIZE(legacy_modes); i++)
-        if (legacy_modes[i].width == width && legacy_modes[i].height == height)
-            return TRUE;
-    return FALSE;
+    if (!(display_mode = CGDisplayCopyDisplayMode(display_id)))
+        return FALSE;
+
+    mode_width = CGDisplayModeGetWidth(display_mode);
+    mode_height = CGDisplayModeGetHeight(display_mode);
+    if (retina_enabled)
+    {
+        struct display_mode_descriptor *desc = create_original_display_mode_descriptor(display_id);
+
+        if (display_mode_matches_descriptor(display_mode, desc))
+        {
+            mode_width *= 2;
+            mode_height *= 2;
+        }
+        free_display_mode_descriptor(desc);
+    }
+    CGDisplayModeRelease(display_mode);
+
+    return mode_width == width && mode_height == height;
 }
 
 static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef display_modes, int bpp, struct display_mode_descriptor *desc)
@@ -810,30 +830,28 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
         TRACE(" %sinterlaced", mode->dmDisplayFlags & DM_INTERLACED ? "" : "non-");
         TRACE("\n");
 
-        if (!(best_display_mode = find_best_display_mode(mode, display_modes, bpp, desc)))
-        {
-            if (is_legacy_mode(mode->dmPelsWidth, mode->dmPelsHeight))
-            {
-                /* The display can't be switched to it, keep the real mode and
-                 * report the requested one to the application. */
-                TRACE("emulating legacy mode %ux%u\n", mode->dmPelsWidth, mode->dmPelsHeight);
-                emulated_mode = *mode;
-                emulated_mode_active = TRUE;
-            }
-            else
-            {
-                ERR("No matching mode found %ux%ux%d @%u!\n", mode->dmPelsWidth, mode->dmPelsHeight,
-                    bpp, mode->dmDisplayFrequency);
-                ret = DISP_CHANGE_BADMODE;
-            }
-        }
-        else if (!macdrv_set_display_mode(CGMainDisplayID(), best_display_mode))
+        if ((best_display_mode = find_best_display_mode(mode, display_modes, bpp, desc))
+                && !macdrv_set_display_mode(CGMainDisplayID(), best_display_mode))
         {
             WARN("Failed to set display mode\n");
             ret = DISP_CHANGE_FAILED;
         }
-        else
+        else if (display_is_at_size(CGMainDisplayID(), mode->dmPelsWidth, mode->dmPelsHeight))
+        {
             emulated_mode_active = FALSE;
+        }
+        else
+        {
+            /* Either the display has no such mode at all, or macOS deferred the
+             * switch. Keep the real mode and report the requested one; the
+             * application gets a window of the size it asked for either way.
+             * Applications do check this: SDL compares the size of the primary
+             * DirectDraw surface against the mode it just set and gives up when
+             * they disagree. */
+            TRACE("emulating mode %ux%u\n", mode->dmPelsWidth, mode->dmPelsHeight);
+            emulated_mode = *mode;
+            emulated_mode_active = TRUE;
+        }
     }
 
     free_display_mode_descriptor(desc);
