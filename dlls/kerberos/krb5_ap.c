@@ -130,8 +130,11 @@ static NTSTATUS NTAPI kerberos_LsaApInitializePackage(ULONG package_id, PLSA_DIS
 
     if (!__wine_unixlib_handle)
     {
+        /* Kerberos is an optional dependency; without it this package simply
+         * isn't one that can be used, which callers find out when they try to
+         * acquire credentials with it. */
         if (__wine_init_unix_call() || KRB5_CALL( process_attach, NULL ))
-            ERR( "no Kerberos support, expect problems\n" );
+            WARN( "Kerberos is not supported by this installation\n" );
     }
 
     lsa_dispatch = *dispatch;

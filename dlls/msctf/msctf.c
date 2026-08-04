@@ -611,7 +611,11 @@ HRESULT WINAPI TF_GetThreadMgr(ITfThreadMgr **pptim)
  */
 HRESULT WINAPI SetInputScope(HWND hwnd, InputScope inputscope)
 {
-    FIXME("STUB: %p %i\n",hwnd,inputscope);
+    /* A hint about what will be typed into the window, for a text service to
+     * tailor its suggestions and for an on-screen keyboard to pick a layout.
+     * The host's input method doesn't take direction from us, and there is no
+     * on-screen keyboard, so there is nobody to pass the hint on to. */
+    TRACE("%p %i\n", hwnd, inputscope);
     return S_OK;
 }
 

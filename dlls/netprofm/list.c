@@ -189,7 +189,7 @@ static HRESULT WINAPI connection_point_Advise(
     IUnknown *unk;
     HRESULT hr;
 
-    FIXME( "%p, %p, %p - semi-stub\n", cp, sink, cookie );
+    TRACE( "%p, %p, %p\n", cp, sink, cookie );
 
     if (!sink || !cookie)
         return E_POINTER;
@@ -599,7 +599,10 @@ static ULONG WINAPI cost_manager_Release(
 static HRESULT WINAPI cost_manager_GetCost(
     INetworkCostManager *iface, DWORD *pCost, NLM_SOCKADDR *pDestIPAddr)
 {
-    FIXME( "%p, %p, %p\n", iface, pCost, pDestIPAddr );
+    /* Cost describes a metered connection with a data allowance, which is
+     * something we have no way of being told about and which none of the
+     * connections we report is treated as having. */
+    TRACE( "%p, %p, %p\n", iface, pCost, pDestIPAddr );
 
     if (!pCost) return E_POINTER;
 

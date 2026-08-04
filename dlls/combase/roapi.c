@@ -232,7 +232,7 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
     IActivationFactory *factory;
     HRESULT hr;
 
-    FIXME("(%p, %p): semi-stub\n", classid, instance);
+    TRACE("(%p, %p)\n", classid, instance);
 
     hr = RoGetActivationFactory(classid, &IID_IActivationFactory, (void **)&factory);
     if (SUCCEEDED(hr))

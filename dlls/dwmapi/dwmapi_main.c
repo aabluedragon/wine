@@ -100,10 +100,19 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
  */
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
-    static BOOL once;
+    TRACE("(%p, %lx, %p, %lx)\n", hwnd, attributenum, attribute, size);
 
-    if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
+    /* Everything settable here asks the compositor to treat a window
+     * differently - not to render its non-client area, to leave it out of
+     * Peek, to draw its title bar dark - and we have no compositor doing any
+     * of it in the first place. */
+    if (attributenum < DWMWA_NCRENDERING_POLICY || attributenum > DWMWA_TEXT_COLOR)
+    {
+        static BOOL once;
 
+        if (!once++) FIXME("Unknown attribute %lu.\n", attributenum);
+        return E_INVALIDARG;
+    }
     return S_OK;
 }
 
@@ -284,7 +293,10 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
     if (info->cbSize != sizeof(DWM_TIMING_INFO))
         return MILERR_MISMATCHED_SIZE;
 
-    if(!i++) FIXME("(%p %p)\n", hwnd, info);
+    /* The refresh rate, its period and the last vblank are filled in below;
+     * the composition counters and the frame statistics that follow them only
+     * mean something with a compositor keeping them. */
+    if(!i++) TRACE("(%p %p)\n", hwnd, info);
 
     memset(info, 0, info->cbSize);
     info->cbSize = sizeof(DWM_TIMING_INFO);

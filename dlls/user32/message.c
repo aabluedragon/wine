@@ -1214,6 +1214,19 @@ BOOL WINAPI ChangeWindowMessageFilter( UINT message, DWORD flag )
  */
 BOOL WINAPI ChangeWindowMessageFilterEx( HWND hwnd, UINT message, DWORD action, CHANGEFILTERSTRUCT *changefilter )
 {
-    FIXME( "%p %x %ld %p\n", hwnd, message, action, changefilter );
+    /* The filter this adjusts only exists to stop messages crossing from a
+     * lower integrity level, and we run everything at the same one, so nothing
+     * is being blocked for it to let through. */
+    TRACE( "%p %x %ld %p\n", hwnd, message, action, changefilter );
+
+    if (changefilter)
+    {
+        if (changefilter->cbSize != sizeof(*changefilter))
+        {
+            SetLastError( ERROR_INVALID_PARAMETER );
+            return FALSE;
+        }
+        changefilter->ExtStatus = MSGFLTINFO_NONE;
+    }
     return TRUE;
 }

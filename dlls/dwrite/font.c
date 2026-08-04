@@ -38,6 +38,7 @@ WINE_DECLARE_DEBUG_CHANNEL(dwrite_file);
 #define MS_VDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('V','D','M','X')
 #define MS_GASP_TAG DWRITE_MAKE_OPENTYPE_TAG('g','a','s','p')
 #define MS_CPAL_TAG DWRITE_MAKE_OPENTYPE_TAG('C','P','A','L')
+#define MS_FVAR_TAG DWRITE_MAKE_OPENTYPE_TAG('f','v','a','r')
 #define MS_COLR_TAG DWRITE_MAKE_OPENTYPE_TAG('C','O','L','R')
 
 static const FLOAT RECOMMENDED_OUTLINE_AA_THRESHOLD = 100.0f;
@@ -1950,12 +1951,21 @@ static HRESULT WINAPI dwritefontface5_GetFontAxisValues(IDWriteFontFace5 *iface,
 
 static BOOL WINAPI dwritefontface5_HasVariations(IDWriteFontFace5 *iface)
 {
-    static int once;
+    BOOL exists = FALSE;
+    const void *data;
+    void *context;
+    UINT32 size;
 
-    if (!once++)
-        FIXME("%p: stub\n", iface);
+    TRACE("%p.\n", iface);
 
-    return FALSE;
+    /* A variable font is one carrying the axis definitions an instance can be
+     * varied along. */
+    if (FAILED(IDWriteFontFace5_TryGetFontTable(iface, MS_FVAR_TAG, &data, &size, &context, &exists)))
+        return FALSE;
+    if (exists)
+        IDWriteFontFace5_ReleaseFontTable(iface, context);
+
+    return exists;
 }
 
 static HRESULT WINAPI dwritefontface5_GetFontResource(IDWriteFontFace5 *iface, IDWriteFontResource **resource)
