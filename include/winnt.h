@@ -1050,6 +1050,7 @@ NTSYSAPI WORD         WINAPI RtlQueryDepthSList(PSLIST_HEADER);
 
 typedef enum _HEAP_INFORMATION_CLASS {
     HeapCompatibilityInformation,
+    HeapEnableTerminationOnCorruption,
 } HEAP_INFORMATION_CLASS;
 
 /* Processor feature flags.  */
