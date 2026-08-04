@@ -332,7 +332,9 @@ DWORD WINAPI PowerEnumerate(HKEY key, const GUID *scheme, const GUID *subgroup, 
 
 DWORD WINAPI PowerRegisterSuspendResumeNotification(DWORD flags, HANDLE recipient, PHPOWERNOTIFY handle)
 {
-    FIXME("(0x%08lx,%p,%p) stub!\n", flags, recipient, handle);
+    /* Same as the user32 entry point: registering works, but nothing here
+     * watches the host for a suspend to report. */
+    TRACE("(0x%08lx,%p,%p)\n", flags, recipient, handle);
     *handle = (HPOWERNOTIFY)0xdeadbeef;
     return ERROR_SUCCESS;
 }

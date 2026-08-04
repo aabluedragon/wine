@@ -1302,7 +1302,9 @@ BOOLEAN WINAPI ShouldAppsUseDarkMode(void)
  */
 BOOLEAN WINAPI AllowDarkModeForWindow(HWND hwnd, BOOLEAN allow)
 {
-    FIXME("%p %d: stub\n", hwnd, allow);
+    /* Opts a window into the dark variant of the theme drawing. We have no
+     * dark variant to opt it into, which is what returning FALSE says. */
+    TRACE("%p %d\n", hwnd, allow);
     return FALSE;
 }
 
@@ -1312,7 +1314,9 @@ BOOLEAN WINAPI AllowDarkModeForWindow(HWND hwnd, BOOLEAN allow)
  */
 int WINAPI SetPreferredAppMode(int app_mode)
 {
-    FIXME("%d: stub\n", app_mode);
+    /* Returns the mode that was in effect before, which stays the default one
+     * as long as we have no dark theme to switch to. */
+    TRACE("%d\n", app_mode);
     return 0;
 }
 

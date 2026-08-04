@@ -683,7 +683,9 @@ BOOL WINAPI WTSQueryUserConfigW(LPWSTR pServerName, LPWSTR pUserName, WTS_CONFIG
  */
 BOOL WINAPI WTSRegisterSessionNotification(HWND hWnd, DWORD dwFlags)
 {
-    FIXME("Stub %p 0x%08lx\n", hWnd, dwFlags);
+    /* Asks to hear about the session being locked, or switched away from.
+     * There is one session here and nothing switches between them. */
+    TRACE("%p 0x%08lx\n", hWnd, dwFlags);
     return TRUE;
 }
 

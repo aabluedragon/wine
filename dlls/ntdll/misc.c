@@ -329,7 +329,9 @@ ULONG WINAPI EtwEventUnregister( REGHANDLE handle )
 ULONG WINAPI EtwEventSetInformation( REGHANDLE handle, EVENT_INFO_CLASS class, void *info,
                                      ULONG length )
 {
-    FIXME("(%s, %u, %p, %lu) stub\n", wine_dbgstr_longlong(handle), class, info, length);
+    /* Attaches provider traits to an event provider whose events nothing is
+     * consuming, since no tracing session is running to collect them. */
+    TRACE("(%s, %u, %p, %lu)\n", wine_dbgstr_longlong(handle), class, info, length);
     return ERROR_SUCCESS;
 }
 

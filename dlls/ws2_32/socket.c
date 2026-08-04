@@ -3462,7 +3462,9 @@ int WINAPI setsockopt( SOCKET s, int level, int optname, const char *optval, int
             return 0;
 
         case SO_RANDOMIZE_PORT:
-            FIXME("Ignoring SO_RANDOMIZE_PORT\n");
+            /* Asks for the ephemeral port to be picked unpredictably, which is
+             * what the host's TCP stack does with them anyway. */
+            TRACE("SO_RANDOMIZE_PORT is the host's behaviour already\n");
             return 0;
 
         case SO_PORT_SCALABILITY:

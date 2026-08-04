@@ -933,7 +933,17 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    /* None of these mitigations are applied to a process here, so report them
+     * all as off. The buffer was left untouched before, leaving the caller to
+     * read whatever happened to be in it. */
+    TRACE( "(%p, %u, %p, %Iu)\n", process, policy, buffer, length );
+
+    if (!buffer || !length)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    memset( buffer, 0, length );
     return TRUE;
 }
 

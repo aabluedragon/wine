@@ -1618,7 +1618,10 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p %p): stub\n", process, length, name );
+    /* Package identity belongs to applications delivered as an app package.
+     * Everything here is run from a plain directory, which is what having no
+     * package means. */
+    TRACE( "(%p %p %p)\n", process, length, name );
     return APPMODEL_ERROR_NO_PACKAGE;
 }
 
