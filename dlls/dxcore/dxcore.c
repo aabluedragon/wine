@@ -194,7 +194,10 @@ static HRESULT STDMETHODCALLTYPE dxcore_adapter_GetProperty(IDXCoreAdapter *ifac
             break;
 
         case IsHardware:
-            FIXME("Returning all adapters as Hardware.\n");
+            /* Every adapter we enumerate is one wined3d found through the
+             * host's graphics driver; we have no software rasteriser to
+             * enumerate alongside them. */
+            TRACE("Reporting the adapter as hardware.\n");
             *(BYTE *)buffer = 1;
             break;
 

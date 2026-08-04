@@ -1850,7 +1850,10 @@ static void init_networks( struct list_manager *mgr )
     IP_ADAPTER_ADDRESSES *buf, *aa;
     GUID id;
 
-    FIXME( "no support for detecting network changes\n" );
+    /* The list is built once from the adapters present now; we have nothing
+     * watching for one appearing or going away afterwards, so a sink advised
+     * of changes will never hear about them. */
+    WARN( "no support for detecting network changes\n" );
 
     list_init( &mgr->networks );
     list_init( &mgr->connections );

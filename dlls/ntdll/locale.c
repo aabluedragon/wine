@@ -201,7 +201,9 @@ static NTSTATUS get_dummy_preferred_ui_language( DWORD flags, LANGID lang, ULONG
     NTSTATUS status;
     ULONG len;
 
-    FIXME("(0x%lx %#x %p %p %p) returning a dummy value (current locale)\n", flags, lang, count, buffer, size);
+    /* Nothing here configures a list of languages to fall back through, so the
+     * UI language is the whole of what is preferred. */
+    TRACE("(0x%lx %#x %p %p %p)\n", flags, lang, count, buffer, size);
 
     if (flags & MUI_LANGUAGE_ID) swprintf( name, ARRAY_SIZE(name), L"%04lX", lang );
     else
@@ -242,7 +244,7 @@ NTSTATUS WINAPI RtlGetProcessPreferredUILanguages( DWORD flags, ULONG *count, WC
 {
     LANGID ui_language;
 
-    FIXME( "%08lx, %p, %p %p\n", flags, count, buffer, size );
+    TRACE( "%08lx, %p, %p %p\n", flags, count, buffer, size );
 
     NtQueryDefaultUILanguage( &ui_language );
     return get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
@@ -273,7 +275,7 @@ NTSTATUS WINAPI RtlGetThreadPreferredUILanguages( DWORD flags, ULONG *count, WCH
 {
     LANGID ui_language;
 
-    FIXME( "%08lx, %p, %p %p\n", flags, count, buffer, size );
+    TRACE( "%08lx, %p, %p %p\n", flags, count, buffer, size );
 
     NtQueryDefaultUILanguage( &ui_language );
     return get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
