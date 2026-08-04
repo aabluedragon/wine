@@ -1803,7 +1803,7 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         if (FAILED(hr))
         {
             if (hr == REGDB_E_CLASSNOTREG)
-                ERR("class %s not registered\n", debugstr_guid(rclsid));
+                WARN("class %s not registered\n", debugstr_guid(rclsid));
             else if (hr == REGDB_E_KEYMISSING)
             {
                 WARN("class %s not registered as in-proc server\n", debugstr_guid(rclsid));
@@ -1838,7 +1838,7 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         if (FAILED(hr))
         {
             if (hr == REGDB_E_CLASSNOTREG)
-                ERR("class %s not registered\n", debugstr_guid(rclsid));
+                WARN("class %s not registered\n", debugstr_guid(rclsid));
             else if (hr == REGDB_E_KEYMISSING)
             {
                 WARN("class %s not registered in-proc handler\n", debugstr_guid(rclsid));
@@ -1880,7 +1880,9 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         hr = REGDB_E_CLASSNOTREG;
     }
 
-    if (FAILED(hr))
+    if (hr == REGDB_E_CLASSNOTREG || hr == CLASS_E_CLASSNOTAVAILABLE || hr == CO_E_DLLNOTFOUND)
+        WARN("class %s is not available in context %#lx\n", debugstr_guid(rclsid), clscontext);
+    else if (FAILED(hr))
         ERR("no class object %s could be created for context %#lx\n", debugstr_guid(rclsid), clscontext);
 
     return hr;
@@ -1920,7 +1922,7 @@ HRESULT WINAPI DECLSPEC_HOTPATCH CoCreateInstanceEx(REFCLSID rclsid, IUnknown *o
     {
         if (hr == CLASS_E_NOAGGREGATION && outer)
             FIXME("Class %s does not support aggregation\n", debugstr_guid(&clsid));
-        else if (hr == CLASS_E_CLASSNOTAVAILABLE || hr == REGDB_E_CLASSNOTREG)
+        else if (hr == CLASS_E_CLASSNOTAVAILABLE || hr == REGDB_E_CLASSNOTREG || hr == CO_E_DLLNOTFOUND)
             /* The class told us it isn't available here; that is an answer, not
              * something left to implement. */
             WARN("class %s is not available, hr %#lx.\n", debugstr_guid(&clsid), hr);

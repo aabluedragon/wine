@@ -1344,7 +1344,7 @@ static HRESULT autoplug(struct filter_graph *graph, IPin *source, IPin *sink,
         {
             /* A filter can be registered without being installed, in which case
              * it is simply not one of the filters available to us here. */
-            if (hr == REGDB_E_CLASSNOTREG || hr == CLASS_E_CLASSNOTAVAILABLE)
+            if (hr == REGDB_E_CLASSNOTREG || hr == CLASS_E_CLASSNOTAVAILABLE || hr == CO_E_DLLNOTFOUND)
                 WARN("Filter %s is not available, skipping it.\n", debugstr_w(V_BSTR(&var)));
             else
                 ERR("Failed to create filter for %s, hr %#lx.\n", debugstr_w(V_BSTR(&var)), hr);

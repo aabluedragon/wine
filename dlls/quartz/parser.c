@@ -30,7 +30,7 @@ static HRESULT create_wg_filter(const GUID *clsid, IUnknown *outer, IUnknown **o
 {
     HRESULT hr = CoCreateInstance(clsid, outer, CLSCTX_INPROC_SERVER, &IID_IUnknown, (void **)out);
 
-    if (FAILED(hr) && hr != CLASS_E_NOAGGREGATION)
+    if (FAILED(hr) && hr != CLASS_E_NOAGGREGATION)  /* aggregation is the caller's problem */
     {
         WARN("Failed to create GStreamer filter %s, hr %#lx.\n", debugstr_guid(clsid), hr);
         return CLASS_E_CLASSNOTAVAILABLE;

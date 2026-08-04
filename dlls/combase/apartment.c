@@ -130,9 +130,18 @@ static HRESULT apartment_add_dll(const WCHAR *library_name, struct opendll **ret
     hLibrary = LoadLibraryExW(library_name, 0, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!hLibrary)
     {
-        ERR("couldn't load in-process dll %s\n", debugstr_w(library_name));
-        /* failure: DLL could not be loaded */
-        return E_ACCESSDENIED; /* FIXME: or should this be CO_E_DLLNOTFOUND? */
+        DWORD err = GetLastError();
+
+        /* A class can be registered against a DLL that isn't installed, which
+         * is what CO_E_DLLNOTFOUND describes and is not the same as the DLL
+         * being there and refusing to load. */
+        if (err == ERROR_MOD_NOT_FOUND || err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+        {
+            WARN("in-process dll %s is not installed\n", debugstr_w(library_name));
+            return CO_E_DLLNOTFOUND;
+        }
+        ERR("couldn't load in-process dll %s, error %lu\n", debugstr_w(library_name), err);
+        return E_ACCESSDENIED;
     }
 
     /* DllCanUnloadNow is optional */
