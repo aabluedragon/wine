@@ -217,6 +217,21 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         SetThreadDpiAwarenessContext(context);
         break;
     }
+    case DWMWA_CLOAKED:
+    {
+        /* Cloaking is a compositor feature we don't have, so nothing we show
+         * is ever cloaked. */
+        DWORD *cloaked = pv_attribute;
+
+        if (!cloaked)
+            return E_INVALIDARG;
+        if (size < sizeof(*cloaked))
+            return E_NOT_SUFFICIENT_BUFFER;
+
+        *cloaked = 0;
+        hr = S_OK;
+        break;
+    }
     default:
         FIXME("attribute %ld not implemented.\n", attribute);
         hr = E_NOTIMPL;

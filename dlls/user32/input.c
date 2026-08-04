@@ -675,7 +675,15 @@ BOOL WINAPI IsTouchWindow( HWND hwnd, ULONG *flags )
  */
 BOOL WINAPI RegisterTouchWindow( HWND hwnd, ULONG flags )
 {
-    FIXME( "hwnd %p, flags %#lx stub!\n", hwnd, flags );
+    /* Registering succeeds, but there is no touch digitizer behind it, so the
+     * window will never be sent a WM_TOUCH. */
+    TRACE( "hwnd %p, flags %#lx.\n", hwnd, flags );
+
+    if (!IsWindow( hwnd ))
+    {
+        SetLastError( ERROR_INVALID_WINDOW_HANDLE );
+        return FALSE;
+    }
     return TRUE;
 }
 
