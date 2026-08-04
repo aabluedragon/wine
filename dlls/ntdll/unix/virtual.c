@@ -6899,11 +6899,11 @@ static NTSTATUS prefetch_memory( HANDLE process, ULONG_PTR count,
     SIZE_T size;
     static unsigned int once;
 
+    /* Prefetching is a hint that these pages are about to be touched, so the
+     * mapping is brought in ahead of the faults. Not acting on it costs the
+     * faults it would have saved and nothing else. */
     if (!once++)
-    {
-        FIXME( "(process=%p,flags=%u) NtSetInformationVirtualMemory(VmPrefetchInformation) partial stub\n",
-                process, flags );
-    }
+        WARN( "(process=%p,flags=%u) not prefetching\n", process, flags );
 
     for (i = 0; i < count; i++)
     {

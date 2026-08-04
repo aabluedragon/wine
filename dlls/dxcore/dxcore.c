@@ -91,7 +91,18 @@ static BOOL STDMETHODCALLTYPE dxcore_adapter_IsValid(IDXCoreAdapter *iface)
 
 static BOOL STDMETHODCALLTYPE dxcore_adapter_IsAttributeSupported(IDXCoreAdapter *iface, REFGUID attribute)
 {
-    FIXME("iface %p, attribute %s stub!\n", iface, debugstr_guid(attribute));
+    TRACE("iface %p, attribute %s\n", iface, debugstr_guid(attribute));
+
+    /* Every adapter we enumerate is reached through wined3d and vkd3d, which
+     * is what these two attributes ask about. */
+    if (IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D11_GRAPHICS)
+            || IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D12_GRAPHICS))
+        return TRUE;
+
+    if (IsEqualGUID(attribute, &DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE))
+        return TRUE;
+
+    FIXME("Unknown attribute %s.\n", debugstr_guid(attribute));
     return FALSE;
 }
 
@@ -524,8 +535,11 @@ static HRESULT STDMETHODCALLTYPE dxcore_adapter_factory_CreateAdapterList(IDXCor
     struct dxcore_adapter_list *list;
     HRESULT hr;
 
-    FIXME("iface %p, num_attributes %u, filter_attributes %p, riid %s, out %p semi-stub!\n", iface, num_attributes, filter_attributes,
-            debugstr_guid(riid), out);
+    /* The filter selects adapters by attribute, and the one adapter we
+     * enumerate carries every attribute we know about, so it belongs in the
+     * list whichever of them was asked for. */
+    TRACE("iface %p, num_attributes %u, filter_attributes %p, riid %s, out %p\n", iface, num_attributes,
+            filter_attributes, debugstr_guid(riid), out);
 
     if (!out)
         return E_POINTER;

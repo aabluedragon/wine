@@ -1125,6 +1125,23 @@ BOOL WINAPI GetProcessInformation( HANDLE process, PROCESS_INFORMATION_CLASS inf
 
             break;
         }
+        case ProcessPowerThrottling:
+        {
+            PROCESS_POWER_THROTTLING_STATE *state = data;
+
+            if (size != sizeof(*state))
+            {
+                SetLastError(ERROR_BAD_LENGTH);
+                return FALSE;
+            }
+            /* Asks whether the process opted into being scheduled for battery
+             * life over speed. macOS decides that from its own energy policy
+             * and takes no such request from us. */
+            state->Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            state->ControlMask = 0;
+            state->StateMask = 0;
+            return TRUE;
+        }
         default:
             FIXME("Unsupported information class %d.\n", info_class);
     }
