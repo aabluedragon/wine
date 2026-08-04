@@ -18,10 +18,12 @@
  */
 
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
+#include "winuser.h"
 #include "wine/debug.h"
 #include "avrt.h"
 
@@ -54,12 +56,54 @@ HANDLE WINAPI AvSetMmThreadCharacteristicsA(const char *name, DWORD *index)
     return ret;
 }
 
+/* The tasks the Multimedia Class Scheduler Service knows about by default.
+ * Windows looks them up under
+ * SYSTEM\\CurrentControlSet\\Control\\MultimediaSettings\\SystemProfile\\Tasks. */
+static const WCHAR *const mmcss_tasks[] =
+{
+    L"Audio", L"Capture", L"DisplayPostProcessing", L"Distribution",
+    L"Games", L"Playback", L"Pro Audio", L"Window Manager",
+};
+
+struct mm_thread
+{
+    DWORD magic;
+    int old_priority;
+};
+
+#define MM_THREAD_MAGIC 0x41565254 /* "AVRT" */
+
+static struct mm_thread *mm_thread_from_handle(HANDLE handle)
+{
+    struct mm_thread *thread = handle;
+
+    if (!thread || thread->magic != MM_THREAD_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+    return thread;
+}
+
 HANDLE WINAPI AvSetMmThreadCharacteristicsW(const WCHAR *name, DWORD *index)
 {
-    FIXME("(%s,%p): stub\n", debugstr_w(name), index);
+    struct mm_thread *thread;
+    unsigned int i;
+
+    TRACE("(%s,%p)\n", debugstr_w(name), index);
 
     if (!name)
     {
+        SetLastError(ERROR_INVALID_TASK_NAME);
+        return NULL;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(mmcss_tasks); i++)
+        if (!wcsicmp(name, mmcss_tasks[i])) break;
+
+    if (i == ARRAY_SIZE(mmcss_tasks))
+    {
+        WARN("Unknown task %s.\n", debugstr_w(name));
         SetLastError(ERROR_INVALID_TASK_NAME);
         return NULL;
     }
@@ -70,7 +114,20 @@ HANDLE WINAPI AvSetMmThreadCharacteristicsW(const WCHAR *name, DWORD *index)
         return NULL;
     }
 
-    return (HANDLE)0x12345678;
+    if (!(thread = malloc(sizeof(*thread))))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    thread->magic = MM_THREAD_MAGIC;
+    thread->old_priority = GetThreadPriority(GetCurrentThread());
+
+    /* Registering alone doesn't change the priority on Windows either; it only
+     * makes the thread eligible for the guaranteed share of CPU time that we
+     * have no way of reserving. AvSetMmThreadPriority() is what asks for a
+     * priority, and that we can do. */
+    *index = i + 1;
+    return thread;
 }
 
 BOOL WINAPI AvQuerySystemResponsiveness(HANDLE AvrtHandle, ULONG *value)
@@ -81,14 +138,39 @@ BOOL WINAPI AvQuerySystemResponsiveness(HANDLE AvrtHandle, ULONG *value)
 
 BOOL WINAPI AvRevertMmThreadCharacteristics(HANDLE AvrtHandle)
 {
-    FIXME("(%p): stub\n", AvrtHandle);
+    struct mm_thread *thread;
+
+    TRACE("(%p)\n", AvrtHandle);
+
+    if (!(thread = mm_thread_from_handle(AvrtHandle))) return FALSE;
+
+    SetThreadPriority(GetCurrentThread(), thread->old_priority);
+    thread->magic = 0;
+    free(thread);
     return TRUE;
 }
 
 BOOL WINAPI AvSetMmThreadPriority(HANDLE AvrtHandle, AVRT_PRIORITY prio)
 {
-    FIXME("(%p)->(%u) stub\n", AvrtHandle, prio);
-    return TRUE;
+    int priority;
+
+    TRACE("(%p)->(%d)\n", AvrtHandle, prio);
+
+    if (!mm_thread_from_handle(AvrtHandle)) return FALSE;
+
+    switch (prio)
+    {
+    case AVRT_PRIORITY_VERYLOW:  priority = THREAD_PRIORITY_LOWEST; break;
+    case AVRT_PRIORITY_LOW:      priority = THREAD_PRIORITY_BELOW_NORMAL; break;
+    case AVRT_PRIORITY_NORMAL:   priority = THREAD_PRIORITY_NORMAL; break;
+    case AVRT_PRIORITY_HIGH:     priority = THREAD_PRIORITY_ABOVE_NORMAL; break;
+    case AVRT_PRIORITY_CRITICAL: priority = THREAD_PRIORITY_HIGHEST; break;
+    default:
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return SetThreadPriority(GetCurrentThread(), priority);
 }
 
 HANDLE WINAPI AvSetMmMaxThreadCharacteristicsA(const char *task1, const char *task2, DWORD *index)
@@ -117,7 +199,7 @@ HANDLE WINAPI AvSetMmMaxThreadCharacteristicsA(const char *task1, const char *ta
 
 HANDLE WINAPI AvSetMmMaxThreadCharacteristicsW(const WCHAR *task1, const WCHAR *task2, DWORD *index)
 {
-    FIXME("(%s,%s,%p): stub\n", debugstr_w(task1), debugstr_w(task2), index);
+    TRACE("(%s,%s,%p)\n", debugstr_w(task1), debugstr_w(task2), index);
 
     if (!task1 || task2)
     {
@@ -125,11 +207,5 @@ HANDLE WINAPI AvSetMmMaxThreadCharacteristicsW(const WCHAR *task1, const WCHAR *
         return NULL;
     }
 
-    if (!index)
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return NULL;
-    }
-
-    return (HANDLE)0x12345678;
+    return AvSetMmThreadCharacteristicsW(task1, index);
 }
