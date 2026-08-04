@@ -205,7 +205,7 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
     void *mapping = NULL;
     VkResult res;
 
-    if (!once++) FIXME( "Using VK_EXT_external_memory_host\n" );
+    if (!once++) TRACE( "Using VK_EXT_external_memory_host.\n" );
 
     if (NtAllocateVirtualMemory( GetCurrentProcess(), &mapping, zero_bits, &alloc_size, MEM_COMMIT, PAGE_READWRITE ))
     {

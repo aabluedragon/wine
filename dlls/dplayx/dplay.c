@@ -4961,8 +4961,9 @@ static void DP_ReadConnections( const char *searchSubKey, DWORD dwFlags,
   if( RegOpenKeyExA( HKEY_LOCAL_MACHINE, searchSubKey,
                      0, KEY_READ, &hkResult ) != ERROR_SUCCESS )
   {
-    /* Hmmm. Does this mean that there are no service providers? */
-    ERR(": no service providers?\n");
+    /* The key is only there once something has registered a provider of this
+     * kind; none being installed is a normal state, not a failure. */
+    TRACE( ": no providers registered under %s\n", debugstr_a( searchSubKey ) );
     return;
   }
 

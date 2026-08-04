@@ -1517,7 +1517,11 @@ static HRESULT WINAPI DECLSPEC_HOTPATCH ddraw_surface1_Flip(IDirectDrawSurface *
 
     ddraw_texture_rename_to(dst_ddraw_texture, texture, draw_texture, tmp_rtv, texture_memory, current_rtv);
 
-    if (flags & ~(DDFLIP_NOVSYNC | DDFLIP_INTERVAL2 | DDFLIP_INTERVAL3 | DDFLIP_INTERVAL4))
+    /* DDFLIP_WAIT and DDFLIP_DONOTWAIT only select what happens when the flip
+     * can't be queued yet. We always queue it and never fail with
+     * DDERR_WASSTILLDRAWING, so both are already honoured. */
+    if (flags & ~(DDFLIP_NOVSYNC | DDFLIP_INTERVAL2 | DDFLIP_INTERVAL3 | DDFLIP_INTERVAL4
+            | DDFLIP_WAIT | DDFLIP_DONOTWAIT))
     {
         static UINT once;
         if (!once++)
