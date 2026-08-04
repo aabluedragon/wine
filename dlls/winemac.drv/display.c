@@ -686,6 +686,29 @@ static BOOL is_detached_mode(const DEVMODEW *mode)
            mode->dmPelsHeight == 0;
 }
 
+/* Modern Macs don't offer the small resolutions that older games ask for -
+ * the smallest mode on an Apple Silicon display is far above 640x480 - and
+ * such games refuse to start when they can't find one. Report them anyway and
+ * emulate them: the display keeps its real mode and the game gets a window of
+ * the size it asked for. */
+static const struct { DWORD width, height; } legacy_modes[] =
+{
+    {320, 240}, {512, 384}, {640, 400}, {640, 480}, {800, 600}, {1024, 768},
+};
+
+static DEVMODEW emulated_mode;
+static BOOL emulated_mode_active;
+
+static BOOL is_legacy_mode(DWORD width, DWORD height)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(legacy_modes); i++)
+        if (legacy_modes[i].width == width && legacy_modes[i].height == height)
+            return TRUE;
+    return FALSE;
+}
+
 static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef display_modes, int bpp, struct display_mode_descriptor *desc)
 {
     CFIndex count, i, best;
@@ -789,15 +812,28 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
         if (!(best_display_mode = find_best_display_mode(mode, display_modes, bpp, desc)))
         {
-            ERR("No matching mode found %ux%ux%d @%u!\n", mode->dmPelsWidth, mode->dmPelsHeight,
-                bpp, mode->dmDisplayFrequency);
-            ret = DISP_CHANGE_BADMODE;
+            if (is_legacy_mode(mode->dmPelsWidth, mode->dmPelsHeight))
+            {
+                /* The display can't be switched to it, keep the real mode and
+                 * report the requested one to the application. */
+                TRACE("emulating legacy mode %ux%u\n", mode->dmPelsWidth, mode->dmPelsHeight);
+                emulated_mode = *mode;
+                emulated_mode_active = TRUE;
+            }
+            else
+            {
+                ERR("No matching mode found %ux%ux%d @%u!\n", mode->dmPelsWidth, mode->dmPelsHeight,
+                    bpp, mode->dmDisplayFrequency);
+                ret = DISP_CHANGE_BADMODE;
+            }
         }
         else if (!macdrv_set_display_mode(CGMainDisplayID(), best_display_mode))
         {
             WARN("Failed to set display mode\n");
             ret = DISP_CHANGE_FAILED;
         }
+        else
+            emulated_mode_active = FALSE;
     }
 
     free_display_mode_descriptor(desc);
@@ -831,7 +867,7 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
             modes_has_16bpp = TRUE;
     }
 
-    if (!(devmodes = calloc(count * 3, sizeof(DEVMODEW))))
+    if (!(devmodes = calloc(count * 3 + ARRAY_SIZE(legacy_modes) * 3, sizeof(DEVMODEW))))
     {
         CFRelease(modes);
         return NULL;
@@ -873,6 +909,30 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
         synth_count++;
     }
 
+    for (i = 0; i < count; i++)
+    {
+        static const DWORD depths[] = {32, 16, 8};
+        unsigned int j, k;
+
+        /* Synthesize the legacy modes from a single real mode. */
+        if (devmodes[i].dmBitsPerPel != default_bpp) continue;
+
+        for (j = 0; j < ARRAY_SIZE(legacy_modes); j++)
+        {
+            if (legacy_modes[j].width >= devmodes[i].dmPelsWidth) continue;
+
+            for (k = 0; k < ARRAY_SIZE(depths); k++)
+            {
+                devmodes[count + synth_count] = devmodes[i];
+                devmodes[count + synth_count].dmPelsWidth = legacy_modes[j].width;
+                devmodes[count + synth_count].dmPelsHeight = legacy_modes[j].height;
+                devmodes[count + synth_count].dmBitsPerPel = depths[k];
+                synth_count++;
+            }
+        }
+        break;
+    }
+
     CFRelease(modes);
     *modes_count = count + synth_count;
     return devmodes;
@@ -884,6 +944,21 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
     CGDirectDisplayID display_id;
 
     display_id = monitor->id;
+
+    if (emulated_mode_active && display_id == CGMainDisplayID())
+    {
+        devmode->dmPosition.x = CGRectGetMinX(monitor->rc_monitor);
+        devmode->dmPosition.y = CGRectGetMinY(monitor->rc_monitor);
+        devmode->dmPelsWidth = emulated_mode.dmPelsWidth;
+        devmode->dmPelsHeight = emulated_mode.dmPelsHeight;
+        devmode->dmBitsPerPel = emulated_mode.dmBitsPerPel;
+        devmode->dmDisplayFrequency = 60;
+        devmode->dmDisplayFlags = 0;
+        devmode->dmFields |= DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
+                | DM_DISPLAYFREQUENCY | DM_DISPLAYFLAGS;
+        return;
+    }
+
     display_mode = CGDisplayCopyDisplayMode(display_id);
 
     devmode->dmPosition.x = CGRectGetMinX(monitor->rc_monitor);
