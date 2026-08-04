@@ -2080,6 +2080,7 @@ enum wined3d_pci_vendor
 {
     HW_VENDOR_SOFTWARE              = 0x0000,
     HW_VENDOR_AMD                   = 0x1002,
+    HW_VENDOR_APPLE                 = 0x106b,
     HW_VENDOR_NVIDIA                = 0x10de,
     HW_VENDOR_VMWARE                = 0x15ad,
     HW_VENDOR_REDHAT                = 0x1af4,

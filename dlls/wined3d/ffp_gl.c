@@ -1535,7 +1535,8 @@ static void prune_invalid_states(struct wined3d_state_entry *state_table, const 
     }
 }
 
-static void validate_state_table(struct wined3d_state_entry *state_table)
+static void validate_state_table(struct wined3d_state_entry *state_table,
+        const struct wined3d_d3d_info *d3d_info)
 {
     static const struct
     {
@@ -1595,7 +1596,11 @@ static void validate_state_table(struct wined3d_state_entry *state_table)
     {
         if (!rs_holes[current].first || i < STATE_RENDER(rs_holes[current].first))
         {
-            if (!state_table[i].representative)
+            /* A pipeline that compiles the fixed function pipeline into shaders
+             * reads these render states when it generates one, rather than
+             * applying them one by one, so it has no handler to register for
+             * them and none is missing. */
+            if (!state_table[i].representative && !d3d_info->ffp_hlsl)
                 ERR("State %s (%#x) should have a representative.\n", debug_d3dstate(i), i);
         }
         else if (state_table[i].representative)
@@ -1735,7 +1740,7 @@ HRESULT compile_state_table(struct wined3d_state_entry *state_table, APPLYSTATEF
     }
 
     prune_invalid_states(state_table, d3d_info);
-    validate_state_table(state_table);
+    validate_state_table(state_table, d3d_info);
 
     return WINED3D_OK;
 
