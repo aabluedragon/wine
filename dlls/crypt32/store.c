@@ -504,10 +504,9 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
         base = CERT_GROUP_POLICY_SYSTEM_STORE_REGPATH;
         break;
     case CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE:
-        /* hklm\Software\Microsoft\EnterpriseCertificates */
-        FIXME("CERT_SYSTEM_STORE_LOCAL_MACHINE_ENTERPRISE, %s: stub\n",
-         debugstr_w(storeName));
-        return NULL;
+        root = HKEY_LOCAL_MACHINE;
+        base = L"Software\\Microsoft\\EnterpriseCertificates";
+        break;
     default:
         SetLastError(E_INVALIDARG);
         return NULL;
