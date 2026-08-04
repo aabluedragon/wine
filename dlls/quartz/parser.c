@@ -18,20 +18,40 @@
 
 #include "quartz_private.h"
 
+WINE_DEFAULT_DEBUG_CHANNEL(quartz);
+
+/* These filters are all implemented on top of GStreamer, which isn't
+ * necessarily there: it is an optional dependency, and the support library is
+ * missing entirely in a build made without it. That is not a failure to create
+ * the filter so much as the filter not being one this installation has, which
+ * is what we report, so that a graph being built around it moves on to the next
+ * candidate instead of giving up. */
+static HRESULT create_wg_filter(const GUID *clsid, IUnknown *outer, IUnknown **out)
+{
+    HRESULT hr = CoCreateInstance(clsid, outer, CLSCTX_INPROC_SERVER, &IID_IUnknown, (void **)out);
+
+    if (FAILED(hr) && hr != CLASS_E_NOAGGREGATION)
+    {
+        WARN("Failed to create GStreamer filter %s, hr %#lx.\n", debugstr_guid(clsid), hr);
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
+    return hr;
+}
+
 HRESULT avi_splitter_create(IUnknown *outer, IUnknown **out)
 {
     static const GUID CLSID_wg_avi_splitter = {0x272bfbfb,0x50d0,0x4078,{0xb6,0x00,0x1e,0x95,0x9c,0x30,0x13,0x37}};
-    return CoCreateInstance(&CLSID_wg_avi_splitter, outer, CLSCTX_INPROC_SERVER, &IID_IUnknown, (void **)out);
+    return create_wg_filter(&CLSID_wg_avi_splitter, outer, out);
 }
 
 HRESULT mpeg1_splitter_create(IUnknown *outer, IUnknown **out)
 {
     static const GUID CLSID_wg_mpeg1_splitter = {0xa8edbf98,0x2442,0x42c5,{0x85,0xa1,0xab,0x05,0xa5,0x80,0xdf,0x53}};
-    return CoCreateInstance(&CLSID_wg_mpeg1_splitter, outer, CLSCTX_INPROC_SERVER, &IID_IUnknown, (void **)out);
+    return create_wg_filter(&CLSID_wg_mpeg1_splitter, outer, out);
 }
 
 HRESULT wave_parser_create(IUnknown *outer, IUnknown **out)
 {
     static const GUID CLSID_wg_wave_parser = {0x3f839ec7,0x5ea6,0x49e1,{0x80,0xc2,0x1e,0xa3,0x00,0xf8,0xb0,0xe0}};
-    return CoCreateInstance(&CLSID_wg_wave_parser, outer, CLSCTX_INPROC_SERVER, &IID_IUnknown, (void **)out);
+    return create_wg_filter(&CLSID_wg_wave_parser, outer, out);
 }

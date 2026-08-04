@@ -1920,6 +1920,10 @@ HRESULT WINAPI DECLSPEC_HOTPATCH CoCreateInstanceEx(REFCLSID rclsid, IUnknown *o
     {
         if (hr == CLASS_E_NOAGGREGATION && outer)
             FIXME("Class %s does not support aggregation\n", debugstr_guid(&clsid));
+        else if (hr == CLASS_E_CLASSNOTAVAILABLE || hr == REGDB_E_CLASSNOTREG)
+            /* The class told us it isn't available here; that is an answer, not
+             * something left to implement. */
+            WARN("class %s is not available, hr %#lx.\n", debugstr_guid(&clsid), hr);
         else
             FIXME("no instance created for interface %s of class %s, hr %#lx.\n",
                     debugstr_guid(results[0].pIID), debugstr_guid(&clsid), hr);
