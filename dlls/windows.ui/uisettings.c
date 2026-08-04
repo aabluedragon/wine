@@ -285,7 +285,8 @@ static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUB
 static HRESULT WINAPI uisettings2_add_TextScaleFactorChanged( IUISettings2 *iface, ITypedEventHandler_UISettings_IInspectable *handler,
         EventRegistrationToken *cookie )
 {
-    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+    /* Nothing changes the text scale, so the handler has nothing to hear. */
+    TRACE( "iface %p, handler %p, cookie %p\n", iface, handler, cookie );
     *cookie = dummy_cookie;
     return S_OK;
 }

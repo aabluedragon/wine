@@ -26,6 +26,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winnls.h"
+#include "winreg.h"
 #include "winternl.h"
 
 #include "kernelbase.h"
@@ -442,10 +443,44 @@ DWORD WINAPI DECLSPEC_HOTPATCH QueueUserAPC2( PAPCFUNC func, HANDLE thread, ULON
  */
 BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadCycleTime( HANDLE thread, ULONG64 *cycle )
 {
-    static int once;
-    if (!once++) FIXME( "(%p,%p): stub!\n", thread, cycle );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    static ULONG64 cycles_per_100ns;
+    FILETIME create, exit, kernel, user;
+    ULONG64 cpu_time;
+
+    TRACE( "(%p,%p)\n", thread, cycle );
+
+    if (!cycle)
+    {
+        SetLastError( ERROR_NOACCESS );
+        return FALSE;
+    }
+
+    /* We can't read a cycle counter per thread, but the scheduler tells us how
+     * long the thread has had a processor, which is the same measure of how
+     * much work it got done, expressed in time rather than in cycles. Scale it
+     * by the processor's clock so that the number means what a caller
+     * comparing two of them expects. */
+    if (!cycles_per_100ns)
+    {
+        DWORD mhz = 0, size = sizeof(mhz);
+        HKEY key;
+
+        if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE,
+                L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &key ))
+        {
+            RegQueryValueExW( key, L"~MHz", NULL, NULL, (BYTE *)&mhz, &size );
+            RegCloseKey( key );
+        }
+        if (!mhz) mhz = 1000;
+        cycles_per_100ns = (ULONG64)mhz * 100;
+    }
+
+    if (!GetThreadTimes( thread, &create, &exit, &kernel, &user )) return FALSE;
+
+    cpu_time = ((ULONG64)kernel.dwHighDateTime << 32 | kernel.dwLowDateTime)
+             + ((ULONG64)user.dwHighDateTime << 32 | user.dwLowDateTime);
+    *cycle = cpu_time * cycles_per_100ns;
+    return TRUE;
 }
 
 

@@ -2684,7 +2684,9 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
     case ThreadPowerThrottlingState:
         if (length != sizeof(THREAD_POWER_THROTTLING_STATE)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!data) return STATUS_ACCESS_VIOLATION;
-        FIXME( "ThreadPowerThrottling stub!\n" );
+        /* Asks the scheduler to favour battery life over speed for this
+         * thread. macOS decides that for us from its own energy policy. */
+        WARN( "ignoring the power throttling request\n" );
         return STATUS_SUCCESS;
 
     case ThreadIdealProcessor:
