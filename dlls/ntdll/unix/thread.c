@@ -2730,6 +2730,14 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
 #endif
     }
 
+    case ThreadPagePriority:
+        /* A hint to the memory manager about which pages to trim first. We
+         * leave the paging decisions to the host kernel, so accept and drop
+         * it rather than failing a call that only ever tunes performance. */
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        TRACE( "ignoring page priority %u\n", *(const ULONG *)data );
+        return STATUS_SUCCESS;
+
     case ThreadBasicInformation:
     case ThreadTimes:
     case ThreadDescriptorTableEntry:

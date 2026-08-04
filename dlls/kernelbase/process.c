@@ -630,6 +630,12 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                         machine = *(USHORT *)attrs->attrs[i].value;
                         TRACE( "PROC_THREAD_ATTRIBUTE_MACHINE %x.\n", machine );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
+                        /* Hardening policies - DEP, ASLR, dynamic code - that
+                         * the host applies to the whole process anyway. The
+                         * child runs the same either way. */
+                        TRACE( "PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY size %Iu.\n", attrs->attrs[i].size );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
