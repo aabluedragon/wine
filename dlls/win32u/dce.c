@@ -1916,6 +1916,39 @@ static HRGN send_ncpaint( HWND hwnd, HWND *child, UINT *flags )
 }
 
 /***********************************************************************
+ *           invalidate_erased_children
+ *
+ * A window that doesn't clip its children paints over them when it erases its
+ * background, and the children have to be repainted on top of it. They are
+ * usually invalid already, in which case their area has been subtracted from
+ * this window's update region and they aren't touched at all, but a child that
+ * repainted itself outside of the normal paint order is not, and would be left
+ * erased until something else invalidates it.
+ */
+static void invalidate_erased_children( HWND hwnd, const RECT *erased )
+{
+    HWND *children;
+    unsigned int i;
+
+    if (get_window_long( hwnd, GWL_STYLE ) & WS_CLIPCHILDREN) return;
+    if (IsRectEmpty( erased )) return;
+    if (!(children = list_window_children( hwnd ))) return;
+
+    for (i = 0; children[i]; i++)
+    {
+        struct window_rects rects;
+        RECT rect;
+
+        if (!(get_window_long( children[i], GWL_STYLE ) & WS_VISIBLE)) continue;
+        if (!get_window_rects( children[i], COORDS_PARENT, &rects, get_thread_dpi() )) continue;
+        if (!intersect_rect( &rect, &rects.window, erased )) continue;
+        NtUserRedrawWindow( children[i], NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN );
+    }
+
+    free( children );
+}
+
+/***********************************************************************
  *           send_erase
  *
  * Send a WM_ERASEBKGND message if needed, and optionally return the DC for painting.
@@ -1943,7 +1976,10 @@ static BOOL send_erase( HWND hwnd, UINT flags, HRGN client_rgn,
             {
                 /* don't erase if the clip box is empty */
                 if (type != NULLREGION)
+                {
                     need_erase = !send_message( hwnd, WM_ERASEBKGND, (WPARAM)hdc, 0 );
+                    invalidate_erased_children( hwnd, clip_rect );
+                }
             }
             if (!hdc_ret) release_dc( hwnd, hdc, TRUE );
         }
