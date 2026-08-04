@@ -151,10 +151,26 @@ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
         if (read)
             return DD_OK;
 
-        if (swap_interval)
-            dst_texture = wined3d_swapchain_get_back_buffer(ddraw->wined3d_swapchain, 0);
-        else
-            dst_texture = wined3d_swapchain_get_front_buffer(ddraw->wined3d_swapchain);
+        /* Drawing into the front buffer is only visible where the drawable is
+         * the window itself. On macOS it is a double buffered surface that
+         * only reaches the screen when it is presented, so the frame would
+         * never show up. Always go through the back buffer and present it,
+         * which is what happens on modern Windows anyway. */
+        if ((dst_texture = wined3d_swapchain_get_back_buffer(ddraw->wined3d_swapchain, 0)))
+        {
+            /* Use the GPU copy of the surface as the source, so that scaling
+             * the frame to the swapchain doesn't fall back to a software blit. */
+            if (SUCCEEDED(hr = wined3d_device_context_blt(ddraw->immediate_context, dst_texture, 0, rect,
+                    ddraw_surface_get_draw_texture(surface, DDRAW_SURFACE_READ), surface->sub_resource_idx, rect, 0,
+                    NULL, WINED3D_TEXF_POINT)))
+            {
+                hr = wined3d_swapchain_present(ddraw->wined3d_swapchain, rect, rect, NULL, swap_interval, 0);
+                ddraw->flags |= DDRAW_SWAPPED;
+            }
+            return hr;
+        }
+
+        dst_texture = wined3d_swapchain_get_front_buffer(ddraw->wined3d_swapchain);
 
         if (SUCCEEDED(hr = wined3d_device_context_blt(ddraw->immediate_context, dst_texture, 0, rect,
                 ddraw_surface_get_any_texture(surface, DDRAW_SURFACE_READ), surface->sub_resource_idx, rect, 0,
