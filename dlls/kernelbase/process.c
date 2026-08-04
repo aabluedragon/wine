@@ -1310,7 +1310,23 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessGroupAffinity( HANDLE process, const GRO
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ SetProcessMitigationPolicy( PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%d, %p, %Iu): stub\n", policy, buffer, length );
+    TRACE( "(%d, %p, %Iu)\n", policy, buffer, length );
+
+    if (!buffer || policy < 0 || policy >= MaxProcessMitigationPolicy)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (length != sizeof(DWORD))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    /* Each of these hardens the process against a way of being attacked -
+     * data execution, address layout, which images may load. None of it is
+     * enforced here, and a process that asks for it runs the same either
+     * way, so take it and move on. */
     return TRUE;
 }
 

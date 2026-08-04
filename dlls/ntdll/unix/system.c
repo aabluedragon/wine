@@ -66,6 +66,7 @@
 # include <IOKit/IOKitLib.h>
 # include <IOKit/ps/IOPSKeys.h>
 # include <IOKit/ps/IOPowerSources.h>
+# include <IOKit/pwr_mgt/IOPMLib.h>
 # include <mach/mach.h>
 # include <mach/machine.h>
 # include <mach/mach_init.h>
@@ -4817,15 +4818,56 @@ NTSTATUS WINAPI NtInitiatePowerAction( POWER_ACTION action, SYSTEM_POWER_STATE s
 }
 
 
+#ifdef __APPLE__
+
+/* Hold or drop one power assertion, so that it matches what is being asked for. */
+static void set_power_assertion( CFStringRef type, BOOL wanted, IOPMAssertionID *id )
+{
+    if (wanted)
+    {
+        if (*id) return;
+        if (IOPMAssertionCreateWithName( type, kIOPMAssertionLevelOn, CFSTR("Wine"), id ) != kIOReturnSuccess)
+            *id = 0;
+    }
+    else if (*id)
+    {
+        IOPMAssertionRelease( *id );
+        *id = 0;
+    }
+}
+
+static void apply_execution_state( EXECUTION_STATE state )
+{
+    static IOPMAssertionID display_assertion, system_assertion;
+
+    set_power_assertion( kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                         !!(state & ES_DISPLAY_REQUIRED), &display_assertion );
+    set_power_assertion( kIOPMAssertionTypePreventUserIdleSystemSleep,
+                         !!(state & (ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)), &system_assertion );
+}
+
+#else
+
+static void apply_execution_state( EXECUTION_STATE state )
+{
+}
+
+#endif
+
 /******************************************************************************
  *              NtSetThreadExecutionState  (NTDLL.@)
  */
 NTSTATUS WINAPI NtSetThreadExecutionState( EXECUTION_STATE new_state, EXECUTION_STATE *old_state )
 {
+    static pthread_mutex_t execution_state_mutex = PTHREAD_MUTEX_INITIALIZER;
     static EXECUTION_STATE current = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRESENT;
 
-    WARN( "(0x%x, %p): stub, harmless.\n", new_state, old_state );
+    TRACE( "(0x%x, %p)\n", new_state, old_state );
+
+    mutex_lock( &execution_state_mutex );
     *old_state = current;
     if (!(current & ES_CONTINUOUS) || (new_state & ES_CONTINUOUS)) current = new_state;
+    apply_execution_state( current );
+    mutex_unlock( &execution_state_mutex );
     return STATUS_SUCCESS;
 }

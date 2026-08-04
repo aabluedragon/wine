@@ -168,20 +168,106 @@ static HRESULT WINAPI control_GetDisplayName(IAudioSessionControl2 *iface, WCHAR
     return S_OK;
 }
 
+/* Takes a reference to every listener so that they can be called with the
+ * sessions lock dropped - a listener is free to call back in, and holding the
+ * lock across that would deadlock. Returns the count, and NULL when there is
+ * nobody listening. */
+static IAudioSessionEvents **session_snapshot_listeners(struct audio_session *session, unsigned int *count)
+{
+    struct session_notification *notif;
+    IAudioSessionEvents **listeners;
+    unsigned int i = 0;
+
+    *count = list_count(&session->notifications);
+    if (!*count) return NULL;
+
+    if (!(listeners = malloc(*count * sizeof(*listeners))))
+    {
+        *count = 0;
+        return NULL;
+    }
+
+    LIST_FOR_EACH_ENTRY(notif, &session->notifications, struct session_notification, entry)
+    {
+        IAudioSessionEvents_AddRef(notif->events);
+        listeners[i++] = notif->events;
+    }
+
+    return listeners;
+}
+
+static void session_release_listeners(IAudioSessionEvents **listeners, unsigned int count)
+{
+    unsigned int i;
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_Release(listeners[i]);
+    free(listeners);
+}
+
+static void session_notify_volume(struct audio_session *session, const GUID *context)
+{
+    IAudioSessionEvents **listeners;
+    float volume = session->master_vol;
+    BOOL mute = session->mute;
+    unsigned int i, count;
+
+    sessions_lock();
+    listeners = session_snapshot_listeners(session, &count);
+    sessions_unlock();
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_OnSimpleVolumeChanged(listeners[i], volume, mute, context ? context : &GUID_NULL);
+
+    session_release_listeners(listeners, count);
+}
+
+static void session_notify_channel_volume(struct audio_session *session, UINT32 changed, const GUID *context)
+{
+    IAudioSessionEvents **listeners;
+    unsigned int i, count, channels;
+    float *volumes;
+
+    sessions_lock();
+    channels = session->channel_count;
+    if ((volumes = malloc(channels * sizeof(*volumes))))
+        memcpy(volumes, session->channel_vols, channels * sizeof(*volumes));
+    listeners = volumes ? session_snapshot_listeners(session, &count) : NULL;
+    if (!listeners) count = 0;
+    sessions_unlock();
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_OnChannelVolumeChanged(listeners[i], channels, volumes, changed,
+                                                   context ? context : &GUID_NULL);
+
+    session_release_listeners(listeners, count);
+    free(volumes);
+}
+
 static HRESULT WINAPI control_SetDisplayName(IAudioSessionControl2 *iface, const WCHAR *name,
                                          const GUID *event_context)
 {
     struct audio_session_wrapper *This = impl_from_IAudioSessionControl2(iface);
     struct audio_session *session = This->session;
 
-    TRACE("(%p)->(%p, %s) - stub\n", This, name, debugstr_guid(event_context));
-    FIXME("Ignoring event_context\n");
+    IAudioSessionEvents **listeners;
+    unsigned int i, count;
+
+    TRACE("(%p)->(%p, %s)\n", This, name, debugstr_guid(event_context));
 
     if (!name)
         return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
 
+    sessions_lock();
     free(session->display_name);
     session->display_name = wcsdup(name);
+    listeners = session_snapshot_listeners(session, &count);
+    sessions_unlock();
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_OnDisplayNameChanged(listeners[i], name,
+                                                 event_context ? event_context : &GUID_NULL);
+    session_release_listeners(listeners, count);
 
     return S_OK;
 }
@@ -207,14 +293,24 @@ static HRESULT WINAPI control_SetIconPath(IAudioSessionControl2 *iface, const WC
     struct audio_session_wrapper *This = impl_from_IAudioSessionControl2(iface);
     struct audio_session *session = This->session;
 
-    TRACE("(%p)->(%s, %s) - stub\n", This, debugstr_w(path), debugstr_guid(event_context));
-    FIXME("Ignoring event_context\n");
+    IAudioSessionEvents **listeners;
+    unsigned int i, count;
+
+    TRACE("(%p)->(%s, %s)\n", This, debugstr_w(path), debugstr_guid(event_context));
 
     if (!path)
         return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
 
+    sessions_lock();
     free(session->icon_path);
     session->icon_path = wcsdup(path);
+    listeners = session_snapshot_listeners(session, &count);
+    sessions_unlock();
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_OnIconPathChanged(listeners[i], path,
+                                              event_context ? event_context : &GUID_NULL);
+    session_release_listeners(listeners, count);
 
     return S_OK;
 }
@@ -240,13 +336,23 @@ static HRESULT WINAPI control_SetGroupingParam(IAudioSessionControl2 *iface, con
     struct audio_session_wrapper *This = impl_from_IAudioSessionControl2(iface);
     struct audio_session *session = This->session;
 
-    TRACE("(%p)->(%s, %s) - stub\n", This, debugstr_guid(group), debugstr_guid(event_context));
-    FIXME("Ignoring event_context\n");
+    IAudioSessionEvents **listeners;
+    unsigned int i, count;
+
+    TRACE("(%p)->(%s, %s)\n", This, debugstr_guid(group), debugstr_guid(event_context));
 
     if (!group)
         return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
 
+    sessions_lock();
     session->grouping_param = *group;
+    listeners = session_snapshot_listeners(session, &count);
+    sessions_unlock();
+
+    for (i = 0; i < count; ++i)
+        IAudioSessionEvents_OnGroupingParamChanged(listeners[i], group,
+                                                   event_context ? event_context : &GUID_NULL);
+    session_release_listeners(listeners, count);
 
     return S_OK;
 }
@@ -255,7 +361,23 @@ static HRESULT WINAPI control_RegisterAudioSessionNotification(IAudioSessionCont
                                                            IAudioSessionEvents *events)
 {
     struct audio_session_wrapper *This = impl_from_IAudioSessionControl2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, events);
+    struct session_notification *notif;
+
+    TRACE("(%p)->(%p)\n", This, events);
+
+    if (!events)
+        return E_POINTER;
+
+    if (!(notif = malloc(sizeof(*notif))))
+        return E_OUTOFMEMORY;
+
+    notif->events = events;
+    IAudioSessionEvents_AddRef(events);
+
+    sessions_lock();
+    list_add_tail(&This->session->notifications, &notif->entry);
+    sessions_unlock();
+
     return S_OK;
 }
 
@@ -263,7 +385,29 @@ static HRESULT WINAPI control_UnregisterAudioSessionNotification(IAudioSessionCo
                                                              IAudioSessionEvents *events)
 {
     struct audio_session_wrapper *This = impl_from_IAudioSessionControl2(iface);
-    FIXME("(%p)->(%p) - stub\n", This, events);
+    struct session_notification *notif, *found = NULL;
+
+    TRACE("(%p)->(%p)\n", This, events);
+
+    if (!events)
+        return E_POINTER;
+
+    sessions_lock();
+    LIST_FOR_EACH_ENTRY(notif, &This->session->notifications, struct session_notification, entry)
+    {
+        if (notif->events != events) continue;
+        list_remove(&notif->entry);
+        found = notif;
+        break;
+    }
+    sessions_unlock();
+
+    if (!found)
+        return E_INVALIDARG;
+
+    IAudioSessionEvents_Release(found->events);
+    free(found);
+
     return S_OK;
 }
 
@@ -433,9 +577,6 @@ static HRESULT WINAPI channelvolume_SetChannelVolume(IChannelAudioVolume *iface,
     if (index >= session->channel_count)
         return E_INVALIDARG;
 
-    if (context)
-        FIXME("Notifications not supported yet\n");
-
     sessions_lock();
 
     session->channel_vols[index] = level;
@@ -444,6 +585,8 @@ static HRESULT WINAPI channelvolume_SetChannelVolume(IChannelAudioVolume *iface,
         set_stream_volumes(client);
 
     sessions_unlock();
+
+    session_notify_channel_volume(session, index, context);
 
     return S_OK;
 }
@@ -483,9 +626,6 @@ static HRESULT WINAPI channelvolume_SetAllVolumes(IChannelAudioVolume *iface, UI
     if (count != session->channel_count)
         return E_INVALIDARG;
 
-    if (context)
-        FIXME("Notifications not supported yet\n");
-
     sessions_lock();
 
     for (i = 0; i < count; ++i)
@@ -495,6 +635,9 @@ static HRESULT WINAPI channelvolume_SetAllVolumes(IChannelAudioVolume *iface, UI
         set_stream_volumes(client);
 
     sessions_unlock();
+
+    /* No single channel changed, so there is no index to name. */
+    session_notify_channel_volume(session, ~0u, context);
 
     return S_OK;
 }
@@ -577,9 +720,6 @@ static HRESULT WINAPI simplevolume_SetMasterVolume(ISimpleAudioVolume *iface, fl
     if (level < 0.f || level > 1.f)
         return E_INVALIDARG;
 
-    if (context)
-        FIXME("Notifications not supported yet\n");
-
     sessions_lock();
 
     session->master_vol = level;
@@ -588,6 +728,8 @@ static HRESULT WINAPI simplevolume_SetMasterVolume(ISimpleAudioVolume *iface, fl
         set_stream_volumes(client);
 
     sessions_unlock();
+
+    session_notify_volume(session, context);
 
     return S_OK;
 }
@@ -616,9 +758,6 @@ static HRESULT WINAPI simplevolume_SetMute(ISimpleAudioVolume *iface, BOOL mute,
 
     TRACE("(%p)->(%u, %s)\n", session, mute, debugstr_guid(context));
 
-    if (context)
-        FIXME("Notifications not supported yet\n");
-
     sessions_lock();
 
     session->mute = mute;
@@ -627,6 +766,8 @@ static HRESULT WINAPI simplevolume_SetMute(ISimpleAudioVolume *iface, BOOL mute,
         set_stream_volumes(client);
 
     sessions_unlock();
+
+    session_notify_volume(session, context);
 
     return S_OK;
 }
@@ -686,6 +827,7 @@ static struct audio_session *session_create(const GUID *guid, IMMDevice *device,
     ret->device = device;
 
     list_init(&ret->clients);
+    list_init(&ret->notifications);
 
     list_add_head(&sessions, &ret->entry);
 

@@ -125,6 +125,10 @@ static WCHAR *NETSTAT_load_message(UINT id) {
     return msg;
 }
 
+/* Addresses and ports are always printed as numbers, which is what -n asks
+ * for; -o adds the process that owns the endpoint. */
+static BOOL show_pid;
+
 static WCHAR *NETSTAT_port_name(UINT port, WCHAR name[])
 {
     /* FIXME: can we get the name? */
@@ -150,7 +154,45 @@ static void NETSTAT_conn_header(void)
     lstrcpyW(local, NETSTAT_load_message(IDS_TCP_LOCAL_ADDR));
     lstrcpyW(remote, NETSTAT_load_message(IDS_TCP_REMOTE_ADDR));
     lstrcpyW(state, NETSTAT_load_message(IDS_TCP_STATE));
-    NETSTAT_wprintf(L"  %-6s %-22s %-22s %s\n", NETSTAT_load_message(IDS_TCP_PROTO), local, remote, state);
+    if (show_pid)
+        NETSTAT_wprintf(L"  %-6s %-22s %-22s %-15s %s\n", NETSTAT_load_message(IDS_TCP_PROTO),
+                        local, remote, state, L"PID");
+    else
+        NETSTAT_wprintf(L"  %-6s %-22s %-22s %s\n", NETSTAT_load_message(IDS_TCP_PROTO), local, remote, state);
+}
+
+static void NETSTAT_route_table(void)
+{
+    WCHAR dest[MAX_HOSTNAME_LEN], mask[MAX_HOSTNAME_LEN];
+    WCHAR gateway[MAX_HOSTNAME_LEN], iface[MAX_HOSTNAME_LEN];
+    PMIB_IPFORWARDTABLE table;
+    DWORD err, size, i;
+
+    size = sizeof(MIB_IPFORWARDTABLE);
+    do
+    {
+        table = HeapAlloc(GetProcessHeap(), 0, size);
+        err = GetIpForwardTable(table, &size, TRUE);
+        if (err != NO_ERROR) HeapFree(GetProcessHeap(), 0, table);
+    } while (err == ERROR_INSUFFICIENT_BUFFER);
+
+    if (err) return;
+
+    NETSTAT_wprintf(L"\n%s\n\n", L"Active Routes:");
+    NETSTAT_wprintf(L"%-20s %-16s %-16s %-16s %s\n", L"Network Destination", L"Netmask",
+                    L"Gateway", L"Interface", L"Metric");
+
+    for (i = 0; i < table->dwNumEntries; i++)
+    {
+        NETSTAT_host_name(table->table[i].dwForwardDest, dest);
+        NETSTAT_host_name(table->table[i].dwForwardMask, mask);
+        NETSTAT_host_name(table->table[i].dwForwardNextHop, gateway);
+        NETSTAT_host_name(table->table[i].dwForwardNextHop, iface);
+        NETSTAT_wprintf(L"%-20s %-16s %-16s %-16s %lu\n", dest, mask, gateway, iface,
+                        table->table[i].dwForwardMetric1);
+    }
+    NETSTAT_wprintf(L"\n");
+    HeapFree(GetProcessHeap(), 0, table);
 }
 
 static void NETSTAT_eth_stats(void)
@@ -209,18 +251,18 @@ static void NETSTAT_eth_stats(void)
 
 static void NETSTAT_tcp_table(void)
 {
-    PMIB_TCPTABLE table;
+    PMIB_TCPTABLE_OWNER_PID table;
     DWORD err, size, i;
     WCHAR HostIp[MAX_HOSTNAME_LEN], HostPort[32];
     WCHAR RemoteIp[MAX_HOSTNAME_LEN], RemotePort[32];
     WCHAR Host[MAX_HOSTNAME_LEN + 32];
     WCHAR Remote[MAX_HOSTNAME_LEN + 32];
 
-    size = sizeof(MIB_TCPTABLE);
+    size = sizeof(MIB_TCPTABLE_OWNER_PID);
     do
     {
         table = HeapAlloc(GetProcessHeap(), 0, size);
-        err = GetTcpTable(table, &size, TRUE);
+        err = GetExtendedTcpTable(table, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
         if (err != NO_ERROR) HeapFree(GetProcessHeap(), 0, table);
     } while (err == ERROR_INSUFFICIENT_BUFFER);
 
@@ -239,7 +281,12 @@ static void NETSTAT_tcp_table(void)
 
             swprintf(Host, ARRAY_SIZE(Host), L"%s:%s", HostIp, HostPort);
             swprintf(Remote, ARRAY_SIZE(Remote), L"%s:%s", RemoteIp, RemotePort);
-            NETSTAT_wprintf(L"  %-6s %-22s %-22s %s\n", L"TCP", Host, Remote, tcpstatesW[table->table[i].dwState]);
+            if (show_pid)
+                NETSTAT_wprintf(L"  %-6s %-22s %-22s %-15s %lu\n", L"TCP", Host, Remote,
+                                tcpstatesW[table->table[i].dwState], table->table[i].dwOwningPid);
+            else
+                NETSTAT_wprintf(L"  %-6s %-22s %-22s %s\n", L"TCP", Host, Remote,
+                                tcpstatesW[table->table[i].dwState]);
         }
     }
     HeapFree(GetProcessHeap(), 0, table);
@@ -265,16 +312,16 @@ static void NETSTAT_tcp_stats(void)
 
 static void NETSTAT_udp_table(void)
 {
-    PMIB_UDPTABLE table;
+    PMIB_UDPTABLE_OWNER_PID table;
     DWORD err, size, i;
     WCHAR HostIp[MAX_HOSTNAME_LEN], HostPort[32];
     WCHAR Host[MAX_HOSTNAME_LEN + 32];
 
-    size = sizeof(MIB_UDPTABLE);
+    size = sizeof(MIB_UDPTABLE_OWNER_PID);
     do
     {
         table = HeapAlloc(GetProcessHeap(), 0, size);
-        err = GetUdpTable(table, &size, TRUE);
+        err = GetExtendedUdpTable(table, &size, TRUE, AF_INET, UDP_TABLE_OWNER_PID, 0);
         if (err != NO_ERROR) HeapFree(GetProcessHeap(), 0, table);
     } while (err == ERROR_INSUFFICIENT_BUFFER);
 
@@ -286,7 +333,11 @@ static void NETSTAT_udp_table(void)
         NETSTAT_port_name(table->table[i].dwLocalPort, HostPort);
 
         swprintf(Host, ARRAY_SIZE(Host), L"%s:%s", HostIp, HostPort);
-        NETSTAT_wprintf(L"  %-6s %-22s *:*\n", L"UDP", Host);
+        if (show_pid)
+            NETSTAT_wprintf(L"  %-6s %-22s %-22s %-15s %lu\n", L"UDP", Host, L"*:*", L"",
+                            table->table[i].dwOwningPid);
+        else
+            NETSTAT_wprintf(L"  %-6s %-22s *:*\n", L"UDP", Host);
     }
     HeapFree(GetProcessHeap(), 0, table);
 }
@@ -339,44 +390,79 @@ int __cdecl wmain(int argc, WCHAR *argv[])
 
     while (argv[1] && argv[1][0] == '-')
     {
-        switch (argv[1][1])
+        BOOL all = FALSE, routes = FALSE;
+        const WCHAR *opt;
+
+        /* The switches come one after another in a single argument as often
+         * as they come separately: -aon means -a -o -n. */
+        for (opt = argv[1] + 1; *opt; opt++)
         {
-        case 'a':
+            switch (*opt)
+            {
+            case 'a':
+                all = TRUE;
+                break;
+            case 'n':
+                /* Addresses and ports are only ever printed as numbers. */
+                break;
+            case 'o':
+                show_pid = TRUE;
+                break;
+            case 'r':
+                routes = TRUE;
+                break;
+            case 'e':
+                NETSTAT_eth_stats();
+                return 0;
+            case 's':
+                output_stats = TRUE;
+                break;
+            case 'p':
+                if (opt[1])
+                {
+                    WINE_FIXME("Option -p must come last: %s\n", debugstr_w(argv[1]));
+                    return 1;
+                }
+                argv++; argc--;
+                if (argc == 1) return 1;
+                switch (NETSTAT_get_protocol(argv[1]))
+                {
+                    case PROT_TCP:
+                        if (output_stats)
+                            NETSTAT_tcp_stats();
+                        NETSTAT_conn_header();
+                        NETSTAT_tcp_table();
+                        break;
+                    case PROT_UDP:
+                        if (output_stats)
+                            NETSTAT_udp_stats();
+                        NETSTAT_conn_header();
+                        NETSTAT_udp_table();
+                        break;
+                    default:
+                        WINE_FIXME("Protocol not yet implemented: %s\n", debugstr_w(argv[1]));
+                }
+                return 0;
+            default:
+                WINE_FIXME("Unknown option: %s\n", debugstr_w(argv[1]));
+                return 1;
+            }
+        }
+
+        if (routes)
+        {
+            NETSTAT_route_table();
+            return 0;
+        }
+
+        if (all)
+        {
             NETSTAT_conn_header();
             NETSTAT_tcp_table();
             NETSTAT_udp_table();
             return 0;
-        case 'e':
-            NETSTAT_eth_stats();
-            return 0;
-        case 's':
-            output_stats = TRUE;
-            break;
-        case 'p':
-            argv++; argc--;
-            if (argc == 1) return 1;
-            switch (NETSTAT_get_protocol(argv[1]))
-            {
-                case PROT_TCP:
-                    if (output_stats)
-                        NETSTAT_tcp_stats();
-                    NETSTAT_conn_header();
-                    NETSTAT_tcp_table();
-                    break;
-                case PROT_UDP:
-                    if (output_stats)
-                        NETSTAT_udp_stats();
-                    NETSTAT_conn_header();
-                    NETSTAT_udp_table();
-                    break;
-                default:
-                    WINE_FIXME("Protocol not yet implemented: %s\n", debugstr_w(argv[1]));
-            }
-            return 0;
-        default:
-            WINE_FIXME("Unknown option: %s\n", debugstr_w(argv[1]));
-            return 1;
         }
+
         argv++; argc--;
     }
 

@@ -24,6 +24,7 @@
 #include "winbase.h"
 #include "winternl.h"
 #include "kernel_private.h"
+#include "wine/list.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(powermgnt);
@@ -129,13 +130,82 @@ BOOL WINAPI SetSystemPowerState(BOOL suspend_or_hibernate,
  * Informs the system that activity is taking place for
  * power management purposes.
  */
+/* A power request and SetThreadExecutionState are two ways of asking for the
+ * same thing, so they are kept together and the union of the two is what gets
+ * asked of the system. */
+struct power_request
+{
+    struct list entry;
+    HANDLE handle;
+    EXECUTION_STATE state;
+};
+
+static struct list power_requests = LIST_INIT( power_requests );
+static EXECUTION_STATE continuous_state = ES_CONTINUOUS;
+
+static CRITICAL_SECTION power_cs;
+static CRITICAL_SECTION_DEBUG power_cs_debug =
+{
+    0, 0, &power_cs,
+    { &power_cs_debug.ProcessLocksList, &power_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": power_cs") }
+};
+static CRITICAL_SECTION power_cs = { &power_cs_debug, -1, 0, 0, 0, 0 };
+
+/* Returns the state that was in effect before this call. Must be called with
+ * power_cs held. */
+static EXECUTION_STATE update_execution_state( EXECUTION_STATE once )
+{
+    EXECUTION_STATE state = continuous_state, old;
+    struct power_request *request;
+
+    LIST_FOR_EACH_ENTRY( request, &power_requests, struct power_request, entry )
+        state |= request->state;
+
+    /* A request without ES_CONTINUOUS only resets the idle timers, so pass it
+     * on by itself and leave the standing state alone. */
+    NtSetThreadExecutionState( once ? once : state, &old );
+    return old;
+}
+
 EXECUTION_STATE WINAPI SetThreadExecutionState(EXECUTION_STATE flags)
 {
     EXECUTION_STATE old;
 
-    NtSetThreadExecutionState(flags, &old);
+    TRACE("(0x%lx)\n", (DWORD)flags);
+
+    EnterCriticalSection( &power_cs );
+    if (flags & ES_CONTINUOUS) continuous_state = flags;
+    old = update_execution_state( (flags & ES_CONTINUOUS) ? 0 : flags );
+    LeaveCriticalSection( &power_cs );
 
     return old;
+}
+
+/* The flags a request of this type stands for. */
+static EXECUTION_STATE execution_state_from_request_type( POWER_REQUEST_TYPE type )
+{
+    switch (type)
+    {
+    case PowerRequestDisplayRequired:   return ES_DISPLAY_REQUIRED;
+    case PowerRequestSystemRequired:    return ES_SYSTEM_REQUIRED;
+    case PowerRequestAwayModeRequired:  return ES_AWAYMODE_REQUIRED;
+    /* Keeps the process running rather than the machine awake, but the only
+     * thing that would stop it is the system going to sleep. */
+    case PowerRequestExecutionRequired: return ES_SYSTEM_REQUIRED;
+    default:                            return 0;
+    }
+}
+
+/* Must be called with power_cs held. */
+static struct power_request *find_power_request( HANDLE handle )
+{
+    struct power_request *request;
+
+    LIST_FOR_EACH_ENTRY( request, &power_requests, struct power_request, entry )
+        if (request->handle == handle) return request;
+
+    return NULL;
 }
 
 /***********************************************************************
@@ -143,9 +213,34 @@ EXECUTION_STATE WINAPI SetThreadExecutionState(EXECUTION_STATE flags)
  */
 HANDLE WINAPI PowerCreateRequest(REASON_CONTEXT *context)
 {
-    FIXME("(%p): stub\n", context);
+    struct power_request *request;
+    HANDLE handle;
 
-    return CreateEventW(NULL, TRUE, FALSE, NULL);
+    TRACE("(%p)\n", context);
+
+    if (!context)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* The reason is only ever shown by powercfg, which has nothing to read it
+     * from here. The handle has to be one CloseHandle accepts. */
+    if (!(handle = CreateEventW( NULL, TRUE, FALSE, NULL ))) return INVALID_HANDLE_VALUE;
+
+    if (!(request = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*request) )))
+    {
+        CloseHandle( handle );
+        SetLastError( ERROR_OUTOFMEMORY );
+        return INVALID_HANDLE_VALUE;
+    }
+    request->handle = handle;
+
+    EnterCriticalSection( &power_cs );
+    list_add_tail( &power_requests, &request->entry );
+    LeaveCriticalSection( &power_cs );
+
+    return handle;
 }
 
 /***********************************************************************
@@ -153,8 +248,30 @@ HANDLE WINAPI PowerCreateRequest(REASON_CONTEXT *context)
  */
 BOOL WINAPI PowerSetRequest(HANDLE request, POWER_REQUEST_TYPE type)
 {
-    FIXME("(%p, %u): stub\n", request, type);
+    EXECUTION_STATE state = execution_state_from_request_type( type );
+    struct power_request *entry;
 
+    TRACE("(%p, %u)\n", request, type);
+
+    if (!state)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    EnterCriticalSection( &power_cs );
+    if ((entry = find_power_request( request )))
+    {
+        entry->state |= state;
+        update_execution_state( 0 );
+    }
+    LeaveCriticalSection( &power_cs );
+
+    if (!entry)
+    {
+        SetLastError( ERROR_INVALID_HANDLE );
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -163,7 +280,29 @@ BOOL WINAPI PowerSetRequest(HANDLE request, POWER_REQUEST_TYPE type)
  */
 BOOL WINAPI PowerClearRequest(HANDLE request, POWER_REQUEST_TYPE type)
 {
-    FIXME("(%p, %u): stub\n", request, type);
+    EXECUTION_STATE state = execution_state_from_request_type( type );
+    struct power_request *entry;
 
+    TRACE("(%p, %u)\n", request, type);
+
+    if (!state)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    EnterCriticalSection( &power_cs );
+    if ((entry = find_power_request( request )))
+    {
+        entry->state &= ~state;
+        update_execution_state( 0 );
+    }
+    LeaveCriticalSection( &power_cs );
+
+    if (!entry)
+    {
+        SetLastError( ERROR_INVALID_HANDLE );
+        return FALSE;
+    }
     return TRUE;
 }

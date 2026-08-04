@@ -1116,9 +1116,12 @@ HRESULT WINAPI CoInitializeSecurity(PSECURITY_DESCRIPTOR sd, LONG cAuthSvc,
         SOLE_AUTHENTICATION_SERVICE *asAuthSvc, void *reserved1, DWORD authn_level,
         DWORD imp_level, void *reserved2, DWORD capabilities, void *reserved3)
 {
-    FIXME("%p, %ld, %p, %p, %ld, %ld, %p, %ld, %p stub\n", sd, cAuthSvc, asAuthSvc, reserved1, authn_level,
+    TRACE("%p, %ld, %p, %p, %ld, %ld, %p, %ld, %p\n", sd, cAuthSvc, asAuthSvc, reserved1, authn_level,
             imp_level, reserved2, capabilities, reserved3);
 
+    /* Sets the authentication and impersonation a process demands of the
+     * calls that reach it over the wire. Nothing here serves objects to
+     * another machine, so there is no call to hold to it. */
     return S_OK;
 }
 

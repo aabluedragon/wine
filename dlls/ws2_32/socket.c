@@ -2296,6 +2296,36 @@ int WINAPI getsockopt( SOCKET s, int level, int optname, char *optval, int *optl
 }
 
 
+/* Precedence from the default policy table of RFC 6724, which ranks a
+ * destination address by the kind of connectivity it needs. */
+static unsigned int address_precedence( const SOCKADDR *addr, int len )
+{
+    const IN6_ADDR *a;
+
+    if (!addr) return 0;
+
+    if (addr->sa_family == AF_INET) return 35;              /* ::ffff:0:0/96 */
+    if (addr->sa_family != AF_INET6 || len < (int)sizeof(SOCKADDR_IN6)) return 0;
+
+    a = &((const SOCKADDR_IN6 *)addr)->sin6_addr;
+
+    if (IN6_IS_ADDR_LOOPBACK( a )) return 50;               /* ::1/128 */
+    if (!a->s6_words[0] && !a->s6_words[1] && !a->s6_words[2] &&
+        !a->s6_words[3] && !a->s6_words[4] && a->s6_words[5] == 0xffff)
+        return 35;                                          /* ::ffff:0:0/96 */
+    if (a->s6_bytes[0] == 0x20 && a->s6_bytes[1] == 0x02) return 30;  /* 2002::/16 */
+    if (a->s6_bytes[0] == 0x20 && a->s6_bytes[1] == 0x01 &&
+        !a->s6_words[1]) return 5;                          /* 2001::/32 */
+    if ((a->s6_bytes[0] & 0xfe) == 0xfc) return 3;          /* fc00::/7 */
+    if (!a->s6_words[0] && !a->s6_words[1] && !a->s6_words[2] &&
+        !a->s6_words[3] && !a->s6_words[4] && !a->s6_words[5])
+        return 1;                                           /* ::/96 */
+    if (IN6_IS_ADDR_SITELOCAL( a )) return 1;               /* fec0::/10 */
+    if (a->s6_bytes[0] == 0x3f && a->s6_bytes[1] == 0xfe) return 1;   /* 3ffe::/16 */
+
+    return 40;                                              /* ::/0 */
+}
+
 static const char *debugstr_wsaioctl(DWORD code)
 {
     const char *buf_type, *family;
@@ -2309,6 +2339,7 @@ static const char *debugstr_wsaioctl(DWORD code)
         /* IOCTL_NAME(SIO_ACQUIRE_PORT_RESERVATION); */
         IOCTL_NAME(SIO_ADDRESS_LIST_CHANGE);
         IOCTL_NAME(SIO_ADDRESS_LIST_QUERY);
+        IOCTL_NAME(SIO_ADDRESS_LIST_SORT);
         IOCTL_NAME(SIO_ASSOCIATE_HANDLE);
         /* IOCTL_NAME(SIO_ASSOCIATE_PORT_RESERVATION);
         IOCTL_NAME(SIO_BASE_HANDLE);
@@ -2650,6 +2681,75 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID 
             SetLastError( WSAEINVAL );
             return -1;
         }
+    }
+
+    case SIO_ADDRESS_LIST_SORT:
+    {
+        const SOCKET_ADDRESS_LIST *in_list = in_buff;
+        SOCKET_ADDRESS_LIST *out_list = out_buff;
+        NTSTATUS status = STATUS_SUCCESS;
+        int i, j, count;
+        DWORD ret;
+
+        TRACE("-> SIO_ADDRESS_LIST_SORT request\n");
+
+        if (!in_buff || in_size < sizeof(SOCKET_ADDRESS_LIST))
+        {
+            SetLastError( WSAEINVAL );
+            return -1;
+        }
+
+        count = in_list->iAddressCount;
+        if (count < 0 || in_size < FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[count]))
+        {
+            SetLastError( WSAEINVAL );
+            return -1;
+        }
+
+        if (!out_buff || out_size < in_size)
+        {
+            *ret_size = in_size;
+            SetLastError( WSAEFAULT );
+            return -1;
+        }
+
+        /* The addresses themselves live in the caller's buffer, past the
+         * array that points at them, so the whole thing comes across and the
+         * pointers move with it. */
+        memcpy( out_buff, in_buff, in_size );
+
+        for (i = 0; i < count; ++i)
+        {
+            const char *addr = (const char *)in_list->Address[i].lpSockaddr;
+
+            if (addr >= (const char *)in_buff && addr < (const char *)in_buff + in_size)
+                out_list->Address[i].lpSockaddr = (SOCKADDR *)((char *)out_buff + (addr - (const char *)in_buff));
+        }
+
+        /* RFC 6724 rule 6: a destination of higher precedence first. The
+         * rules that need to know which source address would be picked for
+         * each destination aren't applied, so addresses of equal precedence
+         * keep the order they came in. */
+        for (i = 1; i < count; ++i)
+        {
+            SOCKET_ADDRESS addr = out_list->Address[i];
+            unsigned int precedence = address_precedence( addr.lpSockaddr, addr.iSockaddrLength );
+
+            for (j = i; j > 0; --j)
+            {
+                const SOCKET_ADDRESS *prev = &out_list->Address[j - 1];
+
+                if (address_precedence( prev->lpSockaddr, prev->iSockaddrLength ) >= precedence) break;
+                out_list->Address[j] = *prev;
+            }
+            out_list->Address[j] = addr;
+        }
+
+        ret = server_ioctl_sock( s, IOCTL_AFD_WINE_COMPLETE_ASYNC, &status, sizeof(status),
+                                 NULL, 0, ret_size, overlapped, completion );
+        *ret_size = in_size;
+        SetLastError( ret );
+        return ret ? -1 : 0;
     }
 
     case SIO_GET_EXTENSION_FUNCTION_POINTER:

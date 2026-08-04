@@ -1149,6 +1149,7 @@ typedef enum _HEAP_INFORMATION_CLASS {
 #define ES_SYSTEM_REQUIRED    0x00000001
 #define ES_DISPLAY_REQUIRED   0x00000002
 #define ES_USER_PRESENT       0x00000004
+#define ES_AWAYMODE_REQUIRED  0x00000040
 #define ES_CONTINUOUS         0x80000000
 
 #include <excpt.h>
@@ -5951,7 +5952,8 @@ typedef enum _POWER_REQUEST_TYPE
 {
     PowerRequestDisplayRequired,
     PowerRequestSystemRequired,
-    PowerRequestAwayModeRequired
+    PowerRequestAwayModeRequired,
+    PowerRequestExecutionRequired
 } POWER_REQUEST_TYPE, *PPOWER_REQUEST_TYPE;
 
 #define POWER_REQUEST_CONTEXT_VERSION           0

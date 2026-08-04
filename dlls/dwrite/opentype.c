@@ -52,6 +52,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(dwrite);
 #define MS_PNG__TAG DWRITE_MAKE_OPENTYPE_TAG('p','n','g',' ')
 #define MS_JPG__TAG DWRITE_MAKE_OPENTYPE_TAG('j','p','g',' ')
 #define MS_TIFF_TAG DWRITE_MAKE_OPENTYPE_TAG('t','i','f','f')
+#define MS_PDF__TAG DWRITE_MAKE_OPENTYPE_TAG('p','d','f',' ')
+#define MS_DUPE_TAG DWRITE_MAKE_OPENTYPE_TAG('d','u','p','e')
+#define MS_FLIP_TAG DWRITE_MAKE_OPENTYPE_TAG('f','l','i','p')
+#define MS_MASK_TAG DWRITE_MAKE_OPENTYPE_TAG('m','a','s','k')
 
 #define MS_WOFF_TAG DWRITE_MAKE_OPENTYPE_TAG('w','O','F','F')
 #define MS_WOF2_TAG DWRITE_MAKE_OPENTYPE_TAG('w','O','F','2')
@@ -3159,6 +3163,19 @@ static unsigned int opentype_get_sbix_formats(IDWriteFontFace5 *fontface)
                         break;
                     case MS_TIFF_TAG:
                         ret |= DWRITE_GLYPH_IMAGE_FORMATS_TIFF;
+                        break;
+                    case MS_DUPE_TAG:
+                    case MS_FLIP_TAG:
+                    case MS_MASK_TAG:
+                        /* Apple's own types, which don't carry an image of
+                         * their own but name another glyph to draw instead.
+                         * That glyph is in the same strike and brings its own
+                         * format along, so there is nothing to add here.
+                         * Apple Color Emoji uses 'flip' for a thousand of its
+                         * glyphs. */
+                        break;
+                    case MS_PDF__TAG:
+                        /* No DWRITE_GLYPH_IMAGE_FORMATS value describes it. */
                         break;
                     default:
                         FIXME("unexpected bitmap format %s\n", debugstr_fourcc(GET_BE_DWORD(glyph_data->graphic_type)));

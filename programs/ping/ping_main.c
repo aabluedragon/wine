@@ -37,11 +37,31 @@ WINE_DEFAULT_DEBUG_CHANNEL(ping);
 
 static void usage(void)
 {
-    printf("Usage: ping [-n count] [-w timeout] [-l buffer_length] target_name\n\n"
+    printf("Usage: ping [-t] [-a] [-n count] [-l buffer_length] [-f] [-i TTL]\n"
+           "            [-w timeout] [-S srcaddr] [-4] [-6] target_name\n\n"
            "Options:\n"
+           "    -t  Ping the host until stopped.\n"
+           "    -a  Resolve the address to a host name.\n"
            "    -n  Number of echo requests to send.\n"
+           "    -l  Length of send buffer.\n"
+           "    -f  Set the Don't Fragment flag.\n"
+           "    -i  Time To Live.\n"
            "    -w  Timeout in milliseconds to wait for each reply.\n"
-           "    -l  Length of send buffer.\n");
+           "    -S  Source address to use.\n"
+           "    -4  Use IPv4.\n"
+           "    -6  Use IPv6.\n");
+}
+
+/* Every option that takes a value, so that a missing one is reported the same
+ * way for all of them. */
+static const char *option_value( int argc, char **argv, int *i )
+{
+    if (*i == argc - 1)
+    {
+        printf( "Missing value for option %s\n", argv[*i] );
+        exit(1);
+    }
+    return argv[++(*i)];
 }
 
 int __cdecl main(int argc, char** argv)
@@ -49,11 +69,14 @@ int __cdecl main(int argc, char** argv)
     unsigned int n = 4, i, w = 4000, l = 32;
     int res;
     int rec = 0, lost = 0, min = INT_MAX, max = 0;
+    IP_OPTION_INFORMATION options = { 128, 0, 0, 0, NULL }, *send_options = NULL;
+    BOOL forever = FALSE, resolve = FALSE;
+    unsigned long srcaddr = INADDR_ANY;
     WSADATA wsa;
     HANDLE icmp_file;
     unsigned long ipaddr;
     DWORD retval, reply_size;
-    char *send_data, ip[100], *hostname = NULL, rtt[16];
+    char *send_data, ip[100], *hostname = NULL, rtt[16], name[NI_MAXHOST];
     void *reply_buffer;
     struct in_addr addr;
     ICMP_ECHO_REPLY *reply;
@@ -73,12 +96,7 @@ int __cdecl main(int argc, char** argv)
             switch (argv[i][1])
             {
             case 'n':
-                if (i == argc - 1)
-                {
-                    printf( "Missing value for option %s\n", argv[i] );
-                    exit(1);
-                }
-                n = atoi(argv[++i]);
+                n = atoi(option_value( argc, argv, &i ));
                 if (n == 0)
                 {
                   printf("Bad value for option -n, valid range is from 1 to 4294967295.\n");
@@ -86,12 +104,7 @@ int __cdecl main(int argc, char** argv)
                 }
                 break;
             case 'w':
-                if (i == argc - 1)
-                {
-                    printf( "Missing value for option %s\n", argv[i] );
-                    exit(1);
-                }
-                w = atoi(argv[++i]);
+                w = atoi(option_value( argc, argv, &i ));
                 if (w == 0)
                 {
                     printf("Bad value for option -w.\n");
@@ -99,24 +112,53 @@ int __cdecl main(int argc, char** argv)
                 }
                 break;
             case 'l':
-                if (i == argc - 1)
-                {
-                    printf( "Missing value for option %s\n", argv[i] );
-                    exit(1);
-                }
-                l = atoi(argv[++i]);
+                l = atoi(option_value( argc, argv, &i ));
                 if (l == 0)
                 {
                     printf("Bad value for option -l.\n");
                     exit(1);
                 }
                 break;
+            case 't':
+                forever = TRUE;
+                break;
+            case 'a':
+                resolve = TRUE;
+                break;
+            case 'f':
+                options.Flags |= IP_FLAG_DF;
+                send_options = &options;
+                break;
+            case 'i':
+                res = atoi(option_value( argc, argv, &i ));
+                if (res < 1 || res > 255)
+                {
+                    printf("Bad value for option -i, valid range is from 1 to 255.\n");
+                    exit(1);
+                }
+                options.Ttl = res;
+                send_options = &options;
+                break;
+            case 'S':
+                srcaddr = inet_addr(option_value( argc, argv, &i ));
+                if (srcaddr == INADDR_NONE)
+                {
+                    printf("Bad value for option -S.\n");
+                    exit(1);
+                }
+                break;
+            case '4':
+                /* The only family this sends on. */
+                break;
+            case '6':
+                printf("Only IPv4 echo requests are supported.\n");
+                exit(1);
             case '?':
                 usage();
                 exit(1);
             default:
+                printf( "Bad option %s\n", argv[i] );
                 usage();
-                WINE_FIXME( "this command currently only supports the -n, -w and -l parameters.\n" );
                 exit(1);
             }
         }
@@ -173,12 +215,22 @@ int __cdecl main(int argc, char** argv)
         return 1;
     }
 
+    if (resolve)
+    {
+        SOCKADDR_IN sa = { 0 };
+
+        sa.sin_family = AF_INET;
+        sa.sin_addr = addr;
+        if (!getnameinfo( (SOCKADDR *)&sa, sizeof(sa), name, sizeof(name), NULL, 0, 0 ))
+            hostname = name;
+    }
+
     printf("Pinging %s [%s] with %d bytes of data:\n", hostname, ip, l);
-    for (i = 0; i < n; i++)
+    for (i = 0; forever || i < n; i++)
     {
         SetLastError(0);
-        retval = IcmpSendEcho(icmp_file, ipaddr, send_data, l,
-            NULL, reply_buffer, reply_size, w);
+        retval = IcmpSendEcho2Ex(icmp_file, NULL, NULL, NULL, srcaddr, ipaddr, send_data, l,
+            send_options, reply_buffer, reply_size, w);
         if (retval != 0)
         {
             reply = (ICMP_ECHO_REPLY *) reply_buffer;
@@ -203,7 +255,7 @@ int __cdecl main(int argc, char** argv)
                 puts("PING: transmit failed. General failure.");
             lost++;
         }
-        if (i < n - 1) Sleep(1000);
+        if (forever || i < n - 1) Sleep(1000);
     }
 
     printf("\nPing statistics for %s\n", ip);
