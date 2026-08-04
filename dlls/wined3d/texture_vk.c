@@ -1536,7 +1536,8 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
 
     if (!(src_resource->access & WINED3D_RESOURCE_ACCESS_GPU))
     {
-        TRACE("Source resource does not have GPU access.\n");
+        TRACE("Source resource does not have GPU access, format %s -> %s.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
         return false;
     }
 
@@ -1545,7 +1546,8 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
         /* Formats without a Vulkan equivalent, e.g. the palettised formats
          * used by older DirectDraw applications, are handled by the CPU
          * blitter. */
-        TRACE("Format has no Vulkan equivalent.\n");
+        TRACE("Format %s -> %s has no Vulkan equivalent.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
         return false;
     }
 
