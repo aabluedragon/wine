@@ -116,6 +116,7 @@ struct macdrv_query;
 extern bool macdrv_err_on;
 extern int topmost_float_inactive;
 extern bool capture_displays_for_fullscreen;
+extern bool native_fullscreen;
 extern bool left_option_is_alt;
 extern bool right_option_is_alt;
 extern bool left_command_is_ctrl;
