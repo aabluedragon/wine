@@ -1534,15 +1534,10 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
         return false;
     }
 
-    /* A source the GPU cannot reach has to be uploaded before it can be blitted
-     * from, which is worth doing for a plain colour blit: the CPU blitter would
-     * otherwise walk the destination a pixel at a time, and a DirectDraw game
-     * that keeps its frame in a system memory surface and stretches it onto the
-     * screen pays that on every one. Anything more involved is left to the CPU
-     * blitter. */
-    if (!(src_resource->access & WINED3D_RESOURCE_ACCESS_GPU) && op != WINED3D_BLIT_OP_COLOR_BLIT)
+    if (!(src_resource->access & WINED3D_RESOURCE_ACCESS_GPU))
     {
-        TRACE("Source resource does not have GPU access.\n");
+        TRACE("Source resource does not have GPU access, format %s -> %s.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
         return false;
     }
 
