@@ -401,9 +401,6 @@ typedef struct macdrv_event {
             void           *tried_windows;
         }                                           window_got_focus;
         struct {
-            bool    app_active;
-        }                                           window_lost_focus;
-        struct {
             bool    keep_frame;
             CGRect  frame;
         }                                           window_restore_requested;

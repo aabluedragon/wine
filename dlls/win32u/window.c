@@ -4447,52 +4447,9 @@ static void activate_other_window( HWND hwnd )
         if (!(hwnd_to = get_window_relative( hwnd_to, GW_HWNDNEXT ))) break;
     }
 
-    /* Nothing is activatable, but if the thread that owned the window still
-     * has other top-level windows - a fullscreen game tearing down its
-     * device window to recreate it at a new size - activate one of those
-     * even though it isn't visible yet. Activating NULL instead would
-     * broadcast WM_ACTIVATEAPP(FALSE) to the thread, which throws DirectDraw
-     * exclusive-mode devices into the lost state in the middle of the
-     * game's reinitialisation; Dungeon Keeper 2 exits outright when that
-     * happens. A same-thread activation sends no WM_ACTIVATEAPP at all,
-     * and the new window takes over normally once it is shown. */
-    if (!hwnd_to)
-    {
-        DWORD thread = get_window_thread( hwnd, NULL );
-        HWND *list, *phwnd;
-
-        if (thread && (list = list_window_children( 0 )))
-        {
-            for (phwnd = list; *phwnd; phwnd++)
-            {
-                DWORD style;
-
-                if (*phwnd == hwnd) continue;
-                if (get_window_thread( *phwnd, NULL ) != thread)
-                {
-                    TRACE( "candidate %p: other thread %04x (want %04x)\n",
-                           *phwnd, get_window_thread( *phwnd, NULL ), thread );
-                    continue;
-                }
-                style = get_window_long( *phwnd, GWL_STYLE );
-                if ((style & (WS_POPUP|WS_CHILD)) == WS_CHILD)
-                {
-                    TRACE( "candidate %p: style %#x rejected\n", *phwnd, (UINT)style );
-                    continue;
-                }
-                /* Even a disabled or hidden window will do here; what matters
-                 * is keeping activation on the thread. */
-                hwnd_to = *phwnd;
-                TRACE( "same-thread fallback: activating %p (style %#x)\n", hwnd_to, (UINT)style );
-                break;
-            }
-            free( list );
-        }
-    }
-
  done:
     fg = NtUserGetForegroundWindow();
-    TRACE( "hwnd = %p win = %p fg = %p\n", hwnd, hwnd_to, fg );
+    TRACE( "win = %p fg = %p\n", hwnd_to, fg );
     if (!fg || hwnd == fg)
     {
         if (set_foreground_window( hwnd_to, FALSE, FALSE )) return;
