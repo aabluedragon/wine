@@ -213,6 +213,13 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
+    /* Fault every page in while this is still plain anonymous memory. Once
+     * the allocation has been imported into the host driver (wired into a
+     * Metal buffer on macOS), first-touch faults become enormously more
+     * expensive - over a millisecond per page - which makes the first use
+     * of every fresh staging buffer region take seconds. */
+    memset( mapping, 0, alloc_size );
+
     if ((res = device->p_vkGetMemoryHostPointerPropertiesEXT( device->host.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                               mapping, &props )))
     {

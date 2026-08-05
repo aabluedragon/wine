@@ -354,25 +354,21 @@ void *wined3d_allocator_chunk_vk_map(struct wined3d_allocator_chunk_vk *chunk_vk
 void wined3d_allocator_chunk_vk_unmap(struct wined3d_allocator_chunk_vk *chunk_vk,
         struct wined3d_context_vk *context_vk)
 {
-    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
-    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
-
     TRACE("chunk_vk %p, context_vk %p.\n", chunk_vk, context_vk);
 
+    /* Keep the chunk mapped even when nothing is using the mapping. With
+     * MoltenVK under wow64 the mapping is placed into the 32-bit address
+     * space with vm_remap(), and the first CPU access to each page of a
+     * fresh mapping takes over a millisecond to fault in under Rosetta.
+     * Cycling the mapping therefore turns every staging upload of a few
+     * megabytes into a multi-second stall; a 640x480 game stretching its
+     * frame to a 1470x956 primary spent 2.2 seconds per frame just
+     * re-faulting the staging chunk. Address space is reclaimed when the
+     * chunk itself is destroyed, which wined3d_allocator_vk_destroy_chunk()
+     * handles for a still-mapped chunk. */
     wined3d_allocator_chunk_vk_lock(chunk_vk);
-
-    if (--chunk_vk->c.map_count)
-    {
-        wined3d_allocator_chunk_vk_unlock(chunk_vk);
-        return;
-    }
-
-    VK_CALL(vkUnmapMemory(device_vk->vk_device, chunk_vk->vk_memory));
-    chunk_vk->c.map_ptr = NULL;
-
+    --chunk_vk->c.map_count;
     wined3d_allocator_chunk_vk_unlock(chunk_vk);
-
-    adapter_adjust_mapped_memory(device_vk->d.adapter, -WINED3D_ALLOCATOR_CHUNK_SIZE);
 }
 
 VkDeviceMemory wined3d_context_vk_allocate_vram_chunk_memory(struct wined3d_context_vk *context_vk,
