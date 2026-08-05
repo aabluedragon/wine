@@ -1840,12 +1840,23 @@ void macdrv_window_lost_focus(HWND hwnd, const macdrv_event *event)
 {
     if (!hwnd) return;
 
-    TRACE("win %p/%p fg %p\n", hwnd, event->window, NtUserGetForegroundWindow());
+    TRACE("win %p/%p fg %p app_active %d\n", hwnd, event->window,
+          NtUserGetForegroundWindow(), event->window_lost_focus.app_active);
 
     if (hwnd == NtUserGetForegroundWindow())
     {
         send_message(hwnd, WM_CANCELMODE, 0, 0);
-        if (hwnd == NtUserGetForegroundWindow())
+        /* If the app is still active, the key window is moving to another
+         * window of this process (games recreating their device window do
+         * this constantly); the WINDOW_GOT_FOCUS event that follows will
+         * transfer the foreground. Dropping the foreground to the desktop
+         * here would send WM_ACTIVATEAPP(FALSE), which puts a DirectDraw
+         * exclusive-mode device into the lost state mid-reinit; Dungeon
+         * Keeper 2 quits outright when that happens. Windows only sends
+         * WM_ACTIVATEAPP when activation moves to another application, so
+         * keep the foreground until it actually does. If the whole app is
+         * deactivating, APP_DEACTIVATED handles the foreground instead. */
+        if (hwnd == NtUserGetForegroundWindow() && !event->window_lost_focus.app_active)
             NtUserSetForegroundWindowInternal(NtUserGetDesktopWindow());
     }
 }

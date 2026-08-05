@@ -3111,6 +3111,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         if (causing_becomeKeyWindow) return;
 
         event = macdrv_create_event(WINDOW_LOST_FOCUS, self);
+        event->window_lost_focus.app_active = [NSApp isActive];
         [queue postEvent:event];
         macdrv_release_event(event);
     }
