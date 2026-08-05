@@ -2155,6 +2155,13 @@ wined3d_cs_push_constant_info[] =
     [WINED3D_PUSH_CONSTANTS_PS_FFP]     = {1, sizeof(struct wined3d_ffp_ps_constants),            WINED3D_SHADER_TYPE_PIXEL},
 };
 
+/* The fixed function constant buffers are small and are rewritten constantly;
+ * the shader constant buffers are large and are not worth copying in full. */
+static bool push_constants_use_shadow(enum wined3d_push_constants type)
+{
+    return type == WINED3D_PUSH_CONSTANTS_VS_FFP || type == WINED3D_PUSH_CONSTANTS_PS_FFP;
+}
+
 static bool prepare_push_constant_buffer(struct wined3d_device_context *context, enum wined3d_push_constants type)
 {
     const struct push_constant_info *info = &wined3d_cs_push_constant_info[type];
@@ -2173,12 +2180,31 @@ static bool prepare_push_constant_buffer(struct wined3d_device_context *context,
     {
         desc.bind_flags = WINED3D_BIND_CONSTANT_BUFFER;
         desc.access = WINED3D_RESOURCE_ACCESS_GPU;
+        /* Fixed function constants are rewritten for nearly every draw. Put
+         * them in memory the CPU can write directly, so that replacing the
+         * buffer contents is a plain memcpy into a freshly renamed buffer
+         * rather than a staging copy recorded into the command buffer. */
+        if (push_constants_use_shadow(type))
+            desc.access |= WINED3D_RESOURCE_ACCESS_MAP_W;
     }
 
     if (!device->push_constants[type] && FAILED(hr = wined3d_buffer_create(device,
             &desc, NULL, NULL, &wined3d_null_parent_ops, &device->push_constants[type])))
     {
         ERR("Failed to create push constant buffer, hr %#lx.\n", hr);
+        return false;
+    }
+
+    /* Updating part of a GPU-only buffer has to go through a staging buffer,
+     * and the copy has to be recorded outside of a render pass. Fixed function
+     * constants change with almost every draw, so that ends the render pass
+     * for every draw, which is ruinous on tiler-style drivers. Keep a CPU copy
+     * of the whole buffer instead; replacing all of it lets the buffer simply
+     * be renamed, with no command buffer work at all. */
+    if (gpu && push_constants_use_shadow(type) && !device->push_constants_shadow[type]
+            && !(device->push_constants_shadow[type] = calloc(1, desc.byte_width)))
+    {
+        ERR("Failed to allocate push constant shadow.\n");
         return false;
     }
 
@@ -2235,9 +2261,20 @@ void wined3d_device_context_push_constants(struct wined3d_device_context *contex
     unsigned int byte_offset = start_idx * info->size;
     unsigned int byte_size = count * info->size;
     struct wined3d_box box;
+    void *shadow;
 
     if (!prepare_push_constant_buffer(context, type))
         return;
+
+    if ((shadow = context->device->push_constants_shadow[type]))
+    {
+        unsigned int buffer_size = context->device->push_constants[type]->resource.size;
+
+        memcpy((char *)shadow + byte_offset, constants, byte_size);
+        byte_offset = 0;
+        byte_size = buffer_size;
+        constants = shadow;
+    }
 
     wined3d_box_set(&box, byte_offset, 0, byte_offset + byte_size, 1, 0, 1);
     wined3d_device_context_emit_update_sub_resource(context,

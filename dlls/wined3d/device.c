@@ -1715,8 +1715,10 @@ void wined3d_device_uninit_3d(struct wined3d_device *device)
     {
         if ((buffer = device->push_constants[i]))
             wined3d_buffer_decref(buffer);
+        free(device->push_constants_shadow[i]);
     }
     memset(device->push_constants, 0, sizeof(device->push_constants));
+    memset(device->push_constants_shadow, 0, sizeof(device->push_constants_shadow));
 
     wined3d_device_context_emit_reset_state(&device->cs->c, true);
     state_cleanup(state);
@@ -5047,6 +5049,8 @@ HRESULT CDECL wined3d_device_reset(struct wined3d_device *device,
             if (device->push_constants[i])
                 wined3d_buffer_decref(device->push_constants[i]);
             device->push_constants[i] = NULL;
+            free(device->push_constants_shadow[i]);
+            device->push_constants_shadow[i] = NULL;
         }
         state_unbind_resources(state);
     }

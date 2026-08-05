@@ -3094,6 +3094,9 @@ struct wined3d_device
     struct wined3d_cs *cs;
 
     struct wined3d_buffer *push_constants[WINED3D_PUSH_CONSTANTS_COUNT];
+    /* CPU copy of the fixed-function constant buffers, so that a change to a
+     * single constant can be uploaded as a whole-buffer update. */
+    void *push_constants_shadow[WINED3D_PUSH_CONSTANTS_COUNT];
 
     /* Context management */
     struct wined3d_context **contexts;
