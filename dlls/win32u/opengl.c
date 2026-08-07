@@ -76,6 +76,9 @@ static struct pbuffer *pbuffer_from_client_pbuffer( HPBUFFERARB client_pbuffer )
 static const struct opengl_driver_funcs nulldrv_funcs, *driver_funcs = &nulldrv_funcs;
 static struct list devices_egl = LIST_INIT( devices_egl );
 static struct egl_platform display_egl;
+/* EGL_OPENGL_API, or EGL_OPENGL_ES_API on platforms that only have GLES
+ * configs to offer - Android has no desktop OpenGL at all. */
+static EGLenum egl_client_api = EGL_OPENGL_API;
 static struct opengl_funcs display_funcs;
 static void *global_context;
 
@@ -541,6 +544,22 @@ static UINT egldrv_init_pixel_formats( UINT *onscreen_count )
         funcs->p_eglGetConfigAttrib( egl->display, configs[i], EGL_RENDERABLE_TYPE, &render );
         if (render & EGL_OPENGL_BIT) configs[j++] = configs[i];
     }
+    if (!j)
+    {
+        /* No desktop OpenGL on this platform. Take the GLES configs instead,
+         * otherwise there are no pixel formats at all and nothing can create
+         * a context. */
+        for (i = 0; i < count; i++)
+        {
+            funcs->p_eglGetConfigAttrib( egl->display, configs[i], EGL_RENDERABLE_TYPE, &render );
+            if (render & (EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT)) configs[j++] = configs[i];
+        }
+        if (j)
+        {
+            WARN( "No desktop OpenGL configs, falling back to OpenGL ES\n" );
+            egl_client_api = EGL_OPENGL_ES_API;
+        }
+    }
     count = j;
 
     if (TRACE_ON(wgl)) for (i = 0; i < count; i++)
@@ -820,18 +839,25 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
         switch (attribs[0])
         {
         case WGL_CONTEXT_MAJOR_VERSION_ARB:
-            name = EGL_CONTEXT_MAJOR_VERSION_KHR;
+            name = egl_client_api == EGL_OPENGL_ES_API ? EGL_NONE : EGL_CONTEXT_MAJOR_VERSION_KHR;
             break;
         case WGL_CONTEXT_MINOR_VERSION_ARB:
-            name = EGL_CONTEXT_MINOR_VERSION_KHR;
+            name = egl_client_api == EGL_OPENGL_ES_API ? EGL_NONE : EGL_CONTEXT_MINOR_VERSION_KHR;
             break;
         case WGL_CONTEXT_FLAGS_ARB:
-            name = EGL_CONTEXT_FLAGS_KHR;
+            name = egl_client_api == EGL_OPENGL_ES_API ? EGL_NONE : EGL_CONTEXT_FLAGS_KHR;
             break;
         case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
             name = EGL_CONTEXT_OPENGL_NO_ERROR_KHR;
             break;
         case WGL_CONTEXT_PROFILE_MASK_ARB:
+            if (egl_client_api == EGL_OPENGL_ES_API)
+            {
+                /* the profile is implied by the client API, and EGL rejects
+                 * the desktop profile attribute on an ES context */
+                name = EGL_NONE;
+                break;
+            }
             if (attribs[1] & WGL_CONTEXT_ES2_PROFILE_BIT_EXT)
             {
                 ERR( "OpenGL ES contexts are not supported\n" );
@@ -857,6 +883,15 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
             if (dst == attribs_end) attribs_end += 2;
         }
     }
+    if (egl_client_api == EGL_OPENGL_ES_API)
+    {
+        /* eglCreateContext defaults to OpenGL ES 1.1, which is no use to a
+         * caller expecting desktop GL. Ask for the newest ES instead. */
+        assert( attribs_end - egl_attribs <= ARRAY_SIZE(egl_attribs) - 3 );
+        attribs_end[0] = EGL_CONTEXT_MAJOR_VERSION_KHR;
+        attribs_end[1] = 3;
+        attribs_end += 2;
+    }
     *attribs_end = EGL_NONE;
 
     /* For now only OpenGL is supported. It's enough to set the API only for
@@ -866,8 +901,16 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
      *    > EGL_OPENGL_API and EGL_OPENGL_ES_API are interchangeable for all
      *    > purposes except eglCreateContext.
      */
-    funcs->p_eglBindAPI( EGL_OPENGL_API );
-    *context = funcs->p_eglCreateContext( egl->display, EGL_NO_CONFIG_KHR, share, attribs ? egl_attribs : NULL );
+    funcs->p_eglBindAPI( egl_client_api );
+    *context = funcs->p_eglCreateContext( egl->display, EGL_NO_CONFIG_KHR, share,
+                                          (attribs || attribs_end != egl_attribs) ? egl_attribs : NULL );
+
+    if (!*context && egl_client_api == EGL_OPENGL_ES_API)
+    {
+        attribs_end[-1] = 2;
+        WARN( "Retrying with OpenGL ES 2\n" );
+        *context = funcs->p_eglCreateContext( egl->display, EGL_NO_CONFIG_KHR, share, egl_attribs );
+    }
 
     if ((err = funcs->p_eglGetError()) != EGL_SUCCESS || !*context)
     {
@@ -896,7 +939,13 @@ static BOOL egldrv_make_current( struct opengl_drawable *draw, struct opengl_dra
     TRACE( "draw %s, read %s, context %p\n", debugstr_opengl_drawable( draw ), debugstr_opengl_drawable( read ), context );
 
     if (!context) return funcs->p_eglMakeCurrent( egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, NULL );
-    return funcs->p_eglMakeCurrent( egl->display, draw ? draw->surface : EGL_NO_SURFACE, read ? read->surface : EGL_NO_SURFACE, context );
+    if (!funcs->p_eglMakeCurrent( egl->display, draw ? draw->surface : EGL_NO_SURFACE,
+                                  read ? read->surface : EGL_NO_SURFACE, context ))
+    {
+        WARN( "eglMakeCurrent failed, error %#x\n", funcs->p_eglGetError() );
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static void egldrv_pbuffer_destroy( struct opengl_drawable *drawable )
@@ -954,18 +1003,23 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
     TRACE( "EGL client extensions:\n" );
     dump_extensions( extensions );
 
-#define CHECK_EXTENSION( ext )                                  \
-    if (!has_extension( extensions, #ext ))                     \
-    {                                                           \
-        ERR( "Failed to find required extension %s\n", #ext );  \
-        goto failed;                                            \
-    }
+    /* Not every implementation advertises these - Android's client extension
+     * string lists neither, although its eglGetProcAddress does resolve core
+     * entry points and it has had EGL 1.5 platform support for years. What
+     * matters is whether the entry points can actually be found, which the
+     * loop below decides, so only warn here. */
+#define CHECK_EXTENSION( ext )                                          \
+    if (!has_extension( extensions, #ext ))                             \
+        WARN( "Extension %s is not advertised\n", #ext );
     CHECK_EXTENSION( EGL_KHR_client_get_all_proc_addresses );
     CHECK_EXTENSION( EGL_EXT_platform_base );
 #undef CHECK_EXTENSION
 
+    /* fall back to the library itself for anything eglGetProcAddress will not
+     * resolve, which is what EGL_KHR_client_get_all_proc_addresses buys us */
 #define USE_GL_FUNC( func )                                                                     \
-    if (!funcs->p_##func && !(funcs->p_##func = (void *)funcs->p_eglGetProcAddress( #func )))   \
+    if (!funcs->p_##func && !(funcs->p_##func = (void *)funcs->p_eglGetProcAddress( #func )) && \
+        !(funcs->p_##func = dlsym( funcs->egl_handle, #func )))                                 \
     {                                                                                           \
         ERR( "Failed to load symbol %s\n", #func );                                             \
         goto failed;                                                                            \
@@ -1162,7 +1216,7 @@ static void init_device_info( struct egl_platform *egl, const struct opengl_func
         funcs->p_eglQueryDeviceBinaryEXT( egl->device, EGL_DRIVER_UUID_EXT, sizeof(egl->driver_uuid), &egl->driver_uuid, &count );
     }
 
-    funcs->p_eglBindAPI( EGL_OPENGL_API );
+    funcs->p_eglBindAPI( egl_client_api );
     funcs->p_eglGetConfigs( egl->display, &config, 1, &count );
     if (!count) config = EGL_NO_CONFIG_KHR;
 
@@ -1866,7 +1920,11 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
     struct opengl_context *previous = NtCurrentTeb()->glContext;
     BOOL ret = FALSE;
 
-    if (!(new_draw = get_updated_drawable( draw_hdc, context->format, context->draw ))) return FALSE;
+    if (!(new_draw = get_updated_drawable( draw_hdc, context->format, context->draw )))
+    {
+        WARN( "No drawable for draw_hdc %p, format %u\n", draw_hdc, context->format );
+        return FALSE;
+    }
     if (!draw_hdc && context->draw == context->read) opengl_drawable_add_ref( (new_read = new_draw) );
     else if (draw_hdc && draw_hdc == read_hdc) opengl_drawable_add_ref( (new_read = new_draw) );
     else new_read = get_updated_drawable( read_hdc, context->format, context->read );
@@ -1952,7 +2010,14 @@ static BOOL win32u_wglMakeContextCurrentARB( HDC draw_hdc, HDC read_hdc, HGLRC c
     }
 
     created = create_memory_pbuffer( draw_hdc );
-    if (!context_sync_drawables( context, draw_hdc, read_hdc )) return FALSE;
+    if (!context_sync_drawables( context, draw_hdc, read_hdc ))
+    {
+        /* leaving the last error untouched here reports whatever happened to
+         * be set before, which is thoroughly misleading */
+        WARN( "Failed to sync drawables for context %p\n", context );
+        RtlSetLastWin32Error( ERROR_INVALID_OPERATION );
+        return FALSE;
+    }
     NtCurrentTeb()->glContext = context;
     if (created) flush_memory_dc( context, draw_hdc, TRUE, NULL );
 
@@ -2680,6 +2745,746 @@ void win32u_glImportSemaphoreWin32NameEXT( GLuint semaphore, GLenum type, const 
     }
 }
 
+/* a harmless landing place for entry points the driver does not implement */
+static void *gl_unimplemented(void) { return NULL; }
+
+
+/**********************************************************************
+ *   Fixed function emulation for OpenGL ES
+ *
+ * A GLES driver has no compatibility profile: no matrix stack, no client
+ * vertex arrays, and no gl_ built-ins in the shading language. opengl32
+ * rewrites the built-ins an application's shaders use into wine_ prefixed
+ * attributes and uniforms; what follows keeps the state those names need and
+ * feeds it to the program before each draw.
+ */
+
+#define FFP_MAX_TEXTURES 8
+#define FFP_STACK_DEPTH  32
+
+/* attribute locations bound into every program that uses the built-ins */
+enum ffp_attrib
+{
+    FFP_ATTRIB_VERTEX = 0,
+    FFP_ATTRIB_NORMAL = 2,
+    FFP_ATTRIB_COLOR  = 3,
+    FFP_ATTRIB_TEXCOORD0 = 8,
+};
+
+struct ffp_matrix { float m[16]; };
+
+struct ffp_stack
+{
+    struct ffp_matrix stack[FFP_STACK_DEPTH];
+    unsigned int top;
+};
+
+struct ffp_state
+{
+    struct ffp_stack modelview, projection, texture[FFP_MAX_TEXTURES];
+    GLenum mode;
+    unsigned int active_texture;      /* glClientActiveTexture */
+    BOOL alpha_test;
+    float alpha_ref;
+    BOOL texture_2d[8];               /* glEnable( GL_TEXTURE_2D ), which GLES does not have */
+    BOOL texture_2d_seen;             /* whether the application manages it at all */
+    BOOL texcoord_array[8];           /* glEnableClientState( GL_TEXTURE_COORD_ARRAY ) */
+    struct
+    {
+        float color[4];
+        float density, start, end;
+    } fog;
+    unsigned int server_texture;      /* glActiveTexture */
+    BOOL initialised;
+};
+
+static pthread_once_t ffp_once = PTHREAD_ONCE_INIT;
+static pthread_key_t ffp_key;
+
+static void ffp_key_init(void) { pthread_key_create( &ffp_key, free ); }
+
+static const struct ffp_matrix ffp_identity =
+{
+    { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1 }
+};
+
+static struct ffp_state *ffp_get_state(void)
+{
+    struct ffp_state *state;
+    unsigned int i;
+
+    pthread_once( &ffp_once, ffp_key_init );
+    if ((state = pthread_getspecific( ffp_key ))) return state;
+    if (!(state = calloc( 1, sizeof(*state) ))) return NULL;
+
+    state->mode = GL_MODELVIEW;
+    state->modelview.stack[0] = ffp_identity;
+    state->projection.stack[0] = ffp_identity;
+    for (i = 0; i < FFP_MAX_TEXTURES; i++) state->texture[i].stack[0] = ffp_identity;
+    state->fog.density = 1.0f;
+    state->fog.end = 1.0f;
+    pthread_setspecific( ffp_key, state );
+    return state;
+}
+
+static struct ffp_stack *ffp_current_stack( struct ffp_state *state )
+{
+    switch (state->mode)
+    {
+    case GL_PROJECTION: return &state->projection;
+    case GL_TEXTURE:    return &state->texture[state->active_texture];
+    default:            return &state->modelview;
+    }
+}
+
+static void ffp_matrix_multiply( struct ffp_matrix *dst, const struct ffp_matrix *a, const struct ffp_matrix *b )
+{
+    struct ffp_matrix res;
+    unsigned int i, j;
+
+    /* column major, as OpenGL stores them */
+    for (i = 0; i < 4; i++) for (j = 0; j < 4; j++)
+        res.m[i * 4 + j] = a->m[0 * 4 + j] * b->m[i * 4 + 0] + a->m[1 * 4 + j] * b->m[i * 4 + 1] +
+                           a->m[2 * 4 + j] * b->m[i * 4 + 2] + a->m[3 * 4 + j] * b->m[i * 4 + 3];
+    *dst = res;
+}
+
+static void WINAPI ffp_glMatrixMode( GLenum mode )
+{
+    struct ffp_state *state = ffp_get_state();
+    if (state) state->mode = mode;
+}
+
+static void WINAPI ffp_glLoadIdentity(void)
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+    if (!state) return;
+    stack = ffp_current_stack( state );
+    stack->stack[stack->top] = ffp_identity;
+}
+
+static void WINAPI ffp_glLoadMatrixf( const GLfloat *m )
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+    if (!state) return;
+    stack = ffp_current_stack( state );
+    memcpy( stack->stack[stack->top].m, m, sizeof(stack->stack[0].m) );
+}
+
+static void WINAPI ffp_glMultMatrixf( const GLfloat *m )
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+    struct ffp_matrix mat;
+    if (!state) return;
+    stack = ffp_current_stack( state );
+    memcpy( mat.m, m, sizeof(mat.m) );
+    ffp_matrix_multiply( &stack->stack[stack->top], &stack->stack[stack->top], &mat );
+}
+
+static void WINAPI ffp_glPushMatrix(void)
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+    if (!state) return;
+    stack = ffp_current_stack( state );
+    if (stack->top + 1 >= FFP_STACK_DEPTH) return;
+    stack->stack[stack->top + 1] = stack->stack[stack->top];
+    stack->top++;
+}
+
+static void WINAPI ffp_glPopMatrix(void)
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+    if (!state) return;
+    stack = ffp_current_stack( state );
+    if (stack->top) stack->top--;
+}
+
+static void WINAPI ffp_glOrtho( GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f )
+{
+    struct ffp_matrix mat = ffp_identity;
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+
+    if (!state || r == l || t == b || f == n) return;
+    mat.m[0] = 2.0f / (r - l);
+    mat.m[5] = 2.0f / (t - b);
+    mat.m[10] = -2.0f / (f - n);
+    mat.m[12] = -(r + l) / (r - l);
+    mat.m[13] = -(t + b) / (t - b);
+    mat.m[14] = -(f + n) / (f - n);
+    stack = ffp_current_stack( state );
+    ffp_matrix_multiply( &stack->stack[stack->top], &stack->stack[stack->top], &mat );
+}
+
+static void WINAPI ffp_glFrustum( GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f )
+{
+    struct ffp_matrix mat = { { 0 } };
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_stack *stack;
+
+    if (!state || r == l || t == b || f == n) return;
+    mat.m[0] = 2.0f * n / (r - l);
+    mat.m[5] = 2.0f * n / (t - b);
+    mat.m[8] = (r + l) / (r - l);
+    mat.m[9] = (t + b) / (t - b);
+    mat.m[10] = -(f + n) / (f - n);
+    mat.m[11] = -1.0f;
+    mat.m[14] = -2.0f * f * n / (f - n);
+    stack = ffp_current_stack( state );
+    ffp_matrix_multiply( &stack->stack[stack->top], &stack->stack[stack->top], &mat );
+}
+
+static void WINAPI ffp_glClientActiveTexture( GLenum texture )
+{
+    struct ffp_state *state = ffp_get_state();
+    if (state && texture - GL_TEXTURE0 < FFP_MAX_TEXTURES) state->active_texture = texture - GL_TEXTURE0;
+}
+
+/* client vertex arrays become generic attribute arrays */
+static void WINAPI ffp_glVertexPointer( GLint size, GLenum type, GLsizei stride, const void *ptr )
+{
+    static UINT once;
+    if (!once++) TRACE( "application is using client vertex arrays\n" );
+    display_funcs.p_glVertexAttribPointer( FFP_ATTRIB_VERTEX, size, type, GL_FALSE, stride, ptr );
+}
+
+static void WINAPI ffp_glColorPointer( GLint size, GLenum type, GLsizei stride, const void *ptr )
+{
+    display_funcs.p_glVertexAttribPointer( FFP_ATTRIB_COLOR, size, type, GL_TRUE, stride, ptr );
+}
+
+static void WINAPI ffp_glNormalPointer( GLenum type, GLsizei stride, const void *ptr )
+{
+    display_funcs.p_glVertexAttribPointer( FFP_ATTRIB_NORMAL, 3, type, GL_TRUE, stride, ptr );
+}
+
+static void WINAPI ffp_glTexCoordPointer( GLint size, GLenum type, GLsizei stride, const void *ptr )
+{
+    struct ffp_state *state = ffp_get_state();
+    display_funcs.p_glVertexAttribPointer( FFP_ATTRIB_TEXCOORD0 + (state ? state->active_texture : 0),
+                                           size, type, GL_FALSE, stride, ptr );
+}
+
+static int ffp_client_state_attrib( GLenum array )
+{
+    struct ffp_state *state;
+
+    switch (array)
+    {
+    case GL_VERTEX_ARRAY: return FFP_ATTRIB_VERTEX;
+    case GL_COLOR_ARRAY: return FFP_ATTRIB_COLOR;
+    case GL_NORMAL_ARRAY: return FFP_ATTRIB_NORMAL;
+    case GL_TEXTURE_COORD_ARRAY:
+        state = ffp_get_state();
+        return FFP_ATTRIB_TEXCOORD0 + (state ? state->active_texture : 0);
+    default: return -1;
+    }
+}
+
+static void ffp_set_client_state( GLenum array, BOOL enable )
+{
+    int attrib = ffp_client_state_attrib( array );
+    struct ffp_state *state;
+
+    if (attrib < 0) return;
+    if (array == GL_TEXTURE_COORD_ARRAY && (state = ffp_get_state()))
+        state->texcoord_array[state->active_texture] = enable;
+    if (enable) display_funcs.p_glEnableVertexAttribArray( attrib );
+    else display_funcs.p_glDisableVertexAttribArray( attrib );
+}
+
+static void WINAPI ffp_glEnableClientState( GLenum array )
+{
+    ffp_set_client_state( array, TRUE );
+}
+
+static void WINAPI ffp_glDisableClientState( GLenum array )
+{
+    ffp_set_client_state( array, FALSE );
+}
+
+static PFN_glEnable ffp_next_glEnable;
+static PFN_glDisable ffp_next_glDisable;
+
+static void WINAPI ffp_glAlphaFunc( GLenum func, GLclampf ref )
+{
+    struct ffp_state *state = ffp_get_state();
+    if (state) state->alpha_ref = ref;
+}
+
+static void ffp_set_enable( GLenum cap, BOOL enable )
+{
+    struct ffp_state *state = ffp_get_state();
+
+    /* GLES has neither of these: the emulation shader implements them, and
+     * passing them through would only raise GL_INVALID_ENUM. */
+    if (cap == GL_ALPHA_TEST)
+    {
+        if (state) state->alpha_test = enable;
+        return;
+    }
+    if (cap == GL_TEXTURE_2D)
+    {
+        if (state)
+        {
+            state->texture_2d[state->server_texture] = enable;
+            state->texture_2d_seen = TRUE;
+        }
+        return;
+    }
+    if (enable) ffp_next_glEnable( cap );
+    else ffp_next_glDisable( cap );
+}
+
+static void WINAPI ffp_glEnable( GLenum cap )
+{
+    ffp_set_enable( cap, TRUE );
+}
+
+static void WINAPI ffp_glDisable( GLenum cap )
+{
+    ffp_set_enable( cap, FALSE );
+}
+
+static void ffp_set_fog( GLenum pname, const float *params )
+{
+    struct ffp_state *state = ffp_get_state();
+
+    if (!state) return;
+    switch (pname)
+    {
+    case GL_FOG_COLOR: memcpy( state->fog.color, params, sizeof(state->fog.color) ); break;
+    case GL_FOG_DENSITY: state->fog.density = params[0]; break;
+    case GL_FOG_START: state->fog.start = params[0]; break;
+    case GL_FOG_END: state->fog.end = params[0]; break;
+    default: break;  /* GL_FOG_MODE and the hints never reach the shader */
+    }
+}
+
+static void WINAPI ffp_glFogf( GLenum pname, GLfloat param )
+{
+    ffp_set_fog( pname, &param );
+}
+
+static void WINAPI ffp_glFogfv( GLenum pname, const GLfloat *params )
+{
+    ffp_set_fog( pname, params );
+}
+
+static void WINAPI ffp_glFogi( GLenum pname, GLint param )
+{
+    float value = param;
+    ffp_set_fog( pname, &value );
+}
+
+static void WINAPI ffp_glFogiv( GLenum pname, const GLint *params )
+{
+    float values[4] = { params[0], 0.0f, 0.0f, 0.0f };
+
+    if (pname == GL_FOG_COLOR)
+    {
+        unsigned int i;
+        for (i = 0; i < 4; i++) values[i] = params[i] / 2147483647.0f;
+    }
+    ffp_set_fog( pname, values );
+}
+
+/* GLES only accepts sized internal formats where desktop GL takes the base
+ * name, and rejects the upload outright otherwise. */
+static GLint ffp_internal_format( GLint internalformat )
+{
+    switch (internalformat)
+    {
+    case GL_RED: return GL_R8;
+    case GL_RG: return GL_RG8;
+    default: return internalformat;
+    }
+}
+
+static PFN_glTexImage2D ffp_next_glTexImage2D;
+
+static void WINAPI ffp_glTexImage2D( GLenum target, GLint level, GLint internalformat, GLsizei width,
+                                     GLsizei height, GLint border, GLenum format, GLenum type,
+                                     const void *pixels )
+{
+    ffp_next_glTexImage2D( target, level, ffp_internal_format( internalformat ), width, height,
+                           border, format, type, pixels );
+}
+
+static PFN_glActiveTexture ffp_next_glActiveTexture;
+
+static void WINAPI ffp_glActiveTexture( GLenum texture )
+{
+    struct ffp_state *state = ffp_get_state();
+    if (state && texture - GL_TEXTURE0 < 8) state->server_texture = texture - GL_TEXTURE0;
+    ffp_next_glActiveTexture( texture );
+}
+
+static void WINAPI ffp_glColor4f( GLfloat r, GLfloat g, GLfloat b, GLfloat a )
+{
+    GLfloat color[4] = { r, g, b, a };
+    display_funcs.p_glVertexAttrib4fv( FFP_ATTRIB_COLOR, color );
+}
+
+static void WINAPI ffp_glColor4fv( const GLfloat *v )
+{
+    display_funcs.p_glVertexAttrib4fv( FFP_ATTRIB_COLOR, v );
+}
+
+static void WINAPI ffp_glColor4ub( GLubyte r, GLubyte g, GLubyte b, GLubyte a )
+{
+    GLfloat color[4] = { r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f };
+    display_funcs.p_glVertexAttrib4fv( FFP_ATTRIB_COLOR, color );
+}
+
+/* uniform locations for one program, looked up once */
+struct ffp_program
+{
+    GLuint program;
+    GLint mvp, modelview, projection, texture[FFP_MAX_TEXTURES];
+    GLint fog_color, fog_density, fog_start, fog_end, fog_scale;
+    BOOL any;
+};
+
+static struct ffp_program ffp_programs[64];
+
+static struct ffp_program *ffp_get_program( GLuint program )
+{
+    struct ffp_program *entry = &ffp_programs[program % ARRAY_SIZE(ffp_programs)];
+    unsigned int i;
+    char name[32];
+
+    if (entry->program == program) return entry;
+
+    memset( entry, 0, sizeof(*entry) );
+    entry->program = program;
+    entry->mvp = display_funcs.p_glGetUniformLocation( program, "wine_ModelViewProjectionMatrix" );
+    entry->modelview = display_funcs.p_glGetUniformLocation( program, "wine_ModelViewMatrix" );
+    entry->projection = display_funcs.p_glGetUniformLocation( program, "wine_ProjectionMatrix" );
+    for (i = 0; i < FFP_MAX_TEXTURES; i++)
+    {
+        snprintf( name, sizeof(name), "wine_TextureMatrix[%u]", i );
+        entry->texture[i] = display_funcs.p_glGetUniformLocation( program, name );
+        if (entry->texture[i] >= 0) entry->any = TRUE;
+    }
+    entry->fog_color = display_funcs.p_glGetUniformLocation( program, "wine_Fog.color" );
+    entry->fog_density = display_funcs.p_glGetUniformLocation( program, "wine_Fog.density" );
+    entry->fog_start = display_funcs.p_glGetUniformLocation( program, "wine_Fog.start" );
+    entry->fog_end = display_funcs.p_glGetUniformLocation( program, "wine_Fog.end" );
+    entry->fog_scale = display_funcs.p_glGetUniformLocation( program, "wine_Fog.scale" );
+
+    if (entry->mvp >= 0 || entry->modelview >= 0 || entry->projection >= 0 ||
+        entry->fog_color >= 0 || entry->fog_end >= 0) entry->any = TRUE;
+    return entry;
+}
+
+/* push the tracked matrices into the program about to draw */
+static void ffp_sync_uniforms(void)
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_program *entry;
+    struct ffp_matrix mvp;
+    GLint program = 0;
+    unsigned int i;
+
+    if (!state) return;
+    display_funcs.p_glGetIntegerv( GL_CURRENT_PROGRAM, &program );
+    if (!program) return;
+    if (!(entry = ffp_get_program( program )) || !entry->any) return;
+
+    if (entry->mvp >= 0)
+    {
+        ffp_matrix_multiply( &mvp, &state->projection.stack[state->projection.top],
+                             &state->modelview.stack[state->modelview.top] );
+        display_funcs.p_glUniformMatrix4fv( entry->mvp, 1, GL_FALSE, mvp.m );
+    }
+    if (entry->modelview >= 0)
+        display_funcs.p_glUniformMatrix4fv( entry->modelview, 1, GL_FALSE,
+                                            state->modelview.stack[state->modelview.top].m );
+    if (entry->projection >= 0)
+        display_funcs.p_glUniformMatrix4fv( entry->projection, 1, GL_FALSE,
+                                            state->projection.stack[state->projection.top].m );
+    for (i = 0; i < FFP_MAX_TEXTURES; i++)
+        if (entry->texture[i] >= 0)
+            display_funcs.p_glUniformMatrix4fv( entry->texture[i], 1, GL_FALSE,
+                                                state->texture[i].stack[state->texture[i].top].m );
+
+    if (entry->fog_color >= 0) display_funcs.p_glUniform4fv( entry->fog_color, 1, state->fog.color );
+    if (entry->fog_density >= 0) display_funcs.p_glUniform1f( entry->fog_density, state->fog.density );
+    if (entry->fog_start >= 0) display_funcs.p_glUniform1f( entry->fog_start, state->fog.start );
+    if (entry->fog_end >= 0) display_funcs.p_glUniform1f( entry->fog_end, state->fog.end );
+    if (entry->fog_scale >= 0)
+    {
+        float range = state->fog.end - state->fog.start;
+        display_funcs.p_glUniform1f( entry->fog_scale, range ? 1.0f / range : 1.0f );
+    }
+}
+
+/* When no program is bound the application is asking for the fixed function
+ * pipeline, which a GLES driver does not have. Draw with a built in program
+ * that does what the default pipeline would: transform by the modelview
+ * projection matrix and modulate the texture by the primary colour. */
+static const char ffp_default_vertex_shader[] =
+    "#version 100\n"
+    "precision highp float;\n"
+    "uniform mat4 wine_ModelViewProjectionMatrix;\n"
+    "uniform mat4 wine_TextureMatrix[8];\n"
+    "attribute vec4 wine_Vertex;\n"
+    "attribute vec4 wine_Color;\n"
+    "attribute vec4 wine_MultiTexCoord0;\n"
+    "varying vec4 wine_FrontColor;\n"
+    "varying vec4 wine_TexCoord[1];\n"
+    "void main()\n"
+    "{\n"
+    "    gl_Position = wine_ModelViewProjectionMatrix * wine_Vertex;\n"
+    "    wine_FrontColor = wine_Color;\n"
+    "    wine_TexCoord[0] = wine_TextureMatrix[0] * wine_MultiTexCoord0;\n"
+    "}\n";
+
+static const char ffp_default_fragment_shader[] =
+    "#version 100\n"
+    "precision highp float;\n"
+    "uniform sampler2D wine_Sampler0;\n"
+    "uniform bool wine_Textured;\n"
+    "uniform bool wine_AlphaTest;\n"
+    "uniform float wine_AlphaRef;\n"
+    "varying vec4 wine_FrontColor;\n"
+    "varying vec4 wine_TexCoord[1];\n"
+    "void main()\n"
+    "{\n"
+    "    vec4 color = wine_FrontColor;\n"
+    "    if (wine_Textured) color *= texture2D( wine_Sampler0, wine_TexCoord[0].xy );\n"
+    "    if (wine_AlphaTest && color.a <= wine_AlphaRef) discard;\n"
+    "    gl_FragColor = color;\n"
+    "}\n";
+
+struct ffp_default_program
+{
+    GLuint program;
+    GLint mvp, texmatrix, sampler, textured, alpha_test, alpha_ref;
+    BOOL failed;
+};
+
+static __thread struct ffp_default_program ffp_default;
+
+static GLuint ffp_compile( GLenum type, const char *source )
+{
+    GLint status = 0, len = strlen( source );
+    GLuint shader = display_funcs.p_glCreateShader( type );
+
+    if (!shader) return 0;
+    display_funcs.p_glShaderSource( shader, 1, &source, &len );
+    display_funcs.p_glCompileShader( shader );
+    display_funcs.p_glGetShaderiv( shader, GL_COMPILE_STATUS, &status );
+    if (!status)
+    {
+        char log[1024];
+        GLsizei log_len = 0;
+        display_funcs.p_glGetShaderInfoLog( shader, sizeof(log), &log_len, log );
+        ERR( "Failed to compile the fixed function shader: %s\n", debugstr_a(log) );
+        display_funcs.p_glDeleteShader( shader );
+        return 0;
+    }
+    return shader;
+}
+
+static struct ffp_default_program *ffp_get_default_program(void)
+{
+    struct ffp_default_program *prog = &ffp_default;
+    GLuint vs, fs;
+    GLint status = 0;
+
+    if (prog->program || prog->failed) return prog->program ? prog : NULL;
+    prog->failed = TRUE;
+
+    if (!(vs = ffp_compile( GL_VERTEX_SHADER, ffp_default_vertex_shader ))) return NULL;
+    if (!(fs = ffp_compile( GL_FRAGMENT_SHADER, ffp_default_fragment_shader )))
+    {
+        display_funcs.p_glDeleteShader( vs );
+        return NULL;
+    }
+
+    prog->program = display_funcs.p_glCreateProgram();
+    display_funcs.p_glAttachShader( prog->program, vs );
+    display_funcs.p_glAttachShader( prog->program, fs );
+    display_funcs.p_glBindAttribLocation( prog->program, FFP_ATTRIB_VERTEX, "wine_Vertex" );
+    display_funcs.p_glBindAttribLocation( prog->program, FFP_ATTRIB_COLOR, "wine_Color" );
+    display_funcs.p_glBindAttribLocation( prog->program, FFP_ATTRIB_TEXCOORD0, "wine_MultiTexCoord0" );
+    display_funcs.p_glLinkProgram( prog->program );
+    display_funcs.p_glGetProgramiv( prog->program, GL_LINK_STATUS, &status );
+    display_funcs.p_glDeleteShader( vs );
+    display_funcs.p_glDeleteShader( fs );
+
+    if (!status)
+    {
+        char log[1024];
+        GLsizei log_len = 0;
+        display_funcs.p_glGetProgramInfoLog( prog->program, sizeof(log), &log_len, log );
+        ERR( "Failed to link the fixed function program: %s\n", debugstr_a(log) );
+        display_funcs.p_glDeleteProgram( prog->program );
+        prog->program = 0;
+        return NULL;
+    }
+
+    prog->mvp = display_funcs.p_glGetUniformLocation( prog->program, "wine_ModelViewProjectionMatrix" );
+    prog->texmatrix = display_funcs.p_glGetUniformLocation( prog->program, "wine_TextureMatrix[0]" );
+    prog->sampler = display_funcs.p_glGetUniformLocation( prog->program, "wine_Sampler0" );
+    prog->textured = display_funcs.p_glGetUniformLocation( prog->program, "wine_Textured" );
+    prog->alpha_test = display_funcs.p_glGetUniformLocation( prog->program, "wine_AlphaTest" );
+    prog->alpha_ref = display_funcs.p_glGetUniformLocation( prog->program, "wine_AlphaRef" );
+    prog->failed = FALSE;
+    TRACE( "built the fixed function program %u\n", prog->program );
+    return prog;
+}
+
+/* set up the built in program, returning whether it was bound */
+static BOOL ffp_begin_default_draw(void)
+{
+    struct ffp_state *state = ffp_get_state();
+    struct ffp_default_program *prog;
+    struct ffp_matrix mvp;
+    GLint program = 0;
+    BOOL textured;
+
+    display_funcs.p_glGetIntegerv( GL_CURRENT_PROGRAM, &program );
+    if (program) return FALSE;  /* the application has its own */
+    if (!state || !(prog = ffp_get_default_program())) return FALSE;
+
+    display_funcs.p_glUseProgram( prog->program );
+
+    ffp_matrix_multiply( &mvp, &state->projection.stack[state->projection.top],
+                         &state->modelview.stack[state->modelview.top] );
+    if (prog->mvp >= 0) display_funcs.p_glUniformMatrix4fv( prog->mvp, 1, GL_FALSE, mvp.m );
+    if (prog->texmatrix >= 0)
+        display_funcs.p_glUniformMatrix4fv( prog->texmatrix, 1, GL_FALSE, state->texture[0].stack[state->texture[0].top].m );
+    if (prog->sampler >= 0) display_funcs.p_glUniform1i( prog->sampler, 0 );
+
+    /* An application written against GL 2 may never touch GL_TEXTURE_2D, since
+     * by then texturing followed from binding a texture and feeding texture
+     * coordinates. Infer it in that case rather than drawing untextured. */
+    if (state->texture_2d_seen) textured = state->texture_2d[0];
+    else
+    {
+        GLint binding = 0;
+        display_funcs.p_glGetIntegerv( GL_TEXTURE_BINDING_2D, &binding );
+        textured = binding && state->texcoord_array[0];
+    }
+    if (prog->textured >= 0) display_funcs.p_glUniform1i( prog->textured, !!textured );
+    if (prog->alpha_test >= 0) display_funcs.p_glUniform1i( prog->alpha_test, !!state->alpha_test );
+    if (prog->alpha_ref >= 0) display_funcs.p_glUniform1f( prog->alpha_ref, state->alpha_ref );
+
+    /* without a colour array the primary colour is a constant */
+    return TRUE;
+}
+
+static void ffp_end_default_draw( BOOL used )
+{
+    if (used) display_funcs.p_glUseProgram( 0 );
+}
+
+static PFN_glDrawArrays ffp_next_glDrawArrays;
+static PFN_glDrawElements ffp_next_glDrawElements;
+static PFN_glDrawRangeElements ffp_next_glDrawRangeElements;
+static PFN_glLinkProgram ffp_next_glLinkProgram;
+
+static void WINAPI ffp_glDrawArrays( GLenum mode, GLint first, GLsizei count )
+{
+    BOOL used = ffp_begin_default_draw();
+    ffp_sync_uniforms();
+    ffp_next_glDrawArrays( mode, first, count );
+    ffp_end_default_draw( used );
+}
+
+static void WINAPI ffp_glDrawElements( GLenum mode, GLsizei count, GLenum type, const void *indices )
+{
+    BOOL used = ffp_begin_default_draw();
+    ffp_sync_uniforms();
+    ffp_next_glDrawElements( mode, count, type, indices );
+    ffp_end_default_draw( used );
+}
+
+static void WINAPI ffp_glDrawRangeElements( GLenum mode, GLuint start, GLuint end, GLsizei count,
+                                            GLenum type, const void *indices )
+{
+    BOOL used = ffp_begin_default_draw();
+    ffp_sync_uniforms();
+    ffp_next_glDrawRangeElements( mode, start, end, count, type, indices );
+    ffp_end_default_draw( used );
+}
+
+/* the rewritten attribute names have to be bound before the program links */
+static void WINAPI ffp_glLinkProgram( GLuint program )
+{
+    unsigned int i;
+    char name[32];
+
+    display_funcs.p_glBindAttribLocation( program, FFP_ATTRIB_VERTEX, "wine_Vertex" );
+    display_funcs.p_glBindAttribLocation( program, FFP_ATTRIB_NORMAL, "wine_Normal" );
+    display_funcs.p_glBindAttribLocation( program, FFP_ATTRIB_COLOR, "wine_Color" );
+    for (i = 0; i < FFP_MAX_TEXTURES; i++)
+    {
+        snprintf( name, sizeof(name), "wine_MultiTexCoord%u", i );
+        display_funcs.p_glBindAttribLocation( program, FFP_ATTRIB_TEXCOORD0 + i, name );
+    }
+    ffp_next_glLinkProgram( program );
+}
+
+static void init_ffp_emulation(void)
+{
+    display_funcs.p_glMatrixMode = ffp_glMatrixMode;
+    display_funcs.p_glLoadIdentity = ffp_glLoadIdentity;
+    display_funcs.p_glLoadMatrixf = ffp_glLoadMatrixf;
+    display_funcs.p_glMultMatrixf = ffp_glMultMatrixf;
+    display_funcs.p_glPushMatrix = ffp_glPushMatrix;
+    display_funcs.p_glPopMatrix = ffp_glPopMatrix;
+    display_funcs.p_glOrtho = ffp_glOrtho;
+    display_funcs.p_glFrustum = ffp_glFrustum;
+    display_funcs.p_glClientActiveTexture = ffp_glClientActiveTexture;
+    display_funcs.p_glVertexPointer = ffp_glVertexPointer;
+    display_funcs.p_glColorPointer = ffp_glColorPointer;
+    display_funcs.p_glNormalPointer = ffp_glNormalPointer;
+    display_funcs.p_glTexCoordPointer = ffp_glTexCoordPointer;
+    display_funcs.p_glEnableClientState = ffp_glEnableClientState;
+    display_funcs.p_glDisableClientState = ffp_glDisableClientState;
+    display_funcs.p_glColor4f = ffp_glColor4f;
+    display_funcs.p_glColor4fv = ffp_glColor4fv;
+    display_funcs.p_glColor4ub = ffp_glColor4ub;
+
+    display_funcs.p_glAlphaFunc = ffp_glAlphaFunc;
+
+    display_funcs.p_glFogf = ffp_glFogf;
+    display_funcs.p_glFogfv = ffp_glFogfv;
+    display_funcs.p_glFogi = ffp_glFogi;
+    display_funcs.p_glFogiv = ffp_glFogiv;
+
+    ffp_next_glTexImage2D = display_funcs.p_glTexImage2D;
+    if (ffp_next_glTexImage2D) display_funcs.p_glTexImage2D = ffp_glTexImage2D;
+
+    ffp_next_glActiveTexture = display_funcs.p_glActiveTexture;
+    if (ffp_next_glActiveTexture) display_funcs.p_glActiveTexture = ffp_glActiveTexture;
+
+    ffp_next_glEnable = display_funcs.p_glEnable;
+    ffp_next_glDisable = display_funcs.p_glDisable;
+    if (ffp_next_glEnable) display_funcs.p_glEnable = ffp_glEnable;
+    if (ffp_next_glDisable) display_funcs.p_glDisable = ffp_glDisable;
+
+    ffp_next_glDrawArrays = display_funcs.p_glDrawArrays;
+    ffp_next_glDrawElements = display_funcs.p_glDrawElements;
+    ffp_next_glDrawRangeElements = display_funcs.p_glDrawRangeElements;
+    ffp_next_glLinkProgram = display_funcs.p_glLinkProgram;
+    if (ffp_next_glDrawArrays) display_funcs.p_glDrawArrays = ffp_glDrawArrays;
+    if (ffp_next_glDrawElements) display_funcs.p_glDrawElements = ffp_glDrawElements;
+    if (ffp_next_glDrawRangeElements) display_funcs.p_glDrawRangeElements = ffp_glDrawRangeElements;
+    if (ffp_next_glLinkProgram) display_funcs.p_glLinkProgram = ffp_glLinkProgram;
+
+    TRACE( "installed fixed function emulation over OpenGL ES\n" );
+}
+
 static void display_funcs_init(void)
 {
     struct egl_platform *egl, *next;
@@ -2695,9 +3500,15 @@ static void display_funcs_init(void)
     if (!(pixel_formats = malloc( formats_count * sizeof(*pixel_formats) ))) ERR( "Failed to allocate memory for pixel formats\n" );
     else for (int i = 0; i < formats_count; i++) driver_funcs->p_describe_pixel_format( i + 1, pixel_formats + i );
 
+    /* A GLES driver cannot provide the desktop-only half of OpenGL. Leaving
+     * those entries NULL turns any call into a jump to address 0 and takes the
+     * process down, so land them on a no-op instead. */
 #define USE_GL_FUNC(func) \
     if (!display_funcs.p_##func && !(display_funcs.p_##func = driver_funcs->p_get_proc_address( #func ))) \
-        WARN( "%s not found.\n", #func );
+    { \
+        WARN( "%s not found.\n", #func ); \
+        display_funcs.p_##func = (void *)gl_unimplemented; \
+    }
     ALL_GL_FUNCS
     ALL_GL_EXT_FUNCS
 #undef USE_GL_FUNC
@@ -2705,6 +3516,8 @@ static void display_funcs_init(void)
     display_funcs.p_wglGetProcAddress = win32u_wglGetProcAddress;
     display_funcs.p_init_extensions = win32u_init_extensions;
     display_funcs.p_get_pixel_formats = win32u_get_pixel_formats;
+
+    if (egl_client_api == EGL_OPENGL_ES_API) init_ffp_emulation();
 
     driver_funcs->p_init_extensions( &display_funcs, global_extensions );
     display_funcs.p_wglGetPixelFormat = win32u_wglGetPixelFormat;
