@@ -1306,6 +1306,12 @@ static void output_import_section( int index, int is_delay )
         output( "\n\t.section .data$didat%d\n", index );
     else
         output( "\n\t.section .rdata$didat%d\n", index );
+
+    /* The thunk arrays are read with a plain load, so they have to be aligned
+     * to the pointer size. Nothing else in the import data is, and the import
+     * descriptor ahead of them is not a whole number of pointers long, so say
+     * so explicitly rather than inherit whatever offset it happens to end on. */
+    if (index == 4 || index == 5) output( "\t.balign %u\n", get_ptr_size() );
 }
 
 /* create a Windows-style import library */
@@ -1514,7 +1520,7 @@ static void build_windows_import_lib( const char *lib_name, DLLSPEC *spec, struc
                 output( "\tjmp *%s\n", asm_name( imp_name ) );
                 if (is_delay)
                 {
-                    output( "\n\t.section .text$1\n" );
+                    output( "\n\t.section .text$1,\"xr\"\n" );
                     output( ".L__wine_delay_import:\n" );
                     output( "\tmov $%s,%%eax\n", asm_name( imp_name ) );
                     output( "\tjmp %s\n", asm_name( delay_load ) );
@@ -1524,7 +1530,7 @@ static void build_windows_import_lib( const char *lib_name, DLLSPEC *spec, struc
                 output( "\tjmp *%s(%%rip)\n", asm_name( imp_name ) );
                 if (is_delay)
                 {
-                    output( "\n\t.section .text$1\n" );
+                    output( "\n\t.section .text$1,\"xr\"\n" );
                     output( ".L__wine_delay_import:\n" );
                     output( "\tlea %s(%%rip),%%rax\n", asm_name( imp_name ) );
                     output( "\tjmp %s\n", asm_name( delay_load ) );
@@ -1535,7 +1541,7 @@ static void build_windows_import_lib( const char *lib_name, DLLSPEC *spec, struc
                 output( "\tldr PC, [IP]\n" );
                 if (is_delay)
                 {
-                    output( "\n\t.section .text$1\n" );
+                    output( "\n\t.section .text$1,\"xr\"\n" );
                     output( ".L__wine_delay_import:\n" );
                     output( "\tldr IP, 1f\n" );
                     output( "\tldr IP, [IP]\n" );
@@ -1545,11 +1551,13 @@ static void build_windows_import_lib( const char *lib_name, DLLSPEC *spec, struc
                 break;
             case CPU_ARM64:
                 output( "\tadrp x16, %s\n", asm_name( imp_name ) );
-                output( "\tadd x16, x16, #:lo12:%s\n", asm_name( imp_name ) );
+                /* the thunk has to jump to the function the import address table
+                 * entry holds, not to the entry itself */
+                output( "\tldr x16, [x16, #:lo12:%s]\n", asm_name( imp_name ) );
                 output( "\tbr x16\n" );
                 if (is_delay)
                 {
-                    output( "\n\t.section .text$1\n" );
+                    output( "\n\t.section .text$1,\"xr\"\n" );
                     output( ".L__wine_delay_import:\n" );
                     output( "\tadrp x16, %s\n", asm_name( imp_name ) );
                     output( "\tadd x16, x16, #:lo12:%s\n", asm_name( imp_name ) );
