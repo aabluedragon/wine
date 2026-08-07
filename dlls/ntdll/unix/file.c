@@ -2642,6 +2642,9 @@ static NTSTATUS read_directory_data_getattrlist( struct dir_data *data, const ch
         return STATUS_NO_SUCH_FILE;
     /* If unix_name named a symlink, the above may have succeeded even if the symlink is broken.
        Check that with another call without FSOPT_NOFOLLOW.  We don't ask for any attributes. */
+#ifndef VLNK
+#define VLNK 5  /* not declared by the iOS SDK, but getattrlist still returns it */
+#endif
     if (buffer.type == VLNK)
     {
         u_int32_t dummy;
@@ -7249,7 +7252,7 @@ NTSTATUS get_device_info( int fd, FILE_FS_DEVICE_INFORMATION *info )
             info->DeviceType = FILE_DEVICE_TAPE;
             break;
         }
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__APPLE__)
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || (defined(__APPLE__) && !TARGET_OS_IPHONE)
         {
             int d_type;
             if (ioctl(fd, FIODTYPE, &d_type) == 0)

@@ -152,6 +152,19 @@ static void *try_dlopen( const char *argv0 )
     char *dir, *path, *p;
     void *handle;
 
+    /* On platforms where the unix libraries cannot be found from the loader's
+     * own path - an Android app has to keep everything it may execute in a
+     * single flat directory and reach it through symlinks, so the loader's
+     * real path says nothing about where the wine tree is - the directory is
+     * passed in explicitly instead. */
+    if ((p = getenv( "WINEUNIXDIR" )) && *p == '/')
+    {
+        path = build_path( p, "ntdll.so" );
+        handle = dlopen( path, RTLD_NOW );
+        free( path );
+        if (handle) return handle;
+    }
+
     if (!argv0) return NULL;
     if (!(dir = realpath_dirname( argv0 ))) return NULL;
 

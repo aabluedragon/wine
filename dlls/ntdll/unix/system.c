@@ -61,7 +61,7 @@
 #ifdef HAVE_SYS_AUXV_H
 # include <sys/auxv.h>
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 # include <CoreFoundation/CoreFoundation.h>
 # include <IOKit/IOKitLib.h>
 # include <IOKit/ps/IOPSKeys.h>
@@ -616,7 +616,7 @@ static BOOLEAN has_capability( int hwcap, unsigned long hwcap_bit )
 }
 
 #define HAS_FEATURE(hwcap, hwcap_bit, ...) has_capability( hwcap, hwcap_bit )
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 static BOOLEAN has_feature( const char *feature )
 {
     char buf[200];
@@ -1336,7 +1336,7 @@ static NTSTATUS create_logical_proc_info(void)
     return STATUS_SUCCESS;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 /* for 'data', max_len is the array count. for 'dataex', max_len is in bytes */
 static NTSTATUS create_logical_proc_info(void)
@@ -2311,7 +2311,7 @@ static struct smbios_prologue *create_smbios_data(void)
     return buf.prologue;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 static struct smbios_prologue *get_smbios_from_iokit(void)
 {
@@ -2561,7 +2561,7 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
                 info->IdleTime.QuadPart = (ULONGLONG)ptimes[CP_IDLE] * 10000000 / clockrate.stathz;
         }
     }
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     {
         host_name_port_t host = mach_host_self();
         struct host_cpu_load_info load_info;
@@ -2625,9 +2625,9 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
         }
     }
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__) || \
-    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+    defined(__OpenBSD__) || defined(__DragonFly__) || (defined(__APPLE__) && !TARGET_OS_IPHONE)
     {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         unsigned int val;
 #else
         unsigned long val;
@@ -3436,7 +3436,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
             break;
         }
         else
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         {
             processor_cpu_load_info_data_t *pinfo;
             mach_msg_type_number_t info_count;
@@ -4416,7 +4416,7 @@ static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
     return STATUS_SUCCESS;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
 {
@@ -4818,7 +4818,7 @@ NTSTATUS WINAPI NtInitiatePowerAction( POWER_ACTION action, SYSTEM_POWER_STATE s
 }
 
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 
 /* Hold or drop one power assertion, so that it matches what is being asked for. */
 static void set_power_assertion( CFStringRef type, BOOL wanted, IOPMAssertionID *id )

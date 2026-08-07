@@ -75,7 +75,7 @@
 # include <sys/scsiio.h>
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 # include <libkern/OSByteOrder.h>
 # include <sys/disk.h>
 # include <IOKit/IOKitLib.h>
@@ -340,7 +340,7 @@ static int CDROM_MediaChanged(int dev)
  * This is ugly and inefficient, but we have no choice since the partition fd doesn't
  * support the eject ioctl.
  */
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 static NTSTATUS get_parent_device( int fd, char *name, size_t len )
 {
     NTSTATUS status = STATUS_NO_SUCH_FILE;
@@ -520,7 +520,7 @@ static NTSTATUS CDROM_SyncCache(int dev, int fd)
     cdrom_cache[dev].toc_good = 1;
     return STATUS_SUCCESS;
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     int i;
     dk_cd_read_toc_t hdr;
     CDROM_TOC *toc = &cdrom_cache[dev].toc;
@@ -632,7 +632,7 @@ static BOOL CDROM_GetInterfaceInfo(int fd, UCHAR* iface, UCHAR* port, UCHAR* dev
         }
     }
     return FALSE;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_scsi_identify_t addr;
     if (ioctl(fd, DKIOCSCSIIDENTIFY, &addr) != -1)
     {
@@ -706,7 +706,7 @@ static NTSTATUS CDROM_GetStatusCode(int io)
  */
 static NTSTATUS CDROM_GetControl(int dev, int fd, CDROM_AUDIO_CONTROL* cac)
 {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     uint16_t speed;
     int io = ioctl( fd, DKIOCCDGETSPEED, &speed );
     if (io != 0) return CDROM_GetStatusCode( io );
@@ -823,7 +823,7 @@ static NTSTATUS CDROM_SetTray(int fd, BOOL doEject)
     return CDROM_GetStatusCode((ioctl(fd, CDIOCALLOW, NULL)) ||
                                (ioctl(fd, doEject ? CDIOCEJECT : CDIOCCLOSE, NULL)) ||
                                (ioctl(fd, CDIOCPREVENT, NULL)));
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     if (doEject) return CDROM_GetStatusCode( ioctl( fd, DKIOCEJECT, NULL ) );
     else return STATUS_NOT_SUPPORTED;
 #else
@@ -1096,7 +1096,7 @@ static NTSTATUS CDROM_ReadQChannel(int dev, int fd, const CDROM_SUB_Q_DATA_FORMA
 
  end:
     ret = CDROM_GetStatusCode(io);
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     SUB_Q_HEADER* hdr = (SUB_Q_HEADER*)data;
     int io = 0;
     union
@@ -1160,7 +1160,7 @@ static NTSTATUS CDROM_Verify(int dev, int fd)
         return STATUS_SUCCESS;
     else
         return STATUS_NO_MEDIA_IN_DEVICE;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 	/* At this point, we know that we have media, because in Mac OS X, the
 	 * device file is only created when media is present. */
 	return STATUS_SUCCESS;
@@ -1480,7 +1480,7 @@ static NTSTATUS CDROM_RawRead(int fd, const RAW_READ_INFO* raw, void* buffer, DW
 {
     int         ret = STATUS_NOT_SUPPORTED;
     int         io = -1;
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     dk_cd_read_t cdrd;
 #endif
 
@@ -1551,7 +1551,7 @@ static NTSTATUS CDROM_RawRead(int fd, const RAW_READ_INFO* raw, void* buffer, DW
         FIXME("NIY: %d\n", raw->TrackMode);
         return STATUS_INVALID_PARAMETER;
     }
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     /* Mac OS lets us read multiple parts of the sector at a time.
      * We can read all the sectors in at once, unlike Linux.
      */
@@ -1620,7 +1620,7 @@ static NTSTATUS CDROM_ScsiPassThroughDirect(int fd, const SCSI_PASS_THROUGH_DIRE
 #ifdef HAVE_SG_IO_HDR_T_INTERFACE_ID
     sg_io_hdr_t cmd;
     int io;
-#elif defined __APPLE__
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_scsi_command_t cmd;
     int io;
 #endif
@@ -1674,7 +1674,7 @@ static NTSTATUS CDROM_ScsiPassThroughDirect(int fd, const SCSI_PASS_THROUGH_DIRE
 
     ret = CDROM_GetStatusCode(io);
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
     memset(&cmd, 0, sizeof(cmd));
     memcpy(cmd.cdb, in_pkt->Cdb, in_pkt->CdbLength);
@@ -1822,7 +1822,7 @@ static NTSTATUS CDROM_ScsiPassThrough(int fd, const SCSI_PASS_THROUGH *in_pkt, S
 #ifdef HAVE_SG_IO_HDR_T_INTERFACE_ID
     sg_io_hdr_t cmd;
     int io;
-#elif defined __APPLE__
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_scsi_command_t cmd;
     int io;
 #endif
@@ -1879,7 +1879,7 @@ static NTSTATUS CDROM_ScsiPassThrough(int fd, const SCSI_PASS_THROUGH *in_pkt, S
 
     ret = CDROM_GetStatusCode(io);
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
     memset(&cmd, 0, sizeof(cmd));
     memcpy(cmd.cdb, in_pkt->Cdb, in_pkt->CdbLength);
@@ -2059,7 +2059,7 @@ static NTSTATUS CDROM_ScsiGetCaps(int fd, PIO_SCSI_CAPABILITIES caps)
     caps->AdapterScansDown = FALSE; /* FIXME ? */
     caps->AdapterUsesPio = FALSE; /* FIXME ? */
     ret = STATUS_SUCCESS;
-#elif defined __APPLE__
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     uint64_t bytesr, bytesw, align;
     int io = ioctl(fd, DKIOCGETMAXBYTECOUNTREAD, &bytesr);
     if (io != 0) return CDROM_GetStatusCode(io);
@@ -2121,7 +2121,7 @@ static NTSTATUS DVD_StartSession(int fd, const DVD_SESSION_ID *sid_in, PDVD_SESS
     ret =CDROM_GetStatusCode(ioctl(fd, DVD_AUTH, &auth_info));
     *sid_out = auth_info.lsa.agid;
     return ret;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     NTSTATUS ret = STATUS_NOT_SUPPORTED;
     dk_dvd_report_key_t dvdrk;
     DVDAuthenticationGrantIDInfo agid_info;
@@ -2157,7 +2157,7 @@ static NTSTATUS DVD_EndSession(int fd, const DVD_SESSION_ID *sid)
 
     TRACE("\n");
     return CDROM_GetStatusCode(ioctl(fd, DVD_AUTH, &auth_info));
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_dvd_send_key_t dvdsk;
 
     dvdsk.format = kDVDKeyFormatAGID_Invalidate;
@@ -2206,7 +2206,7 @@ static NTSTATUS DVD_SendKey(int fd, const DVD_COPY_PROTECT_KEY *key)
 	FIXME("Unknown Keytype 0x%x\n",key->KeyType);
     }
     return ret;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_dvd_send_key_t dvdsk;
     union
     {
@@ -2341,7 +2341,7 @@ static NTSTATUS DVD_ReadKey(int fd, PDVD_COPY_PROTECT_KEY key)
 	FIXME("Unknown keytype 0x%x\n",key->KeyType);
     }
     return ret;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     union
     {
         dk_dvd_report_key_t key;
@@ -2528,7 +2528,7 @@ static NTSTATUS DVD_GetRegion(int fd, PDVD_REGION region)
         }
     }
     return ret;
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     dk_dvd_report_key_t key;
     dk_dvd_read_structure_t dvd;
     DVDRegionPlaybackControlInfo rpc;
@@ -2708,7 +2708,7 @@ static NTSTATUS DVD_ReadStructure(int dev, const DVD_READ_STRUCTURE *structure, 
     case DvdMaxDescriptor: /* Suppress warning */
 	break;
     }
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     NTSTATUS ret;
     dk_dvd_read_structure_t dvdrs;
     union
@@ -2915,7 +2915,7 @@ NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc
         return status;
     }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     {
         char name[100];
 

@@ -65,7 +65,9 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/thread_act.h>
+# if !TARGET_OS_IPHONE
 #include <libproc.h>
+# endif
 #endif
 #ifdef __FreeBSD__
 #include <sys/thr.h>
@@ -2027,7 +2029,9 @@ BOOL get_thread_times(int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time, LA
     procstat_close(pstat);
     return ret;
 #elif defined(__APPLE__)
+#if !TARGET_OS_IPHONE
     struct proc_taskinfo info;
+#endif
 
     if (unix_tid != -1)
     {
@@ -2050,12 +2054,17 @@ BOOL get_thread_times(int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time, LA
         return TRUE;
     }
 
+#if TARGET_OS_IPHONE
+    /* libproc, and with it the whole-process times, is not in the iOS SDK. */
+    return FALSE;
+#else
     if (proc_pidinfo( unix_pid, PROC_PIDTASKINFO, 0, &info, sizeof(info) ) != sizeof(info))
         return FALSE;
     /* Mach reports these in nanoseconds. */
     kernel_time->QuadPart = info.pti_total_system / 100;
     user_time->QuadPart = info.pti_total_user / 100;
     return TRUE;
+#endif
 #else
     static int once;
     if (!once++) FIXME("not implemented on this platform\n");

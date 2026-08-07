@@ -66,7 +66,22 @@
 #if defined(__APPLE__)
 #define host_page_size mac_host_page_size
 # include <mach/mach_init.h>
-# include <mach/mach_vm.h>
+# if TARGET_OS_IPHONE
+/* The iOS SDK refuses to declare the mach_vm calls, but a simulator process is
+ * an ordinary macOS process and libsystem exports them all the same. */
+#  include <mach/mach_types.h>
+#  include <mach/vm_types.h>
+#  include <mach/vm_region.h>
+#  include <mach/vm_statistics.h>
+extern kern_return_t mach_vm_map( vm_map_t, mach_vm_address_t *, mach_vm_size_t, mach_vm_offset_t,
+                                  int, mem_entry_name_port_t, memory_object_offset_t, boolean_t,
+                                  vm_prot_t, vm_prot_t, vm_inherit_t );
+extern kern_return_t mach_vm_deallocate( vm_map_t, mach_vm_address_t, mach_vm_size_t );
+extern kern_return_t mach_vm_region( vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t,
+                                     vm_region_info_t, mach_msg_type_number_t *, mach_port_t * );
+# else
+#  include <mach/mach_vm.h>
+# endif
 # include <mach/task.h>
 # include <mach/thread_state.h>
 # include <mach/vm_map.h>
@@ -182,13 +197,21 @@ static const UINT_PTR host_page_mask = 0xfff;
 #endif
 
 /* Note: these are Windows limits, you cannot change them. */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(WINE_ADDRESS_SPACE_START)
+/* A platform whose kernel keeps the bottom of the address space to itself
+ * (iOS hands out nothing below 8GB) has to start higher up. */
+static void *address_space_start = (void *)WINE_ADDRESS_SPACE_START;
+#elif defined(__i386__) || defined(__x86_64__)
 static void *address_space_start = (void *)0x110000; /* keep DOS area clear */
 #else
 static void *address_space_start = (void *)0x10000;
 #endif
 #ifdef _WIN64
+#ifdef WINE_ADDRESS_SPACE_LIMIT
+static void *address_space_limit = (void *)WINE_ADDRESS_SPACE_LIMIT;
+#else
 static void *address_space_limit = (void *)0x7fffffff0000;  /* top of the total available address space */
+#endif
 static void *user_space_limit    = (void *)0x7fffffff0000;  /* top of the user address space */
 static void *working_set_limit   = (void *)0x7fffffff0000;  /* top of the current working set */
 #else
@@ -202,7 +225,12 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
 static struct file_view *arm64ec_view;
 
 ULONG_PTR user_space_wow_limit = 0;
-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+#ifndef WINE_USER_SHARED_DATA_ADDR
+/* Windows puts this at a fixed address; a platform whose kernel refuses to map
+ * there (iOS reserves everything below 8GB) can move it with this. */
+#define WINE_USER_SHARED_DATA_ADDR 0x7ffe0000
+#endif
+struct _KUSER_SHARED_DATA *user_shared_data = (void *)WINE_USER_SHARED_DATA_ADDR;
 
 /* TEB allocation blocks */
 static void *teb_block;
@@ -748,10 +776,17 @@ static void mmap_init( const struct preload_info *preload_info )
 #else
 
     if (preload_info) return;
+#ifdef WINE_ADDRESS_SPACE_START
+    /* The usual areas all sit in the part of the address space iOS keeps for
+     * itself, and reserving none of them leaves nothing to allocate from.
+     * Take a range out of the window the kernel does hand out instead. */
+    reserve_area( (void *)WINE_ADDRESS_SPACE_START, (void *)0x000700000000 );
+#else
     /* if we don't have a preloader, try to reserve the space now */
     reserve_area( (void *)0x000000010000, (void *)0x000068000000 );
     reserve_area( (void *)0x00007f000000, (void *)0x00007fff0000 );
     reserve_area( (void *)0x7ffffe000000, (void *)0x7fffffff0000 );
+#endif
 
 #endif
 }
@@ -1577,6 +1612,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
     struct wine_rb_entry *first = find_view_inside_range( &base, &end, top_down );
     ptrdiff_t step = top_down ? -(align_mask + 1) : (align_mask + 1);
     void *start;
+
 
     if (top_down)
     {
@@ -2768,6 +2804,11 @@ static NTSTATUS map_pe_header( void *ptr, size_t size, size_t map_size, int fd, 
 static void *get_host_addr_space_limit(void)
 {
 #ifdef __APPLE__
+#ifdef WINE_ADDRESS_SPACE_LIMIT
+    /* iOS hands out a much narrower window than the architectural maximum, and
+     * a top-down search that starts above it never finds anything. */
+    return (void *)WINE_ADDRESS_SPACE_LIMIT;
+#endif
     /* See MACH_VM_MAX_ADDRESS_RAW in xnu osfmk/mach/arm/vm_param.h */
     return (void *)0x7ffffe000000;
 #else
@@ -3051,6 +3092,14 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     INT_PTR delta;
 
     TRACE_(module)( "mapping PE file %s at %p-%p\n", debugstr_us(nt_name), ptr, ptr + total_size );
+
+#ifdef __ANDROID__
+    /* Android will not make an executable mapping of a file that has been
+     * modified in memory (SELinux execmod), so an image that has to be
+     * relocated cannot be mapped from its file at all. Copy it into anonymous
+     * memory instead, the same way an image on removable media is handled. */
+    if (image_info->map_addr && image_info->map_addr != image_info->base) removable = TRUE;
+#endif
 
     /* map the header */
 
@@ -3724,7 +3773,11 @@ void virtual_init(void)
     free_ranges_end = free_ranges + 1;
 
     /* make the DOS area accessible (except the low 64K) to hide bugs in broken apps like Excel 2003 */
+#ifdef WINE_ADDRESS_SPACE_START
+    size = 0;  /* there is no DOS area to speak of when the address space starts this high */
+#else
     size = (char *)address_space_start - (char *)0x10000;
+#endif
     if (size && mmap_is_in_reserved_area( (void*)0x10000, size ) == 1)
         anon_mmap_fixed( (void *)0x10000, size, PROT_READ | PROT_WRITE, 0 );
 }
@@ -4071,8 +4124,16 @@ TEB *virtual_alloc_first_teb(void)
         exit(1);
     }
 
+#ifdef WINE_ADDRESS_SPACE_START
+    /* The TEBs are kept in the low 2GB so that 32-bit code can reach them; on a
+     * platform with no low memory at all, and so no 32-bit support to speak of,
+     * that is a constraint we cannot meet and do not need. */
+    NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, 0, &total,
+                             MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+#else
     NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, is_win64 ? limit_2g - 1 : 0, &total,
                              MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+#endif
     teb_block_pos = 30;
     ptr = (char *)teb_block + 30 * block_size;
     data_size = 2 * block_size;
@@ -4112,8 +4173,13 @@ NTSTATUS virtual_alloc_teb( struct thread_data *data )
         {
             SIZE_T total = 32 * block_size;
 
+#ifdef WINE_ADDRESS_SPACE_START
+            if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &ptr, 0,
+                                                   &total, MEM_RESERVE, PAGE_READWRITE )))
+#else
             if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &ptr, user_space_wow_limit,
                                                    &total, MEM_RESERVE, PAGE_READWRITE )))
+#endif
             {
                 server_leave_uninterrupted_section( &virtual_mutex, &sigset );
                 return status;
@@ -5094,7 +5160,11 @@ void virtual_set_large_address_space(void)
     {
         if (!is_wow64())
         {
+#ifdef WINE_ADDRESS_SPACE_START
+            address_space_start = (void *)WINE_ADDRESS_SPACE_START;
+#else
             address_space_start = (void *)0x10000;
+#endif
 #ifndef __APPLE__  /* don't free the zerofill section on macOS */
             if ((main_image_info.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA) &&
                 (main_image_info.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE))
