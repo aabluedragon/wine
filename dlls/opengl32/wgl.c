@@ -40,6 +40,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(opengl);
 WINE_DECLARE_DEBUG_CHANNEL(fps);
 
+static HINSTANCE opengl32_module;
+
 static const MAT2 identity = { {0,1},{0,0},{0,0},{0,1} };
 
 #define WINE_GL_RESERVED_FORMATS_HDC      2
@@ -1922,14 +1924,28 @@ PROC WINAPI wglGetProcAddress( LPCSTR name )
     const struct registry_entry *func;
     const enum opengl_extension *ext;
     struct context *ctx;
+    PROC proc;
 
-    if (!(ctx = get_current_context())) return NULL;
+    if (!(ctx = get_current_context()))
+    {
+        WARN( "No current context looking up %s\n", name );
+        return NULL;
+    }
 
     if (!(func = get_function_entry( name )))
     {
+        /* The core entry points are not in the extension registry, but they
+         * are exported by this module, and a real driver returns them here
+         * rather than making the caller fall back to GetProcAddress. */
+        if ((proc = (PROC)GetProcAddress( opengl32_module, name )))
+        {
+            TRACE( "%s -> %p (exported)\n", name, proc );
+            return proc;
+        }
         WARN( "Function %s unknown\n", name );
         return NULL;
     }
+    TRACE( "%s -> %p\n", name, func->func );
 
     if (!strncmp( name, "wglGetExtensionsString", 22 ))
     {
@@ -1953,8 +1969,17 @@ PROC WINAPI wglGetProcAddress( LPCSTR name )
      * (e.g. macOS), and the macOS driver emulates it for such contexts. */
     if (!strcmp( name, "glGetStringi" )) return func->func;
 
+    /* A real driver hands the entry point out regardless; loaders like glad
+     * store whatever comes back and call it, so returning NULL here turns a
+     * missing extension into a jump to address 0. */
+    if ((proc = (PROC)GetProcAddress( opengl32_module, name )))
+    {
+        WARN( "Extensions required for %s not supported, returning export %p\n", name, proc );
+        return proc;
+    }
+
     WARN( "Extensions required for %s not supported\n", name );
-    return NULL;
+    return func->func;
 }
 
 /***********************************************************************
@@ -2848,6 +2873,7 @@ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
     switch(reason)
     {
     case DLL_PROCESS_ATTACH:
+        opengl32_module = hinst;
         if ((status = __wine_init_unix_call()) ||
             (status = UNIX_CALL( process_attach, &params )))
         {

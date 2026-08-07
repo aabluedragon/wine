@@ -97,3 +97,6 @@ extern void pop_default_fbo( TEB *teb );
 extern void resolve_default_fbo( TEB *teb, BOOL read );
 
 #endif /* __WINE_OPENGL32_UNIX_PRIVATE_H */
+
+extern BOOL gl_is_gles;
+extern char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLint *length );

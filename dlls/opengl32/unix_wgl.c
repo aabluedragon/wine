@@ -122,6 +122,7 @@ struct context
     UINT64 debug_user;             /* client pointer */
     GLubyte *extensions;           /* extension string */
     char *wow64_version;           /* wow64 GL version override */
+    char *glsl_version;            /* desktop-style GLSL version for GLES */
     BOOL use_pinned_memory;        /* use GL_AMD_pinned_memory to emulate persistent maps */
 
     /* semi-stub state tracker for wglCopyContext */
@@ -446,6 +447,9 @@ static const char *parse_gl_version( const char *gl_version, int *major, int *mi
 {
     const char *ptr = gl_version;
 
+    /* an OpenGL ES implementation reports "OpenGL ES N.M <vendor>" */
+    if (!strncmp( ptr, "OpenGL ES ", 10 )) ptr += 10;
+
     *major = atoi( ptr );
     if (*major <= 0)
         ERR( "Invalid OpenGL major version %d.\n", *major );
@@ -745,6 +749,214 @@ void wrap_glGetUnsignedBytevEXT( TEB *teb, GLenum pname, GLubyte *data, PFN_glGe
     return p_glGetUnsignedBytevEXT( pname, data );
 }
 
+BOOL gl_is_gles = FALSE;
+
+/* An OpenGL ES implementation only accepts GLSL ES, and rejects the desktop
+ * "#version 110" that applications written against OpenGL 2.0 emit. GLSL ES
+ * 1.00 is otherwise close enough to GLSL 1.10 to compile the same shaders, so
+ * rewrite the directive and add the precision the fragment stage requires. */
+/* The compatibility built-ins an application may use, and the names they are
+ * rewritten to. GLSL reserves the gl_ prefix, so they cannot simply be
+ * declared - every occurrence has to be renamed. win32u binds the attributes
+ * to matching locations and feeds the uniforms from the tracked fixed
+ * function state. */
+static const struct { const char *from, *to; } glsl_builtins[] =
+{
+    { "gl_ModelViewProjectionMatrix", "wine_ModelViewProjectionMatrix" },
+    { "gl_ModelViewMatrix",           "wine_ModelViewMatrix" },
+    { "gl_ProjectionMatrix",          "wine_ProjectionMatrix" },
+    { "gl_TextureMatrix",             "wine_TextureMatrix" },
+    { "gl_MultiTexCoord",             "wine_MultiTexCoord" },
+    { "gl_FogFragCoord",              "wine_FogFragCoord" },
+    { "gl_Fog",                       "wine_Fog" },
+    { "gl_TexCoord",                  "wine_TexCoord" },
+    { "gl_FrontColor",                "wine_FrontColor" },
+    { "gl_BackColor",                 "wine_FrontColor" },
+    { "gl_Vertex",                    "wine_Vertex" },
+    { "gl_Normal",                    "wine_Normal" },
+    { "gl_Color",                     NULL },  /* stage dependent, see below */
+};
+
+static BOOL glsl_uses( const char *src, size_t len, const char *name )
+{
+    return !!memmem( src, len, name, strlen( name ) );
+}
+
+/* replace every occurrence of from with to, returning a new buffer */
+static char *glsl_replace( char *src, const char *from, const char *to )
+{
+    size_t from_len = strlen( from ), to_len = strlen( to ), len = strlen( src );
+    char *out, *dst, *ptr = src, *found;
+
+    if (!(found = strstr( src, from ))) return src;
+    if (!(out = malloc( len + (len / from_len + 1) * (to_len > from_len ? to_len - from_len : 0) + 1 )))
+        return src;
+
+    for (dst = out; (found = strstr( ptr, from )); ptr = found + from_len)
+    {
+        memcpy( dst, ptr, found - ptr );
+        dst += found - ptr;
+        memcpy( dst, to, to_len );
+        dst += to_len;
+    }
+    strcpy( dst, ptr );
+    free( src );
+    return out;
+}
+
+char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLint *length )
+{
+    static const char version[] = "#version 100\n";
+    /* an extension directive has to come before anything that is not a
+     * preprocessor token, so these go between the version and the precision */
+    static const char derivatives[] = "#extension GL_OES_standard_derivatives : enable\n";
+    static const char precision[] = "precision highp float;\nprecision highp int;\n";
+    char **sources;
+    GLsizei i;
+
+    if (!(sources = calloc( count, sizeof(*sources) ))) return NULL;
+    TRACE( "translating %d shader source(s), first starts %.24s\n", count, string[0] );
+
+    for (i = 0; i < count; i++)
+    {
+        size_t len = length && length[i] >= 0 ? (size_t)length[i] : strlen( string[i] );
+        const char *src = string[i], *ptr = memchr( src, '#', len ), *eol;
+        BOOL derivs, vertex_stage, compat = FALSE;
+        char decls[1024], *body, *dst;
+        size_t head, j, coords = 0;
+
+        if (!ptr || strncmp( ptr, "#version", 8 ) || !(eol = memchr( ptr, '\n', len - (ptr - src) )))
+        {
+            if (!(sources[i] = malloc( len + 1 ))) goto failed;
+            memcpy( sources[i], src, len );
+            sources[i][len] = 0;
+            continue;
+        }
+
+        eol++;  /* keep everything after the version line */
+        len -= eol - src;
+        /* derivatives are core in desktop GLSL but an extension in ES */
+        derivs = glsl_uses( eol, len, "fwidth" ) || glsl_uses( eol, len, "dFdx" ) ||
+                 glsl_uses( eol, len, "dFdy" );
+        vertex_stage = glsl_uses( eol, len, "gl_Position" ) || glsl_uses( eol, len, "gl_Vertex" );
+
+        /* the shader may carry its own #extension directives, and those have to
+         * stay ahead of anything that is not a preprocessor token, so the
+         * precision defaults go after the whole leading directive block */
+        for (head = 0; head < len; )
+        {
+            size_t next = head;
+            while (next < len && eol[next] != '\n') next++;
+            if (next < len) next++;
+            while (head < len && (eol[head] == ' ' || eol[head] == '\t')) head++;
+            if (head < len && eol[head] != '#' && eol[head] != '\n' && eol[head] != '\r') break;
+            head = next;
+        }
+
+        if (!(body = malloc( len + 1 ))) goto failed;
+        memcpy( body, eol, len );
+        body[len] = 0;
+
+        for (j = 0; j < ARRAY_SIZE(glsl_builtins); j++)
+        {
+            if (!glsl_builtins[j].to) continue;
+            if (!strstr( body, glsl_builtins[j].from )) continue;
+            compat = TRUE;
+            body = glsl_replace( body, glsl_builtins[j].from, glsl_builtins[j].to );
+        }
+        if (strstr( body, "gl_Color" ))
+        {
+            compat = TRUE;
+            /* the vertex stage reads the colour attribute, the fragment stage
+             * reads what the vertex stage interpolated */
+            body = glsl_replace( body, "gl_Color", vertex_stage ? "wine_Color" : "wine_FrontColor" );
+        }
+
+        /* size the varying arrays to what is actually indexed */
+        for (j = 0; j < 8; j++)
+        {
+            char name[32];
+            snprintf( name, sizeof(name), "wine_TexCoord[%u]", (unsigned int)j );
+            if (strstr( body, name )) coords = j + 1;
+        }
+
+        decls[0] = 0;
+        if (compat)
+        {
+            dst = decls;
+            if (coords) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                         "varying vec4 wine_TexCoord[%u];\n", (unsigned int)coords );
+            if (strstr( body, "wine_FogFragCoord" )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                                     "varying float wine_FogFragCoord;\n" );
+            if (strstr( body, "wine_FrontColor" )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                                    "varying vec4 wine_FrontColor;\n" );
+            if (vertex_stage)
+            {
+                if (strstr( body, "wine_Vertex" )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                                    "attribute vec4 wine_Vertex;\n" );
+                if (strstr( body, "wine_Normal" )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                                    "attribute vec3 wine_Normal;\n" );
+                if (strstr( body, "wine_Color" )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                                   "attribute vec4 wine_Color;\n" );
+                for (j = 0; j < 8; j++)
+                {
+                    char name[32];
+                    snprintf( name, sizeof(name), "wine_MultiTexCoord%u", (unsigned int)j );
+                    if (strstr( body, name )) dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                                               "attribute vec4 %s;\n", name );
+                }
+                if (strstr( body, "wine_ModelViewProjectionMatrix" ))
+                    dst += snprintf( dst, sizeof(decls) - (dst - decls), "uniform mat4 wine_ModelViewProjectionMatrix;\n" );
+                if (strstr( body, "wine_ModelViewMatrix" ))
+                    dst += snprintf( dst, sizeof(decls) - (dst - decls), "uniform mat4 wine_ModelViewMatrix;\n" );
+                if (strstr( body, "wine_ProjectionMatrix" ))
+                    dst += snprintf( dst, sizeof(decls) - (dst - decls), "uniform mat4 wine_ProjectionMatrix;\n" );
+                if (strstr( body, "wine_TextureMatrix" ))
+                    dst += snprintf( dst, sizeof(decls) - (dst - decls), "uniform mat4 wine_TextureMatrix[8];\n" );
+            }
+
+            if (strstr( body, "wine_Fog" ))
+            {
+                /* the fixed function fog state, which win32u keeps up to date */
+                dst += snprintf( dst, sizeof(decls) - (dst - decls),
+                                 "struct wine_FogParameters\n"
+                                 "{\n"
+                                 "    vec4 color;\n"
+                                 "    float density;\n"
+                                 "    float start;\n"
+                                 "    float end;\n"
+                                 "    float scale;\n"
+                                 "};\n"
+                                 "uniform wine_FogParameters wine_Fog;\n" );
+            }
+        }
+
+        len = strlen( body );
+        if (!(sources[i] = malloc( sizeof(version) + sizeof(derivatives) + sizeof(precision) +
+                                   strlen( decls ) + len + 1 )))
+        {
+            free( body );
+            goto failed;
+        }
+        dst = sources[i];
+        dst = stpcpy( dst, version );
+        if (derivs) dst = stpcpy( dst, derivatives );
+        memcpy( dst, body, head );
+        dst += head;
+        dst = stpcpy( dst, precision );
+        dst = stpcpy( dst, decls );
+        strcpy( dst, body + head );
+        free( body );
+    }
+
+    return sources;
+
+failed:
+    while (i--) free( sources[i] );
+    free( sources );
+    return NULL;
+}
+
 const GLubyte *wrap_glGetString( TEB *teb, GLenum name, PFN_glGetString p_glGetString )
 {
     const struct opengl_funcs *funcs = teb->glTable;
@@ -767,11 +979,17 @@ const GLubyte *wrap_glGetString( TEB *teb, GLenum name, PFN_glGetString p_glGetS
             struct context *ctx = get_current_context( teb, NULL, NULL );
             GLubyte **extensions = &ctx->extensions;
             if (*extensions || (*extensions = filter_extensions( ctx, (const char *)ret, funcs ))) return *extensions;
+            WARN( "No extension string, driver returned %p\n", ret );
         }
         else if (name == GL_VERSION)
         {
             struct context *ctx = get_current_context( teb, NULL, NULL );
             if (ctx->wow64_version) return (const GLubyte *)ctx->wow64_version;
+        }
+        else if (name == GL_SHADING_LANGUAGE_VERSION)
+        {
+            struct context *ctx = get_current_context( teb, NULL, NULL );
+            if (ctx->glsl_version) return (const GLubyte *)ctx->glsl_version;
         }
     }
 
@@ -997,8 +1215,9 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
                                   HGLRC client_context, struct context *ctx )
 {
     struct opengl_client_context *client = opengl_client_context_from_client( ctx->base.client_context );
-    const char *version, *rest = "";
+    const char *version, *glsl, *rest = "";
     size_t count = 0, i;
+    BOOL gles_context = FALSE;
 
     static pthread_once_t once = PTHREAD_ONCE_INIT;
 
@@ -1012,9 +1231,55 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
     version = (const char *)funcs->p_glGetString( GL_VERSION );
     if (version) rest = parse_gl_version( version, &client->major_version, &client->minor_version );
     if (!client->major_version) client->major_version = 1;
+
+    if (version && !strncmp( version, "OpenGL ES ", 10 ))
+    {
+        /* The context is presented to the application as desktop OpenGL, but
+         * the version numbers are not interchangeable: what ES calls 3.x is
+         * desktop 3.3 (sampler objects, vertex array objects, instancing).
+         * Reporting the ES number makes function loaders skip whole groups -
+         * glad leaves glBindSampler NULL and the application crashes on it. */
+        if (client->major_version >= 3) client->major_version = 3, client->minor_version = 3;
+        else client->major_version = 2, client->minor_version = 1;
+        asprintf( &ctx->wow64_version, "%u.%u (%s)", client->major_version,
+                  client->minor_version, version );
+        gles_context = gl_is_gles = TRUE;
+
+        /* Report the shading language the same way. An application that sees
+         * an "OpenGL ES GLSL ES" string falls back to its oldest shader path,
+         * which is written against the fixed-function built-ins that GLSL ES
+         * does not have at all. */
+        if ((glsl = (const char *)funcs->p_glGetString( GL_SHADING_LANGUAGE_VERSION )))
+        {
+            const char *ptr = glsl;
+            int glsl_major = 0, glsl_minor = 0;
+            if (!strncmp( ptr, "OpenGL ES GLSL ES ", 18 )) ptr += 18;
+            sscanf( ptr, "%d.%d", &glsl_major, &glsl_minor );
+            if (glsl_major >= 3) asprintf( &ctx->glsl_version, "3.30 (%s)", glsl );
+            else asprintf( &ctx->glsl_version, "1.20 (%s)", glsl );
+        }
+    }
+
     TRACE( "context %p version %d.%d\n", ctx, client->major_version, client->minor_version );
 
     funcs->p_init_extensions( client->extensions );
+
+    if (gles_context && client->major_version >= 3)
+    {
+        /* The driver reports its extensions under their OpenGL ES names, so
+         * the ARB names for functionality that ES 3.0 has in core are missing.
+         * Loaders key off those names - glad only picks up glBindSampler from
+         * GL_ARB_sampler_objects - so advertise what ES 3.0 guarantees. */
+        static const enum opengl_extension es3_core[] =
+        {
+            GL_ARB_sampler_objects, GL_ARB_vertex_array_object,
+            GL_ARB_uniform_buffer_object, GL_ARB_map_buffer_range,
+            GL_ARB_framebuffer_object, GL_ARB_texture_storage,
+            GL_ARB_instanced_arrays, GL_ARB_draw_instanced,
+            GL_ARB_sync,
+        };
+        for (i = 0; i < ARRAY_SIZE(es3_core); i++) client->extensions[es3_core[i]] = TRUE;
+    }
 
     if (client->major_version >= 3)
     {
@@ -1078,6 +1343,7 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
 static void free_context( const struct opengl_funcs *funcs, struct context *ctx )
 {
     free( ctx->wow64_version );
+    free( ctx->glsl_version );
     free( ctx->extensions );
     free( ctx );
 }

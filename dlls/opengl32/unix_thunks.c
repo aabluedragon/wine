@@ -22464,6 +22464,19 @@ static NTSTATUS ext_glShaderSource( void *args )
     struct glShaderSource_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glShaderSource) return STATUS_NOT_IMPLEMENTED;
+    if (gl_is_gles)
+    {
+        char **sources = translate_glsl_es( params->count, params->string, params->length );
+        if (sources)
+        {
+            GLsizei i;
+            funcs->p_glShaderSource( params->shader, params->count, (const GLchar *const *)sources, NULL );
+            for (i = 0; i < params->count; i++) free( sources[i] );
+            free( sources );
+            set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
+            return STATUS_SUCCESS;
+        }
+    }
     funcs->p_glShaderSource( params->shader, params->count, params->string, params->length );
     set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
     return STATUS_SUCCESS;
@@ -72808,6 +72821,20 @@ static NTSTATUS wow64_ext_glShaderSource( void *args )
     const struct opengl_funcs *funcs = teb->glTable;
     if (!funcs->p_glShaderSource) return STATUS_NOT_IMPLEMENTED;
     string = copy_wow64_ptr32s( params->string, params->count );
+    if (gl_is_gles)
+    {
+        char **sources = translate_glsl_es( params->count, string, ULongToPtr(params->length) );
+        if (sources)
+        {
+            GLsizei i;
+            funcs->p_glShaderSource( params->shader, params->count, (const GLchar *const *)sources, NULL );
+            for (i = 0; i < params->count; i++) free( sources[i] );
+            free( sources );
+            set_context_attribute( teb, -1 /* unsupported */, NULL, 0 );
+            free( string );
+            return STATUS_SUCCESS;
+        }
+    }
     funcs->p_glShaderSource( params->shader, params->count, string, ULongToPtr(params->length) );
     set_context_attribute( teb, -1 /* unsupported */, NULL, 0 );
     free( string );
