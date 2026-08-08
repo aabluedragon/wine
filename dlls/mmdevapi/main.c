@@ -120,7 +120,7 @@ fail:
 
 static BOOL WINAPI init_driver(INIT_ONCE *once, void *param, void **context)
 {
-    static WCHAR default_list[] = L"pulse,alsa,oss,coreaudio";
+    static WCHAR default_list[] = L"pulse,alsa,oss,coreaudio,android";
     DriverFuncs driver;
     HKEY key;
     WCHAR reg_list[256], *p, *next, *driver_list = default_list;
@@ -211,9 +211,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             }
             if (lpvReserved) break;
 
-            wine_unix_call( main_loop_stop, NULL );
+            /* the module can be loaded without a driver ever being initialized,
+             * as regsvr32 does, and there is then no unix library to call into */
             if (drvs.module_unixlib)
             {
+                wine_unix_call( main_loop_stop, NULL );
                 __wine_unload_unix_lib( drvs.module );
                 if (midi_driver.module != drvs.module) __wine_unload_unix_lib( midi_driver.module );
             }
