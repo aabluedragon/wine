@@ -2599,7 +2599,11 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
     return (struct _TEB *)__readfsdword( 0x18 );
 }
 #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(__GNUC__)
+#ifdef WINE_TEB_X28  /* see __ASM_TEB_REG in wine/asm.h */
+register struct _TEB *__wine_current_teb __asm__("x28");
+#else
 register struct _TEB *__wine_current_teb __asm__("x18");
+#endif
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 {
     return __wine_current_teb;
@@ -2607,7 +2611,11 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(_MSC_VER)
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 {
+#ifdef WINE_TEB_X28  /* see __ASM_TEB_REG in wine/asm.h */
+    return (struct _TEB *)__getReg(28);
+#else
     return (struct _TEB *)__getReg(18);
+#endif
 }
 #elif defined(__x86_64__) && defined(__GNUC__)
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
