@@ -991,7 +991,21 @@ case $host_os in
     AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
     AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
 
-    WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+    dnl An iOS process cannot map anything below 4GB whatever its page zero
+    dnl says, and one built with a smaller page zero will not launch at all,
+    dnl so leave the default in place there.
+    AC_CACHE_CHECK([whether we are building for iOS],[wine_cv_target_ios],
+      [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <TargetConditionals.h>]],
+                                          [[#if !TARGET_OS_IPHONE
+                                            #error not iOS
+                                            #endif]])],
+                         [wine_cv_target_ios=yes],[wine_cv_target_ios=no])])
+    if test "$wine_cv_target_ios" = yes
+    then
+      WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+    else
+      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+    fi
 
     case $HOST_ARCH in
       i386) wine_use_preloader=yes ;;
@@ -2109,6 +2123,10 @@ dnl **** Check for functions ****
 
 dnl Check for -ldl
 AC_SEARCH_LIBS(dlopen, dl)
+
+dnl The iOS SDK exports pipe2 without declaring it for the deployment target,
+dnl and a link test on its own then reports a function the code cannot call.
+AC_CHECK_DECL([pipe2],,[ac_cv_func_pipe2=no],[[#include <unistd.h>]])
 
 ac_save_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS $BUILTINFLAG"
