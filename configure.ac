@@ -1010,8 +1010,12 @@ case $host_os in
       enable_mountmgr_sys=${enable_mountmgr_sys:-no}
       enable_nsiproxy_sys=${enable_nsiproxy_sys:-no}
       enable_winspool_drv=${enable_winspool_drv:-no}
-      dnl win32u links AppKit without using it, which is fatal where there is none
+      enable_wineios_drv=${enable_wineios_drv:-yes}
+      dnl win32u links AppKit without using it, which is fatal where there is
+      dnl none - but its font code does use CoreFoundation, which AppKit was
+      dnl dragging in
       APPKIT_LIBS=""
+      CORETEXT_LIBS="-framework CoreText -framework CoreFoundation"
     else
       WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
       enable_winemac_drv=${enable_winemac_drv:-yes}
@@ -1162,6 +1166,7 @@ esac
 
 enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-no}
 enable_wineandroid_drv=${enable_wineandroid_drv:-no}
+enable_wineios_drv=${enable_wineios_drv:-no}
 enable_winemac_drv=${enable_winemac_drv:-no}
 
 dnl **** External libraries ****
@@ -3424,6 +3429,7 @@ WINE_CONFIG_MAKEFILE(dlls/wined3d)
 WINE_CONFIG_MAKEFILE(dlls/winedmo)
 WINE_CONFIG_MAKEFILE(dlls/winegstreamer)
 WINE_CONFIG_MAKEFILE(dlls/winehid.sys)
+WINE_CONFIG_MAKEFILE(dlls/wineios.drv)
 WINE_CONFIG_MAKEFILE(dlls/winemac.drv)
 WINE_CONFIG_MAKEFILE(dlls/winemapi)
 WINE_CONFIG_MAKEFILE(dlls/wineoss.drv)

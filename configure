@@ -1572,6 +1572,7 @@ enable_wined3d
 enable_winedmo
 enable_winegstreamer
 enable_winehid_sys
+enable_wineios_drv
 enable_winemac_drv
 enable_winemapi
 enable_wineoss_drv
@@ -12464,7 +12465,9 @@ printf '%s\n' "$wine_cv_target_ios" >&6; }
       enable_mountmgr_sys=${enable_mountmgr_sys:-no}
       enable_nsiproxy_sys=${enable_nsiproxy_sys:-no}
       enable_winspool_drv=${enable_winspool_drv:-no}
-            APPKIT_LIBS=""
+      enable_wineios_drv=${enable_wineios_drv:-yes}
+                        APPKIT_LIBS=""
+      CORETEXT_LIBS="-framework CoreText -framework CoreFoundation"
     else
       WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
       enable_winemac_drv=${enable_winemac_drv:-yes}
@@ -13349,6 +13352,7 @@ esac
 
 enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-no}
 enable_wineandroid_drv=${enable_wineandroid_drv:-no}
+enable_wineios_drv=${enable_wineios_drv:-no}
 enable_winemac_drv=${enable_winemac_drv:-no}
 
 
@@ -23336,6 +23340,7 @@ wine_fn_config_makefile dlls/wined3d enable_wined3d
 wine_fn_config_makefile dlls/winedmo enable_winedmo
 wine_fn_config_makefile dlls/winegstreamer enable_winegstreamer
 wine_fn_config_makefile dlls/winehid.sys enable_winehid_sys
+wine_fn_config_makefile dlls/wineios.drv enable_wineios_drv
 wine_fn_config_makefile dlls/winemac.drv enable_winemac_drv
 wine_fn_config_makefile dlls/winemapi enable_winemapi
 wine_fn_config_makefile dlls/wineoss.drv enable_wineoss_drv
