@@ -12459,10 +12459,12 @@ printf '%s\n' "$wine_cv_target_ios" >&6; }
     if test "$wine_cv_target_ios" = yes
     then
       WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
-                  enable_winemac_drv=${enable_winemac_drv:-no}
+                        enable_winemac_drv=${enable_winemac_drv:-no}
       enable_winebus_sys=${enable_winebus_sys:-no}
       enable_mountmgr_sys=${enable_mountmgr_sys:-no}
       enable_nsiproxy_sys=${enable_nsiproxy_sys:-no}
+      enable_winspool_drv=${enable_winspool_drv:-no}
+            APPKIT_LIBS=""
     else
       WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
       enable_winemac_drv=${enable_winemac_drv:-yes}

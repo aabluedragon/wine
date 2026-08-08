@@ -1003,11 +1003,15 @@ case $host_os in
     then
       WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
       dnl none of these have an API to build against on iOS: AppKit, the
-      dnl DiskArbitration and IOKit device stacks, and the macOS keychain
+      dnl DiskArbitration and IOKit device stacks, the macOS keychain, and the
+      dnl printing stack ApplicationServices sits behind
       enable_winemac_drv=${enable_winemac_drv:-no}
       enable_winebus_sys=${enable_winebus_sys:-no}
       enable_mountmgr_sys=${enable_mountmgr_sys:-no}
       enable_nsiproxy_sys=${enable_nsiproxy_sys:-no}
+      enable_winspool_drv=${enable_winspool_drv:-no}
+      dnl win32u links AppKit without using it, which is fatal where there is none
+      APPKIT_LIBS=""
     else
       WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
       enable_winemac_drv=${enable_winemac_drv:-yes}
