@@ -1,7 +1,8 @@
 MODULE    = wineios.drv
 UNIXLIB   = wineios.so
-UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
+UNIX_LIBS = -lwin32u $(PTHREAD_LIBS) $(AUDIOTOOLBOX_LIBS)
 
 SOURCES = \
+	audio.c \
 	dllmain.c \
 	ios.c

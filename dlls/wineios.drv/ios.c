@@ -42,6 +42,8 @@
 #include "ntuser.h"
 #include "wine/gdi_driver.h"
 #include "wine/server.h"
+
+#include "unixlib.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ios);
@@ -341,7 +343,7 @@ static const struct user_driver_funcs ios_drv_funcs =
     .pProcessEvents = IOS_ProcessEvents,
 };
 
-NTSTATUS DECLSPEC_EXPORT __wine_unix_lib_init(void)
+NTSTATUS ios_init( void *args )
 {
     TRACE( "registering the iOS graphics driver\n" );
     __wine_set_user_driver( &ios_drv_funcs, WINE_GDI_DRIVER_VERSION );
