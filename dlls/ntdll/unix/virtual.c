@@ -225,6 +225,12 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
 static struct file_view *arm64ec_view;
 
 ULONG_PTR user_space_wow_limit = 0;
+/* When nonzero, the 32-bit WoW64 guest is relocated to [guest_base, guest_base+4GB)
+ * for hosts with no memory below 4GB (iOS). A multiple of 4GB, so a host pointer
+ * truncated to 32 bits yields the guest address. Set from WINE_WOW64_GUEST_BASE;
+ * 0 disables it, leaving normal WoW64 unchanged. Kept in sync with the emulator's
+ * FEX_GUEST_BASE and wow64.dll's copy. */
+ULONG_PTR guest_base = 0;
 #ifndef WINE_USER_SHARED_DATA_ADDR
 /* Windows puts this at a fixed address; a platform whose kernel refuses to map
  * there (iOS reserves everything below 8GB) can move it with this. */
@@ -3789,6 +3795,11 @@ void virtual_init(void)
 
     mmap_init( preload_info ? *preload_info : NULL );
 
+    {
+        const char *base = getenv( "WINE_WOW64_GUEST_BASE" );
+        if (base) guest_base = strtoull( base, NULL, 0 );
+    }
+
     if ((preload = getenv("WINEPRELOADRESERVE")))
     {
         unsigned long start, end;
@@ -5220,7 +5231,7 @@ void virtual_set_large_address_space(void)
                 free_reserved_memory( 0, (char *)0x7ffe0000 );
 #endif
         }
-        else user_space_wow_limit = ((main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? limit_4g : limit_2g) - 1;
+        else user_space_wow_limit = (guest_base ? guest_base : 0) + ((main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? limit_4g : limit_2g) - 1;
     }
     else
     {
@@ -5413,6 +5424,9 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     else
         limit = 0;
 
+    if (guest_base && is_wow64() && !*ret)
+        return allocate_virtual_memory( ret, size_ptr, type, protect, guest_base,
+                                        guest_base + (limit ? limit : limit_4g), 0, 0 );
     return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 }
 
