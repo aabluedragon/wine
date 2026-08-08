@@ -119,9 +119,9 @@ static BOOL map_framebuffer(void)
  * does win32u ask the driver to process events. */
 struct input_event
 {
-    UINT type;      /* 1 move, 2 down, 3 up */
-    INT  x;
-    INT  y;
+    UINT type;      /* 1 move, 2 button down, 3 button up, 4 key down, 5 key up */
+    INT  x;         /* screen pixels, or the virtual key for a key event */
+    INT  y;         /* screen pixels, or the scan code for a key event */
 };
 
 static int input_fd = -1;
@@ -170,18 +170,31 @@ static BOOL IOS_ProcessEvents( DWORD mask )
 
     while (read( input_fd, &event, sizeof(event) ) == sizeof(event))
     {
-        INPUT input = {.type = INPUT_MOUSE};
+        INPUT input = {0};
 
-        input.mi.dx = event.x;
-        input.mi.dy = event.y;
-        switch (event.type)
+        if (event.type == 4 || event.type == 5)
         {
-        case 2: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN; break;
-        case 3: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP; break;
-        default: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE; break;
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = event.x;
+            input.ki.wScan = event.y;
+            input.ki.dwFlags = event.type == 5 ? KEYEVENTF_KEYUP : 0;
+            TRACE( "key %s vk %#x scan %#x\n", event.type == 5 ? "up" : "down",
+                   (unsigned int)event.x, (unsigned int)event.y );
+        }
+        else
+        {
+            input.type = INPUT_MOUSE;
+            input.mi.dx = event.x;
+            input.mi.dy = event.y;
+            switch (event.type)
+            {
+            case 2: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN; break;
+            case 3: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP; break;
+            default: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE; break;
+            }
+            TRACE( "pointer %u at %d,%d\n", event.type, event.x, event.y );
         }
 
-        TRACE( "input %u at %d,%d\n", event.type, event.x, event.y );
         NtUserSendHardwareInput( 0, 0, &input, 0 );
         ret = TRUE;
     }
