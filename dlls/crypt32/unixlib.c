@@ -927,7 +927,9 @@ static void load_root_certs(void)
 {
     unsigned int i;
 
-#ifdef __APPLE__
+/* the trust settings API is not in the iOS SDK, which keeps the trust store
+ * to itself - fall back to the file locations below */
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     const SecTrustSettingsDomain domains[] = {
         kSecTrustSettingsDomainSystem,
         kSecTrustSettingsDomainAdmin,

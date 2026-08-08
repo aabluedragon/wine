@@ -45,7 +45,12 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #define QS_HARDWARE     0x40000000
 #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
 
-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+/* Windows puts this at a fixed address; a platform whose kernel refuses to
+ * map there can move it, and every user of it has to follow. */
+#ifndef WINE_USER_SHARED_DATA_ADDR
+#define WINE_USER_SHARED_DATA_ADDR 0x7ffe0000
+#endif
+static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_USER_SHARED_DATA_ADDR;
 
 static const struct ratio no_dpi;
 
