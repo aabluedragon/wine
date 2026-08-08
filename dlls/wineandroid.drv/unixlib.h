@@ -1,7 +1,7 @@
 /*
- * wineandroid.drv entry points
+ * Unix call interface for wineandroid.drv
  *
- * Copyright 2022 Jacek Caban for CodeWeavers
+ * Copyright 2026 Alon Amir
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,21 +18,19 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdarg.h>
-#include "windef.h"
-#include "winbase.h"
-#include "wine/unixlib.h"
+#include "../mmdevapi/unixlib.h"
 
-#include "unixlib.h"
-
-/***********************************************************************
- *       dll initialisation routine
- */
-BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+/* This module is the audio driver as well as the graphics driver, and a module
+ * has only one unix call table. mmdevapi owns the entries it defines, and the
+ * driver's own initialisation follows them - it cannot be left to
+ * __wine_unix_lib_init, which ntdll only looks for when a module has no table
+ * of its own. */
+enum android_funcs
 {
-    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    unix_init = funcs_count,
+    unix_funcs_count
+};
 
-    DisableThreadLibraryCalls( inst );
-    if (__wine_init_unix_call()) return FALSE;
-    return !WINE_UNIX_CALL( unix_init, NULL );
-}
+#ifdef WINE_UNIX_LIB
+extern NTSTATUS android_init( void *args );
+#endif

@@ -4,6 +4,7 @@ IMPORTS   = ntoskrnl
 UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
 
 SOURCES = \
+	audio.c \
 	build.gradle.in \
 	device.c \
 	dllmain.c \
