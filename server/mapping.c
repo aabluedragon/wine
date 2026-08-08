@@ -215,7 +215,15 @@ void init_memory(void)
 {
     host_page_mask = sysconf( _SC_PAGESIZE ) - 1;
     free_map_addr( 0x60000000, 0x1c000000 );
+#ifdef WINE_ADDRESS_SPACE_LIMIT
+    /* A platform that only hands out part of the address space cannot map an
+     * image at the usual dynamic base at all, and an image is relocated for the
+     * address assigned here whether or not it is mapped there - so an address
+     * outside the address space silently relocates every image wrongly. */
+    free_map_addr( WINE_ADDRESS_SPACE_LIMIT / 2, WINE_ADDRESS_SPACE_LIMIT / 4 );
+#else
     free_map_addr( 0x600000000000, 0x100000000000 );
+#endif
 }
 
 static void ranges_dump( struct object *obj, int verbose )

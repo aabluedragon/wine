@@ -289,21 +289,63 @@ static inline BOOL is_vprot_exec_write( BYTE vprot )
     return (vprot & VPROT_EXEC) && (vprot & (VPROT_WRITE | VPROT_WRITECOPY));
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* iOS refuses to create an executable mapping outright: memory has to be
+ * mapped writable and turned executable afterwards, and memory that has to be
+ * both at once has to come from the JIT region. */
+#define HOST_REFUSES_EXEC_MMAP
+#endif
+
+/* the protection the host will accept when the mapping is created */
+static inline int host_mmap_prot( int prot, int *flags )
+{
+#ifdef HOST_REFUSES_EXEC_MMAP
+    if (prot & PROT_EXEC)
+    {
+        if (prot & PROT_WRITE) *flags |= MAP_JIT;
+        else return prot & ~PROT_EXEC;
+    }
+#endif
+    return prot;
+}
+
+/* put back whatever host_mmap_prot() had to leave out */
+static inline void *host_mmap_done( void *ptr, size_t size, int prot )
+{
+#ifdef HOST_REFUSES_EXEC_MMAP
+    if (ptr != MAP_FAILED && (prot & PROT_EXEC) && !(prot & PROT_WRITE) &&
+        mprotect( ptr, size, prot ))
+    {
+        WARN( "failed to make %p-%p executable: %s\n", ptr, (char *)ptr + size, strerror(errno) );
+        munmap( ptr, size );
+        return MAP_FAILED;
+    }
+#endif
+    return ptr;
+}
+
 /* mmap() anonymous memory at a fixed address */
 void *anon_mmap_fixed( void *start, size_t size, int prot, int flags )
 {
+    void *ptr;
+
     assert( !((UINT_PTR)start & host_page_mask) );
     assert( !(size & host_page_mask) );
 
-    return mmap( start, size, prot, MAP_PRIVATE | MAP_ANON | MAP_FIXED | flags, -1, 0 );
+    ptr = mmap( start, size, host_mmap_prot( prot, &flags ), MAP_PRIVATE | MAP_ANON | MAP_FIXED | flags, -1, 0 );
+    return host_mmap_done( ptr, size, prot );
 }
 
 /* allocate anonymous mmap() memory at any address */
 void *anon_mmap_alloc( size_t size, int prot )
 {
+    int flags = 0;
+    void *ptr;
+
     assert( !(size & host_page_mask) );
 
-    return mmap( NULL, size, prot, MAP_PRIVATE | MAP_ANON, -1, 0 );
+    ptr = mmap( NULL, size, host_mmap_prot( prot, &flags ), MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+    return host_mmap_done( ptr, size, prot );
 }
 
 #ifdef USE_UFFD_WRITEWATCH
@@ -617,19 +659,20 @@ static size_t unmap_area_above_user_limit( void *addr, size_t size )
 
 static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
 {
+    int host_prot = host_mmap_prot( prot, &flags );
     void *ptr;
 
 #ifdef MAP_FIXED_NOREPLACE
-    ptr = mmap( start, size, prot, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+    ptr = mmap( start, size, host_prot, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
 #elif defined(MAP_TRYFIXED)
-    ptr = mmap( start, size, prot, MAP_TRYFIXED | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+    ptr = mmap( start, size, host_prot, MAP_TRYFIXED | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
-    ptr = mmap( start, size, prot, MAP_FIXED | MAP_EXCL | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+    ptr = mmap( start, size, host_prot, MAP_FIXED | MAP_EXCL | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
     if (ptr == MAP_FAILED && errno == EINVAL) errno = EEXIST;
 #elif defined(__APPLE__)
     mach_vm_address_t result = (mach_vm_address_t)start;
     kern_return_t ret = mach_vm_map( mach_task_self(), &result, size, 0, VM_FLAGS_FIXED,
-                                     MEMORY_OBJECT_NULL, 0, 0, prot, VM_PROT_ALL, VM_INHERIT_COPY );
+                                     MEMORY_OBJECT_NULL, 0, 0, host_prot, VM_PROT_ALL, VM_INHERIT_COPY );
 
     if (!ret)
     {
@@ -642,8 +685,9 @@ static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
         ptr = MAP_FAILED;
     }
 #else
-    ptr = mmap( start, size, prot, MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+    ptr = mmap( start, size, host_prot, MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
 #endif
+    ptr = host_mmap_done( ptr, size, prot );
     if (ptr != MAP_FAILED && ptr != start)
     {
         size = unmap_area_above_user_limit( ptr, size );
@@ -3099,6 +3143,11 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
      * relocated cannot be mapped from its file at all. Copy it into anonymous
      * memory instead, the same way an image on removable media is handled. */
     if (image_info->map_addr && image_info->map_addr != image_info->base) removable = TRUE;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+    /* iOS refuses an executable mapping of a file whose pages it has not
+     * validated, which is every PE image, so none of them can be mapped from
+     * their file - they all have to be copied in. */
+    removable = TRUE;
 #endif
 
     /* map the header */
