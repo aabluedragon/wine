@@ -30,6 +30,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <pthread.h>
 
 #include "ntstatus.h"
@@ -37,7 +39,9 @@
 #include "windef.h"
 #include "winbase.h"
 #include "ntgdi.h"
+#include "ntuser.h"
 #include "wine/gdi_driver.h"
+#include "wine/server.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ios);
@@ -106,6 +110,80 @@ static BOOL map_framebuffer(void)
     framebuffer->height = screen_height;
     TRACE( "presenting through %s, %ux%u\n", path, screen_width, screen_height );
     return TRUE;
+}
+
+/* The host application sees the touches and writes them into a fifo. The fifo
+ * is what makes them arrive: the server watches the descriptor and only then
+ * does win32u ask the driver to process events. */
+struct input_event
+{
+    UINT type;      /* 1 move, 2 down, 3 up */
+    INT  x;
+    INT  y;
+};
+
+static int input_fd = -1;
+static DWORD desktop_tid;
+
+static void init_input(void)
+{
+    const char *path = getenv( "WINE_IOS_INPUT" );
+    HANDLE handle;
+
+    if (input_fd != -1) return;
+    if (!path) path = "/tmp/wine-ios-input";
+
+    mkfifo( path, 0600 );
+    if ((input_fd = open( path, O_RDWR | O_NONBLOCK )) == -1)
+    {
+        WARN( "cannot open %s\n", path );
+        return;
+    }
+
+    if (wine_server_fd_to_handle( input_fd, GENERIC_READ | SYNCHRONIZE, 0, &handle ))
+    {
+        ERR( "cannot make a handle for the input fifo\n" );
+        return;
+    }
+    SERVER_START_REQ( set_queue_fd )
+    {
+        req->handle = wine_server_obj_handle( handle );
+        wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    NtClose( handle );
+    desktop_tid = GetCurrentThreadId();
+    TRACE( "reading input from %s\n", path );
+}
+
+/**********************************************************************
+ *           IOS_ProcessEvents
+ */
+static BOOL IOS_ProcessEvents( DWORD mask )
+{
+    struct input_event event;
+    BOOL ret = FALSE;
+
+    if (input_fd == -1) return FALSE;
+
+    while (read( input_fd, &event, sizeof(event) ) == sizeof(event))
+    {
+        INPUT input = {.type = INPUT_MOUSE};
+
+        input.mi.dx = event.x;
+        input.mi.dy = event.y;
+        switch (event.type)
+        {
+        case 2: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN; break;
+        case 3: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP; break;
+        default: input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE; break;
+        }
+
+        TRACE( "input %u at %d,%d\n", event.type, event.x, event.y );
+        NtUserSendHardwareInput( 0, 0, &input, 0 );
+        ret = TRUE;
+    }
+    return ret;
 }
 
 struct ios_window_surface
@@ -238,6 +316,9 @@ static UINT IOS_UpdateDisplayDevices( const struct gdi_device_manager *device_ma
 static BOOL IOS_CreateWindow( HWND hwnd )
 {
     TRACE( "hwnd %p\n", hwnd );
+    /* the queue the fifo is registered with is the one of the thread that
+     * pumps messages, which is the thread creating the windows */
+    init_input();
     return TRUE;
 }
 
@@ -247,6 +328,7 @@ static BOOL IOS_CreateWindow( HWND hwnd )
 static BOOL IOS_CreateDesktop( const WCHAR *name, UINT width, UINT height )
 {
     TRACE( "%s %ux%u\n", debugstr_w(name), width, height );
+    init_input();
     return TRUE;
 }
 
@@ -256,6 +338,7 @@ static const struct user_driver_funcs ios_drv_funcs =
     .pCreateDesktop = IOS_CreateDesktop,
     .pCreateWindow = IOS_CreateWindow,
     .pCreateWindowSurface = IOS_CreateWindowSurface,
+    .pProcessEvents = IOS_ProcessEvents,
 };
 
 NTSTATUS DECLSPEC_EXPORT __wine_unix_lib_init(void)
