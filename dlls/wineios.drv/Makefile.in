@@ -1,0 +1,7 @@
+MODULE    = wineios.drv
+UNIXLIB   = wineios.so
+UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
+
+SOURCES = \
+	dllmain.c \
+	ios.c
