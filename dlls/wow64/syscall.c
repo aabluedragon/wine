@@ -98,6 +98,7 @@ static WORD ss32_sel;
 static void *   (WINAPI *pBTCpuGetBopCode)(void);
 static NTSTATUS (WINAPI *pBTCpuGetContext)(HANDLE,HANDLE,void *,void *);
 static BOOLEAN  (WINAPI *pBTCpuIsProcessorFeaturePresent)(UINT);
+UINT_PTR wow64_guest_base = 0;
 static void     (WINAPI *pBTCpuProcessInit)(void);
 static NTSTATUS (WINAPI *pBTCpuSetContext)(HANDLE,HANDLE,void *,void *);
 static void     (WINAPI *pBTCpuThreadInit)(void);
@@ -990,6 +991,22 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     ULONG *p__wine_syscall_dispatcher, *p__wine_unix_call_dispatcher;
     const SYSTEM_SERVICE_TABLE *psdwhwin32;
 
+    {
+        WCHAR buf[32];
+        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_WOW64_GUEST_BASE" );
+        UNICODE_STRING val = { 0, sizeof(buf), buf };
+        if (!RtlQueryEnvironmentVariable_U( NULL, &name, &val ))
+        {
+            ULONGLONG base = 0;
+            for (const WCHAR *p = buf; *p; p++)
+            {
+                if (*p >= '0' && *p <= '9') base = base * 16 + (*p - '0');
+                else if ((*p|0x20) >= 'a' && (*p|0x20) <= 'f') base = base * 16 + ((*p|0x20) - 'a' + 10);
+                else if (*p == 'x' || *p == 'X') base = 0;
+            }
+            wow64_guest_base = base;
+        }
+    }
     RtlWow64GetProcessMachines( GetCurrentProcess(), &current_machine, &native_machine );
     if (!current_machine) current_machine = native_machine;
     args_alignment = (current_machine == IMAGE_FILE_MACHINE_I386) ? sizeof(ULONG) : sizeof(ULONG64);

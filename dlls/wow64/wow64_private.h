@@ -24,6 +24,15 @@
 #include "../ntdll/ntsyscalls.h"
 #include "struct32.h"
 
+/* In the WoW64 thunks ULongToPtr converts a 32-bit guest MEMORY pointer to a
+ * host pointer; guest handles use LongToHandle and are unaffected. When the
+ * 32-bit guest is relocated to a high window (iOS has no memory below 4GB) the
+ * host pointer is wow64_guest_base + addr. Null is preserved, and this is
+ * byte-identical to the original macro when wow64_guest_base is 0. */
+extern UINT_PTR wow64_guest_base;
+#undef ULongToPtr
+#define ULongToPtr(ul) ((void *)((ULONG)(ul) ? wow64_guest_base + (ULONG_PTR)(ULONG)(ul) : (ULONG_PTR)0))
+
 #define SYSCALL_ENTRY(id,name,_args) extern NTSTATUS WINAPI wow64_ ## name( UINT *args );
 ALL_SYSCALLS32
 #undef SYSCALL_ENTRY
