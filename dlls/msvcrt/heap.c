@@ -53,6 +53,14 @@ static unsigned int MSVCRT_amblksiz = 16;
 /* FIXME - According to documentation it should be 480 bytes, at runtime default is 0 */
 static size_t MSVCRT_sbh_threshold = 0;
 
+/* The runtime can be entered before its DllMain has run, when the loader
+ * attaches a module that uses it first - see msvcrt_get_thread_data. */
+static HANDLE get_heap(void)
+{
+    if (!heap) msvcrt_init_heap();
+    return heap;
+}
+
 static void* msvcrt_heap_alloc(DWORD flags, size_t size)
 {
     if(size < MSVCRT_sbh_threshold)
@@ -68,7 +76,7 @@ static void* msvcrt_heap_alloc(DWORD flags, size_t size)
         return memblock;
     }
 
-    return HeapAlloc(heap, flags, size);
+    return HeapAlloc(get_heap(), flags, size);
 }
 
 static void* msvcrt_heap_realloc(DWORD flags, void *ptr, size_t size)
@@ -100,7 +108,7 @@ static void* msvcrt_heap_realloc(DWORD flags, void *ptr, size_t size)
         return memblock;
     }
 
-    return HeapReAlloc(heap, flags, ptr, size);
+    return HeapReAlloc(get_heap(), flags, ptr, size);
 }
 
 static BOOL msvcrt_heap_free(void *ptr)
@@ -111,7 +119,7 @@ static BOOL msvcrt_heap_free(void *ptr)
         return HeapFree(sb_heap, 0, *saved);
     }
 
-    return HeapFree(heap, 0, ptr);
+    return HeapFree(get_heap(), 0, ptr);
 }
 
 static size_t msvcrt_heap_size(void *ptr)
@@ -122,7 +130,7 @@ static size_t msvcrt_heap_size(void *ptr)
         return HeapSize(sb_heap, 0, *saved);
     }
 
-    return HeapSize(heap, 0, ptr);
+    return HeapSize(get_heap(), 0, ptr);
 }
 
 /*********************************************************************
@@ -802,6 +810,7 @@ int CDECL wmemcpy_s(wchar_t *dest, size_t numberOfElements,
 
 BOOL msvcrt_init_heap(void)
 {
+    if (heap) return TRUE;   /* the first use of the runtime can get here first */
 #if _MSVCR_VER <= 100
     heap = HeapCreate(0, 0, 0);
 #else

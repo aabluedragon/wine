@@ -47,6 +47,11 @@ thread_data_t *CDECL msvcrt_get_thread_data(void)
     thread_data_t *ptr;
     DWORD err = GetLastError();  /* need to preserve last error */
 
+    /* The loader can attach a module that uses the C runtime before it
+     * attaches the runtime itself - a cycle through the imports is enough -
+     * so the first call can arrive before DllMain has set any of this up. */
+    if (msvcrt_tls_index == TLS_OUT_OF_INDEXES) msvcrt_init_tls();
+
     if (!(ptr = TlsGetValue( msvcrt_tls_index )))
     {
         if (!(ptr = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ptr) )))
@@ -55,8 +60,11 @@ thread_data_t *CDECL msvcrt_get_thread_data(void)
         ptr->tid = GetCurrentThreadId();
         ptr->handle = INVALID_HANDLE_VALUE;
         ptr->random_seed = 1;
-        ptr->locinfo = MSVCRT_locale->locinfo;
-        ptr->mbcinfo = MSVCRT_locale->mbcinfo;
+        if (msvcrt_ensure_locale())
+        {
+            ptr->locinfo = MSVCRT_locale->locinfo;
+            ptr->mbcinfo = MSVCRT_locale->mbcinfo;
+        }
         ptr->cached_locale[0] = 'C';
         ptr->cached_locale[1] = 0;
 #if _MSVCR_VER >= 140
