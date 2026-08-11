@@ -49,6 +49,9 @@ static const WORD current_machine = IMAGE_FILE_MACHINE_AMD64;
 static const WORD current_machine = IMAGE_FILE_MACHINE_ARMNT;
 #elif defined(__aarch64__)
 static const WORD current_machine = IMAGE_FILE_MACHINE_ARM64;
+#elif defined(__wasm32__)
+/* The browser target hosts the 32-bit Windows guest in WebAssembly. */
+static const WORD current_machine = IMAGE_FILE_MACHINE_I386;
 #endif
 extern WORD native_machine;
 

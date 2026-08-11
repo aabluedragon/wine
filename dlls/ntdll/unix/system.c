@@ -600,6 +600,39 @@ void init_shared_data_cpuinfo( KUSER_SHARED_DATA *data )
         init_xstate_features( &data->XState );
 }
 
+#elif defined(__wasm32__)
+
+/* The WebAssembly host presents a 32-bit x86 Windows guest ABI.  There is no
+ * CPUID instruction in WebAssembly, so report a conservative baseline CPU
+ * that is sufficient for applications which query Windows system metadata. */
+static void init_cpu_model(void)
+{
+    strcpy( cpu_vendor, "WebAssembly" );
+    strcpy( cpu_name, "WebAssembly x86" );
+    cpu_level = 6;
+    cpu_revision = 0;
+    cpu_id = 0;
+}
+
+static ULONGLONG get_cpu_features(void)
+{
+    return 0x200d2977;  /* tsc | cx8 | mmx | fxsr | sse | sse2 | sse3 | nx */
+}
+
+void init_shared_data_cpuinfo( KUSER_SHARED_DATA *data )
+{
+    BOOLEAN *features = data->ProcessorFeatures;
+
+    features[PF_FASTFAIL_AVAILABLE]      = TRUE;
+    features[PF_COMPARE_EXCHANGE_DOUBLE] = TRUE;
+    features[PF_RDTSC_INSTRUCTION_AVAILABLE]   = TRUE;
+    features[PF_MMX_INSTRUCTIONS_AVAILABLE]    = TRUE;
+    features[PF_XMMI_INSTRUCTIONS_AVAILABLE]   = TRUE;
+    features[PF_XMMI64_INSTRUCTIONS_AVAILABLE] = TRUE;
+    features[PF_SSE3_INSTRUCTIONS_AVAILABLE]   = TRUE;
+    features[PF_NX_ENABLED]                    = TRUE;
+}
+
 #elif defined(__arm__) || defined(__aarch64__)
 
 #if defined(AT_HWCAP)
@@ -1746,7 +1779,7 @@ static SYSTEM_CPU_INFORMATION get_cpuinfo(void)
         .ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM,
 #elif defined __aarch64__
         .ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM64,
-#elif defined(__i386__)
+#elif defined(__i386__) || defined(__wasm32__)
         .ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL,
 #elif defined(__x86_64__)
         .ProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64,

@@ -164,9 +164,10 @@ case "$host_cpu" in
   aarch64*)        HOST_ARCH=aarch64 ;;
   arm*)            HOST_ARCH=arm ;;
   i[[3456789]]86*) HOST_ARCH=i386 ;;
+  wasm32*)         HOST_ARCH=wasm32 ;;
   x86_64)          HOST_ARCH=x86_64 ;;
 esac
-m4_set_add_all([_AC_SUBST_VARS],[HOST_ARCH]m4_foreach([cpu],[aarch64,arm,arm64ec,i386,x86_64],
+m4_set_add_all([_AC_SUBST_VARS],[HOST_ARCH]m4_foreach([cpu],[aarch64,arm,arm64ec,i386,wasm32,x86_64],
                                 [m4_foreach([var],[CC,CXX,CFLAGS,CXXFLAGS,EXTRACFLAGS,EXTRACXXFLAGS,LDFLAGS,DEBUG,TARGET,STRIP,DELAYLOADFLAG,DISABLED_SUBDIRS],[,cpu[_]var])]))
 
 dnl Some special cases for the Windows platform
@@ -2062,7 +2063,7 @@ then
     then
       dnl gcc-4.6+ omits frame pointers by default, breaking some copy protections
       WINE_TRY_CFLAGS([-fno-omit-frame-pointer],[MSVCRTFLAGS="$MSVCRTFLAGS -fno-omit-frame-pointer"])
-    else
+    elif test "$HOST_ARCH" != wasm32; then
       dnl Default to ms_abi on 64-bit
       AC_CACHE_CHECK([for working -mabi=ms], ac_cv_mabi_ms,
              [CFLAGS="$CFLAGS -mabi=ms"

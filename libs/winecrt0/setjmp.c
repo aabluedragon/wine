@@ -244,12 +244,12 @@ __ASM_GLOBAL_FUNC( __wine_longjmp,
 
 int __cdecl __wine_setjmpex( __wine_jmp_buf *buf, EXCEPTION_REGISTRATION_RECORD *frame )
 {
-    return setjmp( buf );
+    return setjmp( *buf );
 }
 
 void __cdecl __wine_longjmp( __wine_jmp_buf *buf, int retval )
 {
-    for (;;) longjmp( buf, retval );
+    for (;;) longjmp( *buf, retval );
 }
 
 #endif

@@ -816,6 +816,18 @@ x86_64_CXXFLAGS
 x86_64_CFLAGS
 x86_64_CXX
 x86_64_CC
+wasm32_DISABLED_SUBDIRS
+wasm32_DELAYLOADFLAG
+wasm32_STRIP
+wasm32_TARGET
+wasm32_DEBUG
+wasm32_LDFLAGS
+wasm32_EXTRACXXFLAGS
+wasm32_EXTRACFLAGS
+wasm32_CXXFLAGS
+wasm32_CFLAGS
+wasm32_CXX
+wasm32_CC
 i386_DISABLED_SUBDIRS
 i386_DELAYLOADFLAG
 i386_STRIP
@@ -6554,6 +6566,7 @@ case "$host_cpu" in
   aarch64*)        HOST_ARCH=aarch64 ;;
   arm*)            HOST_ARCH=arm ;;
   i[3456789]86*) HOST_ARCH=i386 ;;
+  wasm32*)         HOST_ARCH=wasm32 ;;
   x86_64)          HOST_ARCH=x86_64 ;;
 esac
 
@@ -20917,7 +20930,7 @@ if test "x$ac_cv_cflags__fno_omit_frame_pointer" = xyes
 then :
   MSVCRTFLAGS="$MSVCRTFLAGS -fno-omit-frame-pointer"
 fi
-    else
+    elif test "$HOST_ARCH" != wasm32; then
             { printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking for working -mabi=ms" >&5
 printf %s "checking for working -mabi=ms... " >&6; }
 if test ${ac_cv_mabi_ms+y}
@@ -24513,6 +24526,18 @@ i386_TARGET = $i386_TARGET
 i386_STRIP = $i386_STRIP
 i386_DELAYLOADFLAG = $i386_DELAYLOADFLAG
 i386_DISABLED_SUBDIRS = $i386_DISABLED_SUBDIRS
+wasm32_CC = $wasm32_CC
+wasm32_CXX = $wasm32_CXX
+wasm32_CFLAGS = $wasm32_CFLAGS
+wasm32_CXXFLAGS = $wasm32_CXXFLAGS
+wasm32_EXTRACFLAGS = $wasm32_EXTRACFLAGS
+wasm32_EXTRACXXFLAGS = $wasm32_EXTRACXXFLAGS
+wasm32_LDFLAGS = $wasm32_LDFLAGS
+wasm32_DEBUG = $wasm32_DEBUG
+wasm32_TARGET = $wasm32_TARGET
+wasm32_STRIP = $wasm32_STRIP
+wasm32_DELAYLOADFLAG = $wasm32_DELAYLOADFLAG
+wasm32_DISABLED_SUBDIRS = $wasm32_DISABLED_SUBDIRS
 x86_64_CC = $x86_64_CC
 x86_64_CXX = $x86_64_CXX
 x86_64_CFLAGS = $x86_64_CFLAGS

@@ -550,6 +550,9 @@ static inline struct target get_default_target(void)
     struct target target;
 #ifdef __i386__
     target.cpu = CPU_i386;
+#elif defined(__wasm32__)
+    /* Wine's WebAssembly port hosts the 32-bit Windows ABI. */
+    target.cpu = CPU_i386;
 #elif defined(__x86_64__)
     target.cpu = CPU_x86_64;
 #elif defined(__arm__)
@@ -643,6 +646,8 @@ static inline int get_cpu_from_name( const char *name )
         { "i586",      CPU_i386 },
         { "i686",      CPU_i386 },
         { "i786",      CPU_i386 },
+        /* The web host runs the 32-bit Windows guest ABI in a wasm32 module. */
+        { "wasm32",    CPU_i386 },
         { "x86_64",    CPU_x86_64 },
         { "amd64",     CPU_x86_64 },
         { "aarch64",   CPU_ARM64 },

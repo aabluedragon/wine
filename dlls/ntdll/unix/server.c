@@ -28,7 +28,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mach/mach.h>
+#ifdef __APPLE__
+# include <mach/mach.h>
+#endif
 #ifdef HAVE_LWP_H
 #include <lwp.h>
 #endif
@@ -299,6 +301,7 @@ static int inproc_drive_state;  /* 0 = unresolved, 1 = resolved, -1 = absent */
  * WINE_INPROC_EXEC_RANGES as "addr:size,addr:size" (hex). */
 static void make_inproc_server_executable(void)
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
     const char *p = getenv( "WINE_INPROC_EXEC_RANGES" );
 
     if (!p || !*p) return;
@@ -334,6 +337,7 @@ static void make_inproc_server_executable(void)
         }
         while (*p == ',' ) p++;
     }
+#endif
 }
 
 unsigned int server_call_unlocked( void *req_ptr )

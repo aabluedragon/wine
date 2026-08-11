@@ -2033,6 +2033,40 @@ typedef ARM64_NT_CONTEXT CONTEXT, *PCONTEXT;
 
 #endif /* __aarch64__ */
 
+#ifdef __wasm32__
+
+/* The browser host has no signal register frame.  Wine's initial web target
+ * runs 32-bit Windows code, so it uses the portable layout of an i386
+ * CONTEXT.  This is data exchanged with the guest/emulator, not WebAssembly
+ * machine state. */
+#define CONTEXT_CONTROL          CONTEXT_I386_CONTROL
+#define CONTEXT_INTEGER          CONTEXT_I386_INTEGER
+#define CONTEXT_SEGMENTS         CONTEXT_I386_SEGMENTS
+#define CONTEXT_FLOATING_POINT   CONTEXT_I386_FLOATING_POINT
+#define CONTEXT_DEBUG_REGISTERS  CONTEXT_I386_DEBUG_REGISTERS
+#define CONTEXT_FULL             CONTEXT_I386_FULL
+#define CONTEXT_ALL              CONTEXT_I386_ALL
+
+#define SIZE_OF_80387_REGISTERS  I386_SIZE_OF_80387_REGISTERS
+#define MAXIMUM_SUPPORTED_EXTENSION I386_MAXIMUM_SUPPORTED_EXTENSION
+
+typedef I386_FLOATING_SAVE_AREA FLOATING_SAVE_AREA, *PFLOATING_SAVE_AREA;
+typedef I386_CONTEXT CONTEXT, *PCONTEXT;
+
+typedef struct _WASM_RUNTIME_FUNCTION
+{
+    DWORD BeginAddress;
+    DWORD EndAddress;
+    DWORD UnwindData;
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
+
+typedef struct _KNONVOLATILE_CONTEXT_POINTERS
+{
+    PVOID Gpr[16];
+} KNONVOLATILE_CONTEXT_POINTERS, *PKNONVOLATILE_CONTEXT_POINTERS;
+
+#endif /* __wasm32__ */
+
 #if !defined(CONTEXT_FULL) && !defined(RC_INVOKED)
 #error You need to define a CONTEXT for your CPU
 #endif
@@ -2644,6 +2678,9 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 {
     return (struct _TEB *)(ULONG_PTR)_MoveFromCoprocessor(15, 0, 13, 0, 2);
 }
+#elif defined(__wasm32__)
+/* The WebAssembly runtime provides this through ntdll. */
+NTSYSAPI struct _TEB * WINAPI NtCurrentTeb(void);
 #elif !defined(RC_INVOKED)
 # error You must define NtCurrentTeb() for your architecture
 #endif
