@@ -2,12 +2,18 @@ BOXEDWINE ?= /Users/alonamir/dev/boxedwine
 EDUKE32 ?= /Users/alonamir/dev/eduke32
 EMSDK ?= /Users/alonamir/dev/emsdk
 OUT := build
+BOXEDWINE_WASM_PATCH := patches/boxedwine-wasm-jit-scheduler.patch
 
 .PHONY: all runtime app serve clean
 
 all: runtime app
 
 runtime:
+	@if git -C $(BOXEDWINE) apply --reverse --check $(abspath $(BOXEDWINE_WASM_PATCH)) >/dev/null 2>&1; then \
+		:; \
+	else \
+		git -C $(BOXEDWINE) apply $(abspath $(BOXEDWINE_WASM_PATCH)); \
+	fi
 	. $(EMSDK)/emsdk_env.sh && $(MAKE) -C $(BOXEDWINE)/project/emscripten jit
 	mkdir -p $(OUT)
 	cp $(BOXEDWINE)/project/emscripten/Build/Jit/boxedwine.{html,js,wasm,css} $(OUT)/

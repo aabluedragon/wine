@@ -1,0 +1,21 @@
+diff --git a/source/emulation/cpu/wasm/jitWasmCodeGen.cpp b/source/emulation/cpu/wasm/jitWasmCodeGen.cpp
+index 908264f..aa4b6e2 100644
+--- a/source/emulation/cpu/wasm/jitWasmCodeGen.cpp
++++ b/source/emulation/cpu/wasm/jitWasmCodeGen.cpp
+@@ -4095,7 +4095,15 @@ void OPCALL wasmStartJITOp(CPU* cpu, DecodedOp* op) {
+     U32 chainedInstructionCount = 0;
+     bool memoryArraysChecked = false;
+     WASM_JIT_PROFILE_ONLY(bool loopProfileSample = wasmJitProfileLoopSample();)
+-    while (op && op->pfnJitCode && chainedBlocks < WASM_JIT_CHAIN_BLOCK_LIMIT && !cpu->yield) {
++    // The scheduler gives this CPU a bounded instruction budget per browser
++    // callback.  A WASM JIT entry can chain many compiled blocks without
++    // returning to CPU::run(), so the old 2048-block cap could bypass that
++    // budget by orders of magnitude and monopolize the browser main thread.
++    // CPU::run() has already charged the first block; account for each
++    // additional chained block here before admitting another one.
++    while (op && op->pfnJitCode && chainedBlocks < WASM_JIT_CHAIN_BLOCK_LIMIT &&
++           cpu->blockInstructionCount + chainedInstructionCount < (U32)contextTimeRemaining &&
++           !cpu->yield) {
+ #ifdef BOXEDWINE_WASM_JIT_PROFILE
+         bool profileSample = wasmJitProfileStartEntry();
+         U64 profileStartNs = profileSample ? wasmJitProfileNowNs() : 0;
