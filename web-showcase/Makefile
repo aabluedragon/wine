@@ -3,6 +3,7 @@ EDUKE32 ?= /Users/alonamir/dev/eduke32
 EMSDK ?= /Users/alonamir/dev/emsdk
 OUT := build
 BOXEDWINE_WASM_PATCH := patches/boxedwine-wasm-jit-scheduler.patch
+BOXEDWINE_WASM_LOG_PATCH := patches/boxedwine-wasm-gl-log.patch
 
 .PHONY: all runtime app serve clean
 
@@ -13,6 +14,11 @@ runtime:
 		:; \
 	else \
 		git -C $(BOXEDWINE) apply $(abspath $(BOXEDWINE_WASM_PATCH)); \
+	fi
+	@if git -C $(BOXEDWINE) apply --reverse --check $(abspath $(BOXEDWINE_WASM_LOG_PATCH)) >/dev/null 2>&1; then \
+		:; \
+	elif git -C $(BOXEDWINE) apply --check $(abspath $(BOXEDWINE_WASM_LOG_PATCH)) >/dev/null 2>&1; then \
+		git -C $(BOXEDWINE) apply $(abspath $(BOXEDWINE_WASM_LOG_PATCH)); \
 	fi
 	. $(EMSDK)/emsdk_env.sh && $(MAKE) -C $(BOXEDWINE)/project/emscripten jit
 	mkdir -p $(OUT)

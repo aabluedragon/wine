@@ -1,0 +1,22 @@
+diff --git a/source/opengl/sdl/sdlgl.cpp b/source/opengl/sdl/sdlgl.cpp
+--- a/source/opengl/sdl/sdlgl.cpp
++++ b/source/opengl/sdl/sdlgl.cpp
+@@ -55 +54,0 @@
+-    klog_fmt("[wasm-gl] get-integer %x", pname);
+@@ -57 +55,0 @@
+-    klog_fmt("[wasm-gl] get-integer done value=%d", *data);
+@@ -60 +57,0 @@
+-    klog_fmt("[wasm-gl] clear-depth %f", depth);
+@@ -62 +58,0 @@
+-    klog("[wasm-gl] clear-depth done");
+@@ -373 +368,0 @@
+-    klog_fmt("[wasm-gl] create window=%p context=%p error=%s", window ? window->window : nullptr, context, SDL_GetError());
+@@ -771 +765,0 @@
+-        klog_fmt("[wasm-gl] make-current window=%p context=%p result=%d error=%s", window->window, context->context, result, SDL_GetError());
+diff --git a/source/opengl/glcommon.cpp b/source/opengl/glcommon.cpp
+--- a/source/opengl/glcommon.cpp
++++ b/source/opengl/glcommon.cpp
+@@ -1736,3 +1735,0 @@
+-    #ifdef __EMSCRIPTEN__
+-    klog_fmt("[wasm-gl] call=%d", index);
+-    #endif
