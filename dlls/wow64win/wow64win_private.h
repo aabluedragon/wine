@@ -28,6 +28,19 @@
 ALL_SYSCALLS32
 #undef SYSCALL_ENTRY
 
+/* In the win32 (NtUser/NtGdi) thunks ULongToPtr converts a 32-bit guest MEMORY
+ * pointer to a host pointer; when the guest is relocated to a high window (iOS)
+ * the host pointer is wow64win_guest_base + addr. Must be a single-evaluation
+ * inline, not a macro: get_ptr() passes side-effecting *(*args)++. Null is
+ * preserved, and this is byte-identical to the original when the base is 0. */
+extern UINT_PTR wow64win_guest_base;
+static inline void *wow64win_ulong_to_ptr( ULONG ul )
+{
+    return ul ? (void *)(wow64win_guest_base + (ULONG_PTR)ul) : (void *)0;
+}
+#undef ULongToPtr
+#define ULongToPtr(ul) wow64win_ulong_to_ptr( ul )
+
 extern ntuser_callback user_callbacks[];
 
 struct object_attr64

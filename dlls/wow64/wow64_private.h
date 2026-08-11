@@ -30,8 +30,17 @@
  * host pointer is wow64_guest_base + addr. Null is preserved, and this is
  * byte-identical to the original macro when wow64_guest_base is 0. */
 extern UINT_PTR wow64_guest_base;
+/* NB: must be a single-evaluation inline, not a macro. get_ptr()/get_handle()
+ * pass side-effecting expressions like *(*args)++; the previous macro form
+ * evaluated its argument twice (once for the null test, once for the value),
+ * reading two args and double-advancing the arg pointer, which corrupted the
+ * parsing of every syscall after the first pointer argument. */
+static inline void *wow64_ulong_to_ptr( ULONG ul )
+{
+    return ul ? (void *)(wow64_guest_base + (ULONG_PTR)ul) : (void *)0;
+}
 #undef ULongToPtr
-#define ULongToPtr(ul) ((void *)((ULONG)(ul) ? wow64_guest_base + (ULONG_PTR)(ULONG)(ul) : (ULONG_PTR)0))
+#define ULongToPtr(ul) wow64_ulong_to_ptr( ul )
 
 #define SYSCALL_ENTRY(id,name,_args) extern NTSTATUS WINAPI wow64_ ## name( UINT *args );
 ALL_SYSCALLS32

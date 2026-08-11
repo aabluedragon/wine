@@ -618,6 +618,16 @@ static size_t packed_message_64to32( UINT message, WPARAM wparam,
             createstruct_64to32( cs64, cs32 );
             size -= sizeof(*cs64);
             if (size) memmove( cs32 + 1, cs64 + 1, size );
+            /* win32u points lpszName/lpszClass at the strings trailing the struct (unless
+             * they are integer atoms). createstruct_64to32 truncated those to host blob
+             * addresses, which a guest_base-relocated guest cannot reach: re-point them into
+             * the guest-accessible params32 buffer, preserving each string's offset. */
+            if ((ULONG_PTR)cs64->lpszName >> 16)
+                cs32->lpszName = PtrToUlong( (char *)(cs32 + 1) +
+                                 ((const char *)cs64->lpszName - (const char *)(cs64 + 1)) );
+            if ((ULONG_PTR)cs64->lpszClass >> 16)
+                cs32->lpszClass = PtrToUlong( (char *)(cs32 + 1) +
+                                  ((const char *)cs64->lpszClass - (const char *)(cs64 + 1)) );
             return sizeof(*cs32) + size;
         }
 
@@ -1711,6 +1721,21 @@ NTSTATUS WINAPI wow64_NtUserCallHwndParam( UINT *args )
             return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, code );
         }
 
+    /* These codes pass `param` as a pointer to a struct that win32u dereferences, and
+     * whose 32/64-bit layout is identical (POINT/RECT/WINDOWINFO/DWORD, or all-scalar
+     * param blocks with no inner pointers). Under guest_base the raw 32-bit guest pointer
+     * is unreachable by the host, so base it (UlongToPtr bases here) and let win32u read/
+     * write the guest struct in place. The default case below keeps scalar/opaque params
+     * — class/window-long offsets, handles, flags, stored-verbatim pointers — UNBASED. */
+    case NtUserCallHwndParam_ClientToScreen:
+    case NtUserCallHwndParam_ScreenToClient:
+    case NtUserCallHwndParam_GetChildRect:
+    case NtUserCallHwndParam_GetWindowInfo:
+    case NtUserCallHwndParam_GetWindowThread:
+    case NtUserCallHwndParam_GetPrivateData:
+    case NtUserCallHwndParam_SetPrivateData:
+        return NtUserCallHwndParam( hwnd, (UINT_PTR)UlongToPtr( param ), code );
+
     default:
         return NtUserCallHwndParam( hwnd, param, code );
     }
@@ -1782,6 +1807,21 @@ NTSTATUS WINAPI wow64_NtUserCallTwoParam( UINT *args )
             if (info.fMask & MIM_STYLE)      info32->dwStyle = info.dwStyle;
             return TRUE;
         }
+
+    /* These codes take a client MEMORY pointer in arg1 and/or arg2 whose pointed-to
+     * struct is layout-identical between 32/64-bit, so upstream passes them straight
+     * through. Under WINE_WOW64_GUEST_BASE a 32-bit guest pointer is not directly
+     * usable by the host, so rebase it into the guest window first. */
+    case NtUserCallTwoParam_GetMonitorInfo:
+    case NtUserCallTwoParam_SetIMECompositionRect:
+        return NtUserCallTwoParam( arg1, (ULONG_PTR)ULongToPtr( arg2 ), code );
+
+    case NtUserCallTwoParam_MonitorFromRect:
+    case NtUserCallTwoParam_GetVirtualScreenRect:
+        return NtUserCallTwoParam( (ULONG_PTR)ULongToPtr( arg1 ), arg2, code );
+
+    case NtUserCallTwoParam_AdjustWindowRect:
+        return NtUserCallTwoParam( (ULONG_PTR)ULongToPtr( arg1 ), (ULONG_PTR)ULongToPtr( arg2 ), code );
 
     default:
         return NtUserCallTwoParam( arg1, arg2, code );
@@ -3400,6 +3440,12 @@ static LRESULT message_call_32to64( HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                                     void *result_info, DWORD type, BOOL ansi )
 {
     LRESULT ret = 0;
+    /* Every message handled explicitly below dereferences lparam as a 32-bit guest
+     * MEMORY pointer (a client struct). Under WINE_WOW64_GUEST_BASE such a pointer is
+     * not directly usable by the host, so rebase it into the guest window here. The
+     * default case (non-pointer messages) keeps the raw value. */
+    LPARAM lparam_raw = lparam;
+    lparam = (LPARAM)ULongToPtr( lparam );
 
     switch (msg)
     {
@@ -3630,7 +3676,7 @@ static LRESULT message_call_32to64( HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         }
 
     default:
-        return NtUserMessageCall( hwnd, msg, wparam, lparam, result_info, type, ansi );
+        return NtUserMessageCall( hwnd, msg, wparam, lparam_raw, result_info, type, ansi );
     }
 }
 
@@ -3652,7 +3698,15 @@ NTSTATUS WINAPI wow64_NtUserMessageCall( UINT *args )
             struct win_proc_params32 *params32 = result_info;
             struct win_proc_params params;
 
-            if (type == NtUserCallWindowProc) params.func = UlongToPtr( params32->func );
+            if (type == NtUserCallWindowProc)
+            {
+                ULONG f = params32->func;
+                /* func is either a real guest proc pointer (must be based to guest_base) or a
+                 * winproc HANDLE (0xffff0000|index) which is not a pointer and must pass
+                 * through unbased — basing it makes win32u fail to recognise the handle and
+                 * dispatch the bare (truncated) handle to the guest, which then jumps to it. */
+                params.func = ((f >> 16) == 0xffff) ? (WNDPROC)(ULONG_PTR)f : (WNDPROC)UlongToPtr( f );
+            }
 
             if (!NtUserMessageCall( hwnd, msg, wparam, lparam, &params, type, ansi ))
                 return FALSE;

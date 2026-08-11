@@ -289,7 +289,7 @@ NTSTATUS wow64_wine_dbg_write( void *args )
         unsigned int len;
     } const *params32 = args;
 
-    return write( 2, ULongToPtr(params32->str), params32->len );
+    return write( 2, WOW64_GUEST_PTR(params32->str), params32->len );
 }
 #endif
 

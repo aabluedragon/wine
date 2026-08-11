@@ -68,10 +68,34 @@ const SYSTEM_SERVICE_TABLE sdwhwin32 =
 };
 
 
+/* When the 32-bit guest is relocated to a high window (iOS has no memory below
+ * 4GB) the win32 (NtUser/NtGdi) thunks must add this base to every guest memory
+ * pointer, exactly like wow64.dll does for the ntdll thunks. Read from the same
+ * env var. Zero (the default) makes ULongToPtr byte-identical to the original. */
+UINT_PTR wow64win_guest_base = 0;
+
 BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, void *reserved )
 {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     LdrDisableThreadCalloutsForDll( inst );
     NtCurrentTeb()->Peb->KernelCallbackTable = user_callbacks;
+    {
+        WCHAR buf[32];
+        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_WOW64_GUEST_BASE" );
+        UNICODE_STRING val = { 0, sizeof(buf), buf };
+        if (!RtlQueryEnvironmentVariable_U( NULL, &name, &val ))
+        {
+            ULONGLONG base = 0;
+            unsigned int i, count = val.Length / sizeof(WCHAR);
+            for (i = 0; i < count; i++)
+            {
+                WCHAR c = buf[i];
+                if (c >= '0' && c <= '9') base = base * 16 + (c - '0');
+                else if ((c|0x20) >= 'a' && (c|0x20) <= 'f') base = base * 16 + ((c|0x20) - 'a' + 10);
+                else if (c == 'x' || c == 'X') base = 0;
+            }
+            wow64win_guest_base = base;
+        }
+    }
     return TRUE;
 }

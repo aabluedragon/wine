@@ -111,6 +111,13 @@ void init_tracing_mechanism(void)
 {
     mach_port_t bp;
 
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    /* On a real iOS device the app sandbox forbids registering a bootstrap
+     * service, and the in-process (single-task) server does not need one: the
+     * only client shares our task, so process tracing uses mach_task_self()
+     * directly (see init_process_tracing). Skip the Mach handshake entirely. */
+    return;
+#endif
     if (task_get_bootstrap_port( mach_task_self(), &bp ) != KERN_SUCCESS)
         fatal_error( "Can't find bootstrap port\n" );
     if (mach_port_allocate( mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &server_mach_port ) != KERN_SUCCESS)
@@ -136,6 +143,14 @@ void init_process_tracing( struct process *process )
         mach_msg_port_descriptor_t  task_port;
         mach_msg_trailer_t          trailer; /* only present on receive */
     } msg;
+
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    /* In-process device server: the client is in our own task, so use our task
+     * port for tracing instead of receiving one over the (absent) Mach port. */
+    if (!process->trace_data) process->trace_data = mach_task_self();
+    set_process_base_priority( process, process->base_priority );
+    return;
+#endif
 
     for (;;)
     {

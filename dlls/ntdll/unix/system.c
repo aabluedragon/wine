@@ -1336,7 +1336,7 @@ static NTSTATUS create_logical_proc_info(void)
     return STATUS_SUCCESS;
 }
 
-#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
+#elif defined(__APPLE__)  /* incl. the iOS simulator: sysctl works there */
 
 /* for 'data', max_len is the array count. for 'dataex', max_len is in bytes */
 static NTSTATUS create_logical_proc_info(void)
@@ -2076,6 +2076,76 @@ static DWORD get_core_id_regs_arm64( struct smbios_wine_id_reg_value_arm64 *regs
 #undef READ_ID_REG
 #undef STR
     return regidx;
+}
+
+#elif defined(__APPLE__)
+
+static int apple_arm_feat( const char *name )
+{
+    int val = 0;
+    size_t size = sizeof(val);
+    if (sysctlbyname( name, &val, &size, NULL, 0 )) return 0;
+    return val ? 1 : 0;
+}
+
+/* macOS/iOS traps EL0 reads of the AArch64 ID registers, so synthesise them from
+ * sysctl feature flags. Only advertise what the host confirms - the x86 emulator
+ * (FEX, in xtajit.dll) reads these to choose its ARM codegen, and over-claiming a
+ * feature makes it emit instructions the host would fault on. */
+static DWORD get_core_id_regs_arm64( struct smbios_wine_id_reg_value_arm64 *regs,
+                                     WORD logical_thread_id )
+{
+    const int lse    = apple_arm_feat("hw.optional.arm.FEAT_LSE") || apple_arm_feat("hw.optional.armv8_1_atomics");
+    const int crc    = apple_arm_feat("hw.optional.armv8_crc32");
+    const int aes    = apple_arm_feat("hw.optional.arm.FEAT_AES");
+    const int pmull  = apple_arm_feat("hw.optional.arm.FEAT_PMULL");
+    const int sha1   = apple_arm_feat("hw.optional.arm.FEAT_SHA1");
+    const int sha256 = apple_arm_feat("hw.optional.arm.FEAT_SHA256");
+    const int sha512 = apple_arm_feat("hw.optional.arm.FEAT_SHA512");
+    const int sha3   = apple_arm_feat("hw.optional.arm.FEAT_SHA3");
+    const int rdm    = apple_arm_feat("hw.optional.arm.FEAT_RDM");
+    const int dp     = apple_arm_feat("hw.optional.arm.FEAT_DotProd");
+    const int fhm    = apple_arm_feat("hw.optional.arm.FEAT_FHM");
+    const int flagm  = apple_arm_feat("hw.optional.arm.FEAT_FlagM");
+    const int fp16   = apple_arm_feat("hw.optional.arm.FEAT_FP16");
+    DWORD n = 0;
+
+    /* Generic ARM Cortex-A76-class core (ARMv8.2, no FEX errata workarounds). */
+    UINT64 midr  = 0x410FD0B0;
+    /* ID_AA64PFR0_EL1: FP & AdvSIMD present (field 0), EL0/EL1 AArch64. */
+    UINT64 pfr0  = 0x0000000000000011;
+    UINT64 pfr1  = 0;
+    UINT64 zfr0  = 0;   /* no SVE on Apple Silicon */
+    UINT64 isar0 = 0, isar1 = 0, isar2 = 0;
+    UINT64 mmfr0 = 0x0000000000101122; /* 4K granule, generic */
+    UINT64 mmfr1 = 0, mmfr2 = 0;
+    UINT64 ctr   = 0x0000000084448004; /* generic 64-byte cache lines */
+
+    if (fp16) pfr0 |= (1ull << 16) | (1ull << 20);   /* FP/AdvSIMD = FP16 variant */
+
+    if (aes || pmull) isar0 |= (UINT64)(pmull ? 2 : 1) << 4;
+    if (sha1)         isar0 |= 1ull << 8;
+    if (sha256)       isar0 |= (UINT64)(sha512 ? 2 : 1) << 12;
+    if (crc)          isar0 |= 1ull << 16;
+    if (lse)          isar0 |= 2ull << 20;
+    if (rdm)          isar0 |= 1ull << 28;
+    if (sha3)         isar0 |= 1ull << 32;
+    if (dp)           isar0 |= 1ull << 44;
+    if (fhm)          isar0 |= 1ull << 48;
+    if (flagm)        isar0 |= 1ull << 52;
+
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4000, midr };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4020, pfr0 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4021, pfr1 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4024, zfr0 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4030, isar0 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4031, isar1 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4032, isar2 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4038, mmfr0 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x4039, mmfr1 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x403a, mmfr2 };
+    regs[n++] = (struct smbios_wine_id_reg_value_arm64){ 0x5801, ctr };
+    return n;
 }
 
 #else

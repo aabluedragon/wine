@@ -1555,6 +1555,10 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     unsigned int status;
     int count = 1;
 
+    /* In-process (iOS) mode cannot spawn a wineboot subprocess, and the bundled
+     * prefix is already booted; skip wineboot entirely. */
+    if (getenv( "WINE_NO_SERVER_SPAWN" )) return;
+
     init_unicode_string( &nameW, eventW );
     InitializeObjectAttributes( &attr, &nameW, OBJ_OPENIF, 0, NULL );
     status = NtCreateEvent( &handles[0], EVENT_ALL_ACCESS, &attr, NotificationEvent, 0 );
@@ -1943,6 +1947,11 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
             status = STATUS_INVALID_IMAGE_FORMAT;
         }
     }
+
+    /* STATUS_IMAGE_NOT_AT_BASE is NT_SUCCESS: the image loaded and was relocated
+     * (always the case for the main exe under guest_base). Don't mistake it for a
+     * failure that needs start.exe — run it directly in this WoW64 process. */
+    if (status == STATUS_IMAGE_NOT_AT_BASE) status = STATUS_SUCCESS;
 
     if (status)  /* try launching it through start.exe */
     {

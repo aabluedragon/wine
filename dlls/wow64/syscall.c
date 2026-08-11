@@ -998,14 +998,18 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
         if (!RtlQueryEnvironmentVariable_U( NULL, &name, &val ))
         {
             ULONGLONG base = 0;
-            for (const WCHAR *p = buf; *p; p++)
+            unsigned int i, count = val.Length / sizeof(WCHAR);
+            for (i = 0; i < count; i++)
             {
-                if (*p >= '0' && *p <= '9') base = base * 16 + (*p - '0');
-                else if ((*p|0x20) >= 'a' && (*p|0x20) <= 'f') base = base * 16 + ((*p|0x20) - 'a' + 10);
-                else if (*p == 'x' || *p == 'X') base = 0;
+                WCHAR c = buf[i];
+                if (c >= '0' && c <= '9') base = base * 16 + (c - '0');
+                else if ((c|0x20) >= 'a' && (c|0x20) <= 'f') base = base * 16 + ((c|0x20) - 'a' + 10);
+                else if (c == 'x' || c == 'X') base = 0;
             }
             wow64_guest_base = base;
         }
+        ERR( "WOW64FLOW: parsed wow64_guest_base hi=%x lo=%x len=%u\n",
+             (unsigned)(wow64_guest_base >> 32), (unsigned)wow64_guest_base, val.Length );
     }
     RtlWow64GetProcessMachines( GetCurrentProcess(), &current_machine, &native_machine );
     if (!current_machine) current_machine = native_machine;
@@ -1053,16 +1057,20 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     GET_PTR( sdwhwin32 );
     syscall_tables[1] = *psdwhwin32;
 
+    ERR( "WOW64FLOW: calling pBTCpuProcessInit\n" );
     pBTCpuProcessInit();
+    ERR( "WOW64FLOW: pBTCpuProcessInit returned\n" );
 
     module = (HMODULE)(ULONG_PTR)pLdrSystemDllInitBlock->ntdll_handle;
     init_image_mapping( module );
+    ERR( "WOW64FLOW: init_image_mapping returned\n" );
     GET_PTR( KiRaiseUserExceptionDispatcher );
     GET_PTR( __wine_syscall_dispatcher );
     GET_PTR( __wine_unix_call_dispatcher );
 
     *p__wine_syscall_dispatcher = PtrToUlong( pBTCpuGetBopCode() );
     *p__wine_unix_call_dispatcher = PtrToUlong( p__wine_get_unix_opcode() );
+    ERR( "WOW64FLOW: dispatchers set, finishing process_init\n" );
 
     if (wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE) create_cross_process_work_list( wow64info );
 
@@ -1087,7 +1095,9 @@ static void thread_init(void)
 {
     NtCurrentTeb32()->WOW32Reserved = PtrToUlong( pBTCpuGetBopCode() );
     NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = wow64info;
+    ERR( "WOW64FLOW: thread_init calling pBTCpuThreadInit\n" );
     if (pBTCpuThreadInit) pBTCpuThreadInit();
+    ERR( "WOW64FLOW: thread_init pBTCpuThreadInit returned\n" );
 
     /* update initial context to jump to 32-bit LdrInitializeThunk (cf. 32-bit call_init_thunk) */
     switch (current_machine)
@@ -1504,9 +1514,13 @@ void WINAPI Wow64LdrpInitialize( CONTEXT *context )
 {
     static RTL_RUN_ONCE init_done;
 
+    ERR( "WOW64FLOW: Wow64LdrpInitialize enter\n" );
     RtlRunOnceExecuteOnce( &init_done, process_init, NULL, NULL );
+    ERR( "WOW64FLOW: after process_init\n" );
     thread_init();
+    ERR( "WOW64FLOW: after thread_init, calling cpu_simulate (guest runs now)\n" );
     cpu_simulate();
+    ERR( "WOW64FLOW: cpu_simulate RETURNED (unexpected)\n" );
 }
 
 

@@ -1148,6 +1148,19 @@ NTSTATUS WINAPI wow64_NtTerminateProcess( UINT *args )
 
     NTSTATUS status;
 
+    {
+        WOW64_CONTEXT ctx;
+        ULONG *stk; int i;
+        ctx.ContextFlags = WOW64_CONTEXT_CONTROL;
+        RtlWow64GetThreadContext( GetCurrentThread(), &ctx );
+        ERR( "NTTERM handle=%p exit=%d eip=%08x esp=%08x\n", handle, (int)exit_code, (unsigned)ctx.Eip, (unsigned)ctx.Esp );
+        stk = ULongToPtr( ctx.Esp );
+        if ((ULONG_PTR)stk > 0x10000)
+            for (i = 0; i < 48; i++)
+                if (stk[i] >= 0x401000 && stk[i] < 0x900000)
+                    ERR( "NTTERM ret[%d]=%08x\n", i, (unsigned)stk[i] );
+    }
+
     if (!handle && pBTCpuProcessTerm) pBTCpuProcessTerm( handle, FALSE, 0 );
     status = NtTerminateProcess( handle, exit_code );
     if (!handle && pBTCpuProcessTerm) pBTCpuProcessTerm( handle, TRUE, status );

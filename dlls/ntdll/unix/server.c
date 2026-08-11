@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #ifdef HAVE_LWP_H
 #include <lwp.h>
 #endif
@@ -282,6 +283,59 @@ static inline unsigned int wait_reply( int reply_fd, struct __server_request_inf
 /***********************************************************************
  *           server_call_unlocked
  */
+/* In-process (iOS single-threaded cooperative) server: when the wineserver runs
+ * in the same task/thread as the wine client (no fork/exec, no server thread),
+ * there is nobody to process the request we just sent. Drive the server inline
+ * (one quiescent poll+process sweep) between send_request and wait_reply. The
+ * drive function is exported by the in-process wineserver; resolve it lazily and
+ * cache the result (-1 = not in-process / not present). */
+static void (*inproc_drive)(void);
+static int inproc_drive_state;  /* 0 = unresolved, 1 = resolved, -1 = absent */
+
+/* Re-mark the in-process wineserver's executable segments as PROT_READ|PROT_EXEC.
+ * wine's W^X memory setup strips PROT_EXEC from the dlopen'd server image (which
+ * it does not track, and which is absent from ntdll's dyld image view). The host
+ * computes the exec segment ranges — where dyld is intact — and passes them in
+ * WINE_INPROC_EXEC_RANGES as "addr:size,addr:size" (hex). */
+static void make_inproc_server_executable(void)
+{
+    const char *p = getenv( "WINE_INPROC_EXEC_RANGES" );
+
+    if (!p || !*p) return;
+    while (*p)
+    {
+        unsigned long long addr = strtoull( p, (char **)&p, 16 );
+        if (*p == ':') p++;
+        unsigned long long size = strtoull( p, (char **)&p, 16 );
+        if (addr && size)
+        {
+            /* wine lowered these pages' maximum protection below r-x, so a plain
+             * mprotect is rejected. Raise the maximum first (set_maximum=TRUE),
+             * then set the current protection to r-x. The range may be fragmented
+             * into several vm regions (with holes), so walk it region by region. */
+            vm_address_t cur = (vm_address_t)(uintptr_t)addr;
+            vm_address_t end = cur + (vm_size_t)size;
+            while (cur < end)
+            {
+                vm_address_t ra = cur; vm_size_t rs = 0;
+                vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t obj = MACH_PORT_NULL;
+                if (vm_region_64( mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                                  (vm_region_info_t)&bi, &cnt, &obj ) != KERN_SUCCESS || ra >= end)
+                    break;
+                {
+                    vm_address_t lo = ra > cur ? ra : cur;
+                    vm_address_t hi = (ra + rs < end) ? ra + rs : end;
+                    vm_protect( mach_task_self(), lo, hi - lo, TRUE, VM_PROT_READ | VM_PROT_EXECUTE | VM_PROT_WRITE );
+                    vm_protect( mach_task_self(), lo, hi - lo, FALSE, VM_PROT_READ | VM_PROT_EXECUTE );
+                }
+                cur = ra + rs;
+            }
+        }
+        while (*p == ',' ) p++;
+    }
+}
+
 unsigned int server_call_unlocked( void *req_ptr )
 {
     struct thread_data *data = get_thread_data();
@@ -289,6 +343,22 @@ unsigned int server_call_unlocked( void *req_ptr )
     unsigned int ret;
 
     if ((ret = send_request( data->request_fd, req ))) return ret;
+    if (!inproc_drive_state)
+    {
+        /* The in-process (iOS) host resolves wineserver_inproc_drive from the
+         * server image and passes its address here as a hex string, because a
+         * RTLD_LOCAL-loaded ntdll cannot dlsym a symbol from another dlopen
+         * scope reliably on macOS/iOS. */
+        const char *ptr = getenv( "WINE_INPROC_DRIVE_PTR" );
+        if (ptr && *ptr)
+        {
+            inproc_drive = (void (*)(void))(uintptr_t)strtoull( ptr, NULL, 16 );
+            make_inproc_server_executable();
+            inproc_drive_state = 1;
+        }
+        else inproc_drive_state = -1;
+    }
+    if (inproc_drive) inproc_drive();
     return wait_reply( data->reply_fd, req );
 }
 
@@ -1305,7 +1375,8 @@ static const char *init_server_dir( dev_t dev, ino_t ino )
 {
     char *dir = NULL;
 
-#ifdef __ANDROID__  /* there's no /tmp dir on Android */
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    /* no writable /tmp on Android or the iOS app sandbox; use the prefix dir */
     asprintf( &dir, "%s/.wineserver/server-%llx-%llx", config_dir, (unsigned long long)dev, (unsigned long long)ino );
 #else
     asprintf( &dir, "/tmp/.wine-%u/server-%llx-%llx", getuid(), (unsigned long long)dev, (unsigned long long)ino );
@@ -1731,9 +1802,7 @@ size_t server_init_process(void)
             fatal_error( "WINEARCH set to %s but '%s' is a 32-bit installation.\n", arch, config_dir );
     }
 
-    set_thread_id( data );
-
-    for (i = 0; i < supported_machines_count; i++)
+        set_thread_id( data );
         if (supported_machines[i] == current_machine) return info_size;
 
     fatal_error( "wineserver doesn't support the %04x architecture\n", current_machine );
@@ -2014,10 +2083,10 @@ NTSTATUS wow64_wine_server_call( void *args )
     req.data_count = req32->data_count;
     for (i = 0; i < req.data_count; i++)
     {
-        req.data[i].ptr = ULongToPtr( req32->data[i].ptr );
+        req.data[i].ptr = WOW64_GUEST_PTR( req32->data[i].ptr );
         req.data[i].size = req32->data[i].size;
     }
-    req.reply_data = ULongToPtr( req32->reply_data );
+    req.reply_data = WOW64_GUEST_PTR( req32->reply_data );
     status = wine_server_call( &req );
     req32->u.reply = req.u.reply;
     return status;
@@ -2036,7 +2105,7 @@ NTSTATUS wow64_wine_server_fd_to_handle( void *args )
         ULONG        handle;
     } const *params32 = args;
 
-    ULONG *handle32 = ULongToPtr( params32->handle );
+    ULONG *handle32 = WOW64_GUEST_PTR( params32->handle );
     HANDLE handle;
     NTSTATUS ret;
 
@@ -2059,7 +2128,7 @@ NTSTATUS wow64_wine_server_handle_to_fd( void *args )
     } const *params32 = args;
 
     return wine_server_handle_to_fd( ULongToHandle( params32->handle ), params32->access,
-                                     ULongToPtr( params32->unix_fd ), ULongToPtr( params32->options ));
+                                     WOW64_GUEST_PTR( params32->unix_fd ), WOW64_GUEST_PTR( params32->options ));
 }
 
 #endif /* _WIN64 */

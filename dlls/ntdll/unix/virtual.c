@@ -85,6 +85,7 @@ extern kern_return_t mach_vm_region( vm_map_t, mach_vm_address_t *, mach_vm_size
 # include <mach/task.h>
 # include <mach/thread_state.h>
 # include <mach/vm_map.h>
+# include <libkern/OSCacheControl.h>
 #undef host_page_size
 #endif
 
@@ -284,7 +285,6 @@ struct range_entry
 static struct range_entry *free_ranges;
 static struct range_entry *free_ranges_end;
 
-
 static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *limit )
 {
     return (addr >= limit || (const char *)addr + size > (const char *)limit);
@@ -300,16 +300,42 @@ static inline BOOL is_vprot_exec_write( BYTE vprot )
  * mapped writable and turned executable afterwards, and memory that has to be
  * both at once has to come from the JIT region. */
 #define HOST_REFUSES_EXEC_MMAP
+# if !TARGET_OS_SIMULATOR
+/* The device kernel additionally code-signs ordinary anonymous executable
+ * pages.  PE images are necessarily copied to anonymous memory on iOS, so the
+ * only legal way to execute their ARM64 code is MAP_JIT.  The SDK deliberately
+ * marks this entry point unavailable to apps; resolve it dynamically. */
+static void (*ios_jit_write_protect)( int enabled );
+
+static inline void ios_set_jit_write_protect( int enabled )
+{
+    if (ios_jit_write_protect) ios_jit_write_protect( enabled );
+}
+# endif
 #endif
 
 /* the protection the host will accept when the mapping is created */
 static inline int host_mmap_prot( int prot, int *flags )
 {
 #ifdef HOST_REFUSES_EXEC_MMAP
+    /* iOS refuses to create an executable mapping, and refuses a W+X (RWX)
+     * mapping outright. Create every executable request without PROT_EXEC: a
+     * pure R+X page gains exec right afterwards in host_mmap_done(), while a
+     * W+X page is left writable and gains exec on demand from the W^X fault
+     * handler (see virtual_handle_fault). MAP_JIT is deliberately not used: on
+     * the simulator its pages are execute-by-default and cannot be turned
+     * writable (the pthread_jit_write_protect toggle is unavailable there), so
+     * a JIT can never write into them. */
     if (prot & PROT_EXEC)
     {
-        if (prot & PROT_WRITE) *flags |= MAP_JIT;
-        else return prot & ~PROT_EXEC;
+# if !TARGET_OS_SIMULATOR
+        /* MAP_JIT is required on hardware for anonymous generated/copied code.
+         * Keep the mapping RWX: per-thread write protection below supplies W^X. */
+        *flags |= MAP_JIT;
+        return PROT_READ | PROT_WRITE | PROT_EXEC;
+# else
+        return prot & ~PROT_EXEC;
+# endif
     }
 #endif
     return prot;
@@ -319,6 +345,11 @@ static inline int host_mmap_prot( int prot, int *flags )
 static inline void *host_mmap_done( void *ptr, size_t size, int prot )
 {
 #ifdef HOST_REFUSES_EXEC_MMAP
+# if !TARGET_OS_SIMULATOR
+    /* A MAP_JIT mapping starts in the thread's current write state.  Do not
+     * mprotect it here: image relocation/copying still has to write it. */
+    if (ptr != MAP_FAILED && (prot & PROT_EXEC)) return ptr;
+# endif
     if (ptr != MAP_FAILED && (prot & PROT_EXEC) && !(prot & PROT_WRITE) &&
         mprotect( ptr, size, prot ))
     {
@@ -2022,6 +2053,12 @@ static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image 
  */
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    /* MAP_JIT controls W^X at thread granularity.  Keep it in step with the
+     * page mode Wine is about to request. */
+    if (unix_prot & PROT_EXEC) ios_set_jit_write_protect( 1 );
+    else if (unix_prot & PROT_WRITE) ios_set_jit_write_protect( 0 );
+#endif
     if (force_exec_prot && (unix_prot & PROT_READ) && !(unix_prot & PROT_EXEC))
     {
         TRACE( "forcing exec permission on %p-%p\n", base, (char *)base + size - 1 );
@@ -2045,15 +2082,37 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
     char *addr = ROUND_ADDR( base, host_page_mask );
     int prot, next;
     BYTE vprot;
+#ifdef HOST_REFUSES_EXEC_MMAP
+    /* Memory in the 32-bit guest window is never executed on the host: the x86
+     * emulator reads it as data and JITs it into its own code cache. Dropping
+     * host PROT_EXEC keeps a 16K host page that straddles a 4K guest code
+     * section and a 4K guest data section from becoming W+X, which iOS refuses.
+     * Only in a real WoW64 process, though: a pure 64-bit helper (plugplay,
+     * services, winedbg) inherits WINE_WOW64_GUEST_BASE but runs its own aarch64
+     * code, which may land in this window and must stay executable. */
+    const BOOL guest_mem = guest_base && is_wow64() &&
+                           (char *)addr >= (char *)guest_base &&
+                           (char *)addr < (char *)guest_base + limit_4g;
+#endif
 
     size = ROUND_SIZE( base, size, host_page_mask );
 
     vprot = get_host_page_vprot( addr );
     prot = get_unix_prot( (vprot & ~clear) | set );
+#ifdef HOST_REFUSES_EXEC_MMAP
+    if (guest_mem) prot &= ~PROT_EXEC;
+    /* iOS cannot map a page writable and executable at once. Leave a W+X page
+     * writable; it gains exec on demand from the W^X fault handler. */
+    else if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) prot &= ~PROT_EXEC;
+#endif
     for (count = i = 1; i < size / host_page_size; i++, count++)
     {
         vprot = get_host_page_vprot( addr + count * host_page_size );
         next = get_unix_prot( (vprot & ~clear) | set );
+#ifdef HOST_REFUSES_EXEC_MMAP
+        if (guest_mem) next &= ~PROT_EXEC;
+        else if ((next & PROT_WRITE) && (next & PROT_EXEC)) next &= ~PROT_EXEC;
+#endif
         if (next == prot) continue;
         if (mprotect_exec( addr, count * host_page_size, prot )) return -1;
         addr += count * host_page_size;
@@ -3443,7 +3502,7 @@ static unsigned int get_mapping_info( HANDLE handle, ACCESS_MASK access, unsigne
  * Map a view for a PE image at an appropriate address.
  */
 static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_info *image_info, SIZE_T size,
-                                ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type )
+                                ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type, USHORT machine )
 {
     unsigned int vprot = SEC_IMAGE | SEC_FILE | VPROT_COMMITTED | VPROT_READ | VPROT_EXEC | VPROT_WRITECOPY;
     void *base;
@@ -3451,6 +3510,27 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
     ULONG_PTR start, end;
     BOOL top_down = (image_info->image_charact & IMAGE_FILE_DLL) &&
                     (image_info->image_flags & IMAGE_FLAGS_ImageDynamicallyRelocated);
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    if (machine == IMAGE_FILE_MACHINE_ARM64)
+    {
+        /* MAP_JIT cannot be combined with MAP_FIXED on iOS.  Native ARM64 PE
+         * images are relocatable, so let the kernel choose a legal JIT range.
+         * 32-bit guest images deliberately retain their fixed FEX window. */
+        size_t host_size = ROUND_SIZE( 0, size, host_page_mask );
+
+        ios_set_jit_write_protect( 0 );
+        base = anon_mmap_alloc( host_size, PROT_READ | PROT_WRITE | PROT_EXEC );
+        if (base == MAP_FAILED)
+        {
+            ERR( "failed to allocate JIT mapping for native PE image: %s\n", strerror( errno ) );
+            return STATUS_NO_MEMORY;
+        }
+        status = create_view( view_ret, base, size, vprot );
+        if (status != STATUS_SUCCESS) unmap_area( base, size );
+        return status;
+    }
+#endif
 
     limit_low = max( limit_low, (ULONG_PTR)address_space_start );  /* make sure the DOS area remains free */
     if (!limit_high) limit_high = (ULONG_PTR)user_space_limit;
@@ -3467,6 +3547,9 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
         base = wine_server_get_ptr( image_info->base );
         if ((ULONG_PTR)base != image_info->base) base = NULL;
     }
+    /* relocate a 32-bit image into the guest_base window (iOS has no low memory) */
+    if (guest_base && image_info->base < limit_4g && base)
+        base = (char *)base + guest_base;
     if (base)
     {
         status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
@@ -3479,6 +3562,11 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
     {
         start = max( limit_low, limit_4g );
         end = limit_high;
+    }
+    else if (guest_base)
+    {
+        start = guest_base;
+        end = guest_base + limit_4g;
     }
     else
     {
@@ -3542,7 +3630,7 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
-    status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type );
+    status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type, machine );
     if (status) goto done;
 
     status = map_image_into_view( view, &pe_mapping->nt_name, unix_fd, &pe_mapping->image,
@@ -3774,6 +3862,12 @@ void virtual_init(void)
     pthread_mutex_init( &virtual_mutex, &attr );
     pthread_mutexattr_destroy( &attr );
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    ios_jit_write_protect = dlsym( RTLD_DEFAULT, "pthread_jit_write_protect_np" );
+    /* Wine copies/relocates PE images during initialization. */
+    ios_set_jit_write_protect( 0 );
+#endif
+
 #ifdef __aarch64__
     host_page_size = sysconf( _SC_PAGESIZE );
     host_page_mask = host_page_size - 1;
@@ -3840,6 +3934,13 @@ void virtual_init(void)
 #endif
     if (size && mmap_is_in_reserved_area( (void*)0x10000, size ) == 1)
         anon_mmap_fixed( (void *)0x10000, size, PROT_READ | PROT_WRITE, 0 );
+
+    /* Give the 32-bit guest its own KUSER_SHARED_DATA at guest_base + 0x7ffe0000, where
+     * the JIT relocates its fixed 0x7ffe0000 reads. It must be an ordinary (anonymous)
+     * guest view: the early reservation put the real USD in the high host region which the
+     * guest cannot reach, and FEX reads guest memory with ldar (x86 TSO) which faults on a
+     * file-backed section mapping. Seed it from the live host copy; it is a snapshot (no
+     * live server updates), which is acceptable to get the guest running. */
 }
 
 
@@ -4175,6 +4276,15 @@ TEB *virtual_alloc_first_teb(void)
     SIZE_T total = 32 * block_size;
     struct thread_data *thread_data;
 
+    /* This runs before virtual_init(), but the TEB block reserved just below must
+     * already land in the guest window when the 32-bit guest is relocated (iOS),
+     * so read the base here too. */
+    if (!guest_base)
+    {
+        const char *base = getenv( "WINE_WOW64_GUEST_BASE" );
+        if (base) guest_base = strtoull( base, NULL, 0 );
+    }
+
     /* reserve space for shared user data */
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&user_shared_data, 0, &data_size,
                                       MEM_RESERVE | MEM_COMMIT, PAGE_READONLY );
@@ -4188,12 +4298,16 @@ TEB *virtual_alloc_first_teb(void)
     /* The TEBs are kept in the low 2GB so that 32-bit code can reach them; on a
      * platform with no low memory at all, and so no 32-bit support to speak of,
      * that is a constraint we cannot meet and do not need. */
-    NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, 0, &total,
-                             MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+    ULONG_PTR teb_limit = 0;
 #else
-    NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, is_win64 ? limit_2g - 1 : 0, &total,
-                             MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
+    ULONG_PTR teb_limit = is_win64 ? limit_2g - 1 : 0;
 #endif
+    /* On a host with no low memory (iOS) the 32-bit guest is relocated to
+     * guest_base + addr; its TEB and PEB live in this block, so it must sit
+     * inside the guest window to be reachable there. */
+    if (guest_base) teb_limit = guest_base + limit_4g - 1;
+    NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, teb_limit, &total,
+                             MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
     teb_block_pos = 30;
     ptr = (char *)teb_block + 30 * block_size;
     data_size = 2 * block_size;
@@ -4232,14 +4346,20 @@ NTSTATUS virtual_alloc_teb( struct thread_data *data )
         if (!teb_block_pos)
         {
             SIZE_T total = 32 * block_size;
-
 #ifdef WINE_ADDRESS_SPACE_START
-            if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &ptr, 0,
-                                                   &total, MEM_RESERVE, PAGE_READWRITE )))
+            ULONG_PTR teb_limit = 0;
 #else
-            if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &ptr, user_space_wow_limit,
-                                                   &total, MEM_RESERVE, PAGE_READWRITE )))
+            ULONG_PTR teb_limit = user_space_wow_limit;
 #endif
+            /* On a host with no low memory (iOS) the 32-bit guest is relocated to
+             * guest_base + addr, so its TEB and PEB - which live in this block -
+             * must be reachable there, i.e. the block must sit inside the guest
+             * window. Force the reserve into the window: user_space_wow_limit is
+             * still zero when the first (main-thread) block is reserved. */
+            if (guest_base) teb_limit = guest_base + limit_4g - 1;
+
+            if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &ptr, teb_limit,
+                                                   &total, MEM_RESERVE, PAGE_READWRITE )))
             {
                 server_leave_uninterrupted_section( &virtual_mutex, &sigset );
                 return status;
@@ -4276,7 +4396,13 @@ struct thread_data *virtual_alloc_thread_data(void)
     SIZE_T size = signal_stack_mask + 1 + kernel_stack_size;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
-    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+    /* thread_data is host-only bookkeeping (debug_info, signal/kernel stacks); the
+     * 32-bit guest never reaches it. With a relocated guest, keeping the usual
+     * limit_low=limit_4g lets it land just below guest_base and spill its
+     * debug_info into the guest window, where host debug output then scribbles
+     * over guest low memory. Force it above the window instead. */
+    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED,
+                       guest_base ? guest_base + limit_4g : limit_4g, 0, 0 );
     if (!status)
     {
         data = view->base;
@@ -4597,11 +4723,30 @@ void virtual_map_user_shared_data(void)
         ERR( "failed to open the USD section: %08x\n", status );
         exit(1);
     }
+    /* The 32-bit guest reads KUSER_SHARED_DATA at its fixed low address (0x7ffe0000),
+     * which the JIT relocates to guest_base + 0x7ffe0000. Map the section there so the
+     * guest can reach it, instead of at the bare host address which it cannot see. */
     if ((res = server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL )) ||
         (user_shared_data != mmap( user_shared_data, page_size, PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0 )))
     {
         ERR( "failed to remap the process USD: %d\n", res );
         exit(1);
+    }
+    /* Give the 32-bit guest a copy of KUSER_SHARED_DATA at guest_base + 0x7ffe0000, where
+     * the FEX JIT relocates the fixed 0x7ffe0000 reads. The host copy above lives out of
+     * the guest's 4GB reach. Prefer a live MAP_SHARED alias of the same section; if the
+     * guest's ldar (x86 TSO -> load-acquire) cannot use that section mapping, fall back to
+     * an anonymous page seeded once from the host copy (a snapshot, no live server ticks).
+     * This runs after virtual_init(), so the host source is mapped and safe to read. */
+    if (guest_base)
+    {
+        void *gusd = (void *)(guest_base + (ULONG_PTR)0x7ffe0000);
+        if (mmap( gusd, page_size, PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0 ) != gusd)
+        {
+            if (anon_mmap_fixed( gusd, host_page_size, PROT_READ|PROT_WRITE, 0 ) == gusd)
+                memcpy( gusd, user_shared_data, sizeof(*user_shared_data) );
+            else ERR( "wine: could not place the guest KUSER_SHARED_DATA at %p\n", gusd );
+        }
     }
     if (needs_close) close( fd );
     NtClose( section );
@@ -4747,6 +4892,50 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
     {
         WARN( "treating read fault in a readable page as a write fault, addr %p\n", addr );
         err = EXCEPTION_WRITE_FAULT;
+    }
+#endif
+
+#ifdef HOST_REFUSES_EXEC_MMAP
+    /* iOS can't map a page writable and executable at once. A page the app
+     * mapped RWX (VPROT_EXEC + VPROT_WRITE/WRITECOPY) is kept either R+W or R+X
+     * on the host and flipped on demand: an instruction-fetch fault makes it
+     * executable, a write fault makes it writable, then the faulting access is
+     * retried. This lets an in-process JIT (the x86 emulator) write and execute
+     * the same pages. Guest-window pages are excluded: the host never executes
+     * them (the emulator reads them as data), so a fetch fault there is real. */
+    if ((vprot & VPROT_COMMITTED) && (vprot & VPROT_EXEC) &&
+        (vprot & (VPROT_WRITE | VPROT_WRITECOPY)) && !(vprot & VPROT_GUARD) &&
+        !(guest_base && is_wow64() &&
+          (char *)page >= (char *)guest_base &&
+          (char *)page < (char *)guest_base + limit_4g) &&
+        (err == EXCEPTION_EXECUTE_FAULT ||
+         (err == EXCEPTION_WRITE_FAULT && !(vprot & VPROT_WRITEWATCH))))
+    {
+        int prot = (err == EXCEPTION_EXECUTE_FAULT) ? (PROT_READ | PROT_EXEC)
+                                                    : (PROT_READ | PROT_WRITE);
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+        /* MAP_JIT permissions are per-thread.  Select execute before retrying
+         * an instruction fetch and write before retrying a code patch. */
+        ios_set_jit_write_protect( err == EXCEPTION_EXECUTE_FAULT );
+#endif
+        if (!mprotect( page, host_page_size, prot ))
+        {
+            /* The page may have been written (as data) while it was R+W - e.g.
+             * the JIT backpatching a linked branch. mprotect does not flush the
+             * instruction cache, so invalidate it before the page is executed to
+             * avoid running stale instructions. */
+            if (prot & PROT_EXEC)
+#ifdef __APPLE__
+                sys_icache_invalidate( page, host_page_size );
+#else
+                __builtin___clear_cache( page, page + host_page_size );
+#endif
+            mutex_unlock( &virtual_mutex );
+            rec->ExceptionCode = STATUS_SUCCESS;
+            return STATUS_SUCCESS;
+        }
+        WARN( "W^X flip to %s at %p failed: %s\n",
+              (prot & PROT_EXEC) ? "exec" : "write", page, strerror(errno) );
     }
 #endif
 
@@ -5424,9 +5613,25 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     else
         limit = 0;
 
-    if (guest_base && is_wow64() && !*ret)
-        return allocate_virtual_memory( ret, size_ptr, type, protect, guest_base,
-                                        guest_base + (limit ? limit : limit_4g), 0, 0 );
+    /* The guest window [guest_base, guest_base + 4GB) is reserved for the 32-bit
+     * guest: every host address there aliases a 32-bit guest address, so a host
+     * structure placed in it is scribbled over by the guest's own memory. A
+     * guest allocation (via the WoW64 thunk) supplies a non-zero zero_bits and
+     * belongs in the window; any other (host / emulator) allocation must stay
+     * out of it. This gates on guest_base only, NOT is_wow64(): the process's
+     * own early setup and the FEX allocator arena run before the WoW64 CPU is
+     * live (is_wow64() still false) yet must already avoid the window. */
+    if (guest_base && !*ret)
+    {
+        if (limit)
+        {
+            ULONG_PTR high = (limit > guest_base) ? limit : guest_base + limit;
+            if (high > guest_base + limit_4g) high = guest_base + limit_4g;
+            return allocate_virtual_memory( ret, size_ptr, type, protect, guest_base, high, 0, 0 );
+        }
+        /* Host allocation: force it into [guest_base + 4GB, top). */
+        return allocate_virtual_memory( ret, size_ptr, type, protect, guest_base + limit_4g, 0, 0, 0 );
+    }
     return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 }
 
@@ -5563,6 +5768,25 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
             *size_ptr = result.virtual_alloc_ex.size;
         }
         return result.virtual_alloc_ex.status;
+    }
+
+    /* Keep host (emulator) allocations out of the guest window - see
+     * NtAllocateVirtualMemory. rpmalloc, which backs the FEX C++ heap, reserves
+     * its aligned spans through this Ex path (VirtualAlloc2), so without this
+     * the FEX heap - and the per-thread state in it - lands in the window and
+     * gets scribbled over by the 32-bit guest. A guest allocation supplies an
+     * address range (limit_low/limit_high); a bare host reservation does not. */
+    /* A host (emulator) allocation names at most a lowest-address floor (e.g.
+     * rpmalloc, which backs the FEX C++ heap, passes LowestStartingAddress =
+     * 0x7ffe0000 to stay clear of a 32-bit guest and no ceiling). Raise that
+     * floor above the guest window so the FEX heap - and the per-thread state
+     * in it - never aliases 32-bit guest memory. A genuine guest allocation is
+     * bounded by an upper limit (limit_high), so leave those alone. */
+    if (guest_base && !*ret && !limit_high)
+    {
+        ULONG_PTR low = guest_base + limit_4g;
+        if (limit_low > low) low = limit_low;
+        return allocate_virtual_memory( ret, size_ptr, type, protect, low, 0, align, attributes );
     }
 
     return allocate_virtual_memory( ret, size_ptr, type, protect,
@@ -7125,6 +7349,17 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
 {
 #if defined(__x86_64__) || defined(__i386__)
     /* no-op */
+#elif defined(__APPLE__)
+    /* the Apple arm64 runtime does not ship __clear_cache; use the libSystem API */
+    if (handle == GetCurrentProcess())
+    {
+        sys_icache_invalidate( (void *)addr, size );
+    }
+    else
+    {
+        static int once;
+        if (!once++) FIXME( "%p %p %ld other process not supported\n", handle, addr, size );
+    }
 #elif defined(HAVE___CLEAR_CACHE)
     if (handle == GetCurrentProcess())
     {

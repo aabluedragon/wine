@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -787,7 +788,7 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
 
     SP_sig(sigcontext) = (ULONG_PTR)stack;
     PC_sig(sigcontext) = (ULONG_PTR)pKiUserExceptionDispatcher;
-    REGn_sig(18, sigcontext) = (ULONG_PTR)data->teb;
+    REGn_sig(TEB_REG, sigcontext) = (ULONG_PTR)data->teb;
 }
 
 
@@ -1103,7 +1104,7 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *context,
     {
         TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
         REGn_sig(0, context)  = rec->ExceptionCode;
-        REGn_sig(18, context) = (ULONG_PTR)data->teb;
+        REGn_sig(TEB_REG, context) = (ULONG_PTR)data->teb;
         SP_sig(context)       = (ULONG_PTR)frame;
         PC_sig(context)       = (ULONG_PTR)__wine_syscall_dispatcher_return;
         return TRUE;
@@ -1124,6 +1125,59 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     CONTEXT context;
     EXCEPTION_RECORD rec = { .ExceptionAddress = (void *)PC_sig(sigcontext) };
     DWORD64 esr = get_fault_esr( sigcontext );
+    { static int __fc = 0; if (__fc < 24) { __fc++; ERR( "FAULTDIAG #%d pc=%p addr=%p EC=%llx DFSC=%llx WnR=%llx\n", __fc, (void *)PC_sig(sigcontext), (void *)siginfo->si_addr, (unsigned long long)ESR_ELx_EC(esr), (unsigned long long)ESR_ELx_ISS_DFSC(esr), (unsigned long long)ESR_ELx_ISS_DABT_WNR(esr) ); } }
+    /* Compact loop counter for data faults inside the guest NULL page: does the
+     * same fault repeat (tight retry loop) or make progress? Also dump x8 (RSP)
+     * and the FEX guest RIP from the CpuStateFrame (STATE reg = x24 -> State.rip
+     * at offset 0) to locate the guest instruction. */
+    if (guest_base && (ULONG_PTR)siginfo->si_addr >= guest_base &&
+        (ULONG_PTR)siginfo->si_addr < guest_base + 0x10000)
+    {
+        static int __gn = 0;
+        if (__gn < 40) { __gn++;
+            ERR( "GNULL #%d pc=%p addr=%p x8=%llx x22=%llx x30=%llx\n", __gn,
+                 (void *)PC_sig(sigcontext), siginfo->si_addr,
+                 (unsigned long long)REGn_sig(8, sigcontext),
+                 (unsigned long long)REGn_sig(22, sigcontext),
+                 (unsigned long long)REGn_sig(30, sigcontext) );
+        }
+    }
+    /* Dump the faulting instruction and host registers for a data-abort
+     * translation fault (unmapped memory) - either an unrelocated low guest
+     * address or a bad host access - so the offending access can be decoded. */
+    if ((ESR_ELx_EC(esr) == 0x24 && (ESR_ELx_ISS_DFSC(esr) == 6 || ESR_ELx_ISS_DFSC(esr) == 7))
+        || (ESR_ELx_EC(esr) == 0x20 && PC_sig(sigcontext) < 0x10000))
+    {
+        static int __fd = 0;
+        if (__fd < 3)
+        {
+            const unsigned int *pc = (const unsigned int *)PC_sig(sigcontext);
+            int i;
+            __fd++;
+            {
+                Dl_info dli;
+                if (dladdr( (void *)PC_sig(sigcontext), &dli ) && dli.dli_sname)
+                    ERR( "FDMOD pc=%p in %s+0x%lx (%s)\n", (void *)PC_sig(sigcontext),
+                         dli.dli_sname, (unsigned long)((char *)PC_sig(sigcontext) - (char *)dli.dli_saddr),
+                         dli.dli_fname ? dli.dli_fname : "?" );
+                if (dladdr( (void *)LR_sig(sigcontext), &dli ) && dli.dli_sname)
+                    ERR( "FDMOD lr=%p in %s+0x%lx\n", (void *)LR_sig(sigcontext),
+                         dli.dli_sname, (unsigned long)((char *)LR_sig(sigcontext) - (char *)dli.dli_saddr) );
+            }
+            if ((ULONG_PTR)pc >= 0x10000)
+                for (i = -4; i <= 3; i++)
+                    ERR( "FDINSN %p: %08x%s\n", (void*)&pc[i], pc[i], i == 0 ? "  <== FAULT" : "" );
+            for (i = 0; i < 29; i++)
+                ERR( "FDREG x%-2d = %016llx\n", i, (unsigned long long)REGn_sig(i, sigcontext) );
+            ERR( "FDREG x29 = %016llx\n", (unsigned long long)FP_sig(sigcontext) );
+            ERR( "FDREG x30 = %016llx\n", (unsigned long long)LR_sig(sigcontext) );
+            /* FDGSTK/FDTHUNK/FDSTATE dumps removed: they dereferenced x8/x24 as
+             * guest RSP / FEX STATE, which is only valid for the old (solved)
+             * RtlAllocateHeap JIT fault. For a fault in FEX dispatcher/thunk code
+             * those regs are host values, so the derefs nested-faulted inside the
+             * signal handler (the apparent "hang"). */
+        }
+    }
 
 
     switch (ESR_ELx_EC(esr))
@@ -1155,11 +1209,19 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
     rec.NumberParameters = 2;
 
-    if (!virtual_handle_fault( data, &rec, (void *)SP_sig(sigcontext) )) return;
-    if (handle_syscall_fault( data, sigcontext, &rec )) return;
-
-    save_context( &context, sigcontext );
-    setup_raise_exception( data, sigcontext, &rec, &context );
+    {
+        int gn = guest_base && (ULONG_PTR)siginfo->si_addr >= guest_base &&
+                 (ULONG_PTR)siginfo->si_addr < guest_base + 0x10000;
+        if (gn) ERR( "GNPATH: enter delivery, EC=%llx code=%x\n", (unsigned long long)ESR_ELx_EC(esr), (unsigned)rec.ExceptionCode );
+        if (!virtual_handle_fault( data, &rec, (void *)SP_sig(sigcontext) )) { if (gn) ERR("GNPATH: virtual_handle_fault handled (return)\n"); return; }
+        if (gn) ERR( "GNPATH: past virtual_handle_fault, code=%x\n", (unsigned)rec.ExceptionCode );
+        if (handle_syscall_fault( data, sigcontext, &rec )) { if (gn) ERR("GNPATH: handle_syscall_fault handled (return)\n"); return; }
+        if (gn) ERR( "GNPATH: past handle_syscall_fault, calling setup_raise_exception\n" );
+        save_context( &context, sigcontext );
+        setup_raise_exception( data, sigcontext, &rec, &context );
+        if (gn) ERR( "GNPATH: returned from setup_raise_exception\n" );
+        return;
+    }
 }
 
 

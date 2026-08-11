@@ -108,6 +108,34 @@ void locale_init(void)
     NTSTATUS status;
     const struct locale_nls_header *header;
     PEB64 *peb64 = get_peb64();
+    /* The 64-bit PEB's NLS pointers must be host addresses. On a normal WoW64 the
+     * 32-bit guest lives in the host's low 4GB, so the truncated guest pointer is
+     * already a valid host address. When the guest is relocated to a high window
+     * (iOS has no memory below 4GB) it is not: the host reads peb64->AnsiCodePageData
+     * (e.g. in win32u's font_init) and faults on the unbased low address. Add the
+     * base so the 64-bit field holds guest_base + addr. Zero on a normal WoW64. */
+    ULONG64 guest_base = 0;
+
+#ifdef __i386__
+    /* Only the 32-bit guest's NLS pointers are relocated; the 64-bit host's own
+     * peb64 pointers (if any) are already host addresses and must not be based. */
+    if (peb64)
+    {
+        WCHAR gb[24];
+        SIZE_T gblen = 0;
+        if (!RtlQueryEnvironmentVariable( NULL, L"WINE_WOW64_GUEST_BASE", 21, gb, ARRAY_SIZE(gb), &gblen ))
+        {
+            SIZE_T i;
+            for (i = 0; i < gblen; i++)
+            {
+                WCHAR c = gb[i];
+                if (c >= '0' && c <= '9') guest_base = guest_base * 16 + (c - '0');
+                else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') guest_base = guest_base * 16 + ((c | 0x20) - 'a' + 10);
+                else if (c == 'x' || c == 'X') guest_base = 0;
+            }
+        }
+    }
+#endif
 
     status = RtlGetLocaleFileMappingAddress( (void **)&header, &system_lcid, &unused );
     if (status)
@@ -165,18 +193,18 @@ void locale_init(void)
 
     NtGetNlsSectionPtr( 10, 0, NULL, &case_ptr, &size );
     NtCurrentTeb()->Peb->UnicodeCaseTableData = case_ptr;
-    if (peb64) peb64->UnicodeCaseTableData = PtrToUlong( case_ptr );
+    if (peb64) peb64->UnicodeCaseTableData = guest_base + PtrToUlong( case_ptr );
     if (ansi_cp != CP_UTF8)
     {
         NtGetNlsSectionPtr( 11, ansi_cp, NULL, &ansi_ptr, &size );
         NtCurrentTeb()->Peb->AnsiCodePageData = ansi_ptr;
-        if (peb64) peb64->AnsiCodePageData = PtrToUlong( ansi_ptr );
+        if (peb64) peb64->AnsiCodePageData = guest_base + PtrToUlong( ansi_ptr );
     }
     if (oem_cp != CP_UTF8)
     {
         NtGetNlsSectionPtr( 11, oem_cp, NULL, &oem_ptr, &size );
         NtCurrentTeb()->Peb->OemCodePageData = oem_ptr;
-        if (peb64) peb64->OemCodePageData = PtrToUlong( oem_ptr );
+        if (peb64) peb64->OemCodePageData = guest_base + PtrToUlong( oem_ptr );
     }
     RtlInitNlsTables( ansi_ptr, oem_ptr, case_ptr, &nls_info );
     NlsAnsiCodePage     = nls_info.AnsiTableInfo.CodePage;

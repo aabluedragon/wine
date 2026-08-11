@@ -547,6 +547,13 @@ void start_server( BOOL debug )
         int status;
         pid_t pid;
 
+        /* On iOS the sandbox forbids spawning a separate wineserver process; it
+         * is run in-process on a thread instead (see the app host). In that mode
+         * the socket already exists, so this path is only a safety net: never
+         * fork/exec, just return and let server_connect find the in-process
+         * server's socket. */
+        if (getenv( "WINE_NO_SERVER_SPAWN" )) return;
+
         argv[1] = debug ? debug_flag : NULL;
         argv[2] = NULL;
         if (exec_wineserver( &pid, argv )) fatal_error( "could not exec wineserver\n" );

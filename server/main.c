@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_RESOURCE_H
 # include <sys/resource.h>
@@ -37,6 +38,7 @@
 
 #include "object.h"
 #include "file.h"
+#include "process.h"
 #include "thread.h"
 #include "request.h"
 #include "unicode.h"
@@ -266,6 +268,35 @@ int main( int argc, char *argv[] )
     init_directories( load_intl_file() );
     init_threading();
     init_registry();
+
+    /* In-process (iOS) client injection: instead of accepting a client over the
+     * master unix socket (which does not work when the server thread shares a
+     * task with the wine client), take a pre-connected socketpair fd from the
+     * environment and register it as the first client, exactly as the master
+     * socket accept path would. The client uses WINESERVERSOCKET on the other
+     * end. */
+    {
+        const char *icf = getenv( "WINE_INPROC_CLIENT_FD" );
+        if (icf && *icf)
+        {
+            int client = atoi( icf );
+            struct process *process;
+            fcntl( client, F_SETFL, O_NONBLOCK );
+            if ((process = create_process( client, NULL, 0, NULL, NULL, NULL, 0, NULL )))
+            {
+                struct thread *thread = create_thread( -1, process, NULL );
+                if (thread) add_process_thread( process, thread );
+                release_object( process );
+            }
+        }
+    }
+
+    /* In-process cooperative (iOS single-threaded) mode: the server has been
+     * initialized and the client injected, but there is no server thread. The
+     * wine client drives the server inline (wineserver_inproc_drive) from its
+     * own server calls, so return instead of entering the blocking main_loop. */
+    if (getenv( "WINE_INPROC_COOP" )) return 0;
+
     main_loop();
     return 0;
 }

@@ -865,15 +865,12 @@ int CDECL _isatty(int fd)
 /* INTERNAL: Allocate stdio file buffer */
 static BOOL msvcrt_alloc_buffer(FILE* file)
 {
-#if _MSVCR_VER >= 140
-    if((file->_file==STDOUT_FILENO && _isatty(file->_file))
-        || file->_file == STDERR_FILENO)
+    /* Leave the standard console streams unbuffered. On iOS the guest is run
+     * with pipe (non-tty) stdio, which would otherwise be fully buffered and
+     * silently dropped when the app terminates via _exit() without flushing -
+     * losing all of a console program's output. Matches tty behaviour. */
+    if(file->_file==STDOUT_FILENO || file->_file==STDERR_FILENO)
         return FALSE;
-#else
-    if((file->_file==STDOUT_FILENO || file->_file==STDERR_FILENO)
-            && _isatty(file->_file))
-        return FALSE;
-#endif
 
     file->_base = calloc(1, MSVCRT_INTERNAL_BUFSIZ);
     if(file->_base) {

@@ -65,6 +65,12 @@ struct framebuffer
     UINT width;
     UINT height;
     UINT generation;
+    /* rect of the main (game) window's client area within the desktop, so the
+     * host can crop/zoom to just the game instead of showing the whole desktop */
+    UINT win_x;
+    UINT win_y;
+    UINT win_w;
+    UINT win_h;
 };
 
 #define IOS_FRAMEBUFFER_MAGIC 0x534f4957  /* WIOS */
@@ -110,6 +116,10 @@ static BOOL map_framebuffer(void)
     framebuffer->magic = IOS_FRAMEBUFFER_MAGIC;
     framebuffer->width = screen_width;
     framebuffer->height = screen_height;
+    framebuffer->win_x = 0;
+    framebuffer->win_y = 0;
+    framebuffer->win_w = screen_width;
+    framebuffer->win_h = screen_height;
     TRACE( "presenting through %s, %ux%u\n", path, screen_width, screen_height );
     return TRUE;
 }
@@ -236,6 +246,17 @@ static BOOL ios_surface_flush( struct window_surface *surface, const RECT *rect,
                 dst[screen_y * framebuffer->width + screen_x] = src[y * src_width + x] | 0xff000000;
             }
         }
+        /* Report the main (game) window's client rect so the host can zoom to it.
+         * Filter to reasonably large surfaces so small startup dialogs don't
+         * override the game window. */
+        if (color_info->bmiHeader.biWidth >= 640 && abs( color_info->bmiHeader.biHeight ) >= 400 &&
+            rect->left >= 0 && rect->top >= 0)
+        {
+            framebuffer->win_x = rect->left;
+            framebuffer->win_y = rect->top;
+            framebuffer->win_w = color_info->bmiHeader.biWidth;
+            framebuffer->win_h = abs( color_info->bmiHeader.biHeight );
+        }
         framebuffer->generation++;
     }
     pthread_mutex_unlock( &framebuffer_mutex );
@@ -358,7 +379,20 @@ static const struct user_driver_funcs ios_drv_funcs =
 
 NTSTATUS ios_init( void *args )
 {
-    TRACE( "registering the iOS graphics driver\n" );
+    const char *w = getenv( "WINE_IOS_SCREEN_WIDTH" );
+    const char *h = getenv( "WINE_IOS_SCREEN_HEIGHT" );
+
+    /* The desktop (and thus the shared framebuffer) defaults to the device's
+     * native portrait resolution. A landscape game like Duke3D wants to run
+     * fullscreen filling a landscape screen, so allow the host app to override
+     * the desktop size and drive a landscape, phone-aspect resolution. */
+    if (w && h)
+    {
+        unsigned int nw = atoi( w ), nh = atoi( h );
+        if (nw >= 320 && nh >= 200) { screen_width = nw; screen_height = nh; }
+    }
+
+    TRACE( "registering the iOS graphics driver, desktop %ux%u\n", screen_width, screen_height );
     __wine_set_user_driver( &ios_drv_funcs, WINE_GDI_DRIVER_VERSION );
     return STATUS_SUCCESS;
 }

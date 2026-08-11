@@ -540,14 +540,14 @@ NTSTATUS wow64_wine_spawnvp( void *args )
         int   wait;
     } const *params32 = args;
 
-    ULONG *argv32 = ULongToPtr( params32->argv );
+    ULONG *argv32 = WOW64_GUEST_PTR( params32->argv );
     unsigned int i, count = 0;
     char **argv;
     NTSTATUS ret;
 
     while (argv32[count]) count++;
     argv = malloc( (count + 1) * sizeof(*argv) );
-    for (i = 0; i < count; i++) argv[i] = ULongToPtr( argv32[i] );
+    for (i = 0; i < count; i++) argv[i] = WOW64_GUEST_PTR( argv32[i] );
     argv[count] = NULL;
     ret = __wine_unix_spawnvp( argv, params32->wait );
     free( argv );

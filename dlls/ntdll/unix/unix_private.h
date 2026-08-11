@@ -74,6 +74,14 @@ static inline TEB64 *get_teb64( TEB *teb ) { return teb ? (TEB64 *)(ULONG_PTR)te
 
 extern WOW_PEB *wow_peb;
 extern ULONG_PTR user_space_wow_limit;
+/* When nonzero, the 32-bit WoW64 guest is relocated to [guest_base, guest_base+4GB);
+ * a 32-bit guest pointer P maps to host address guest_base + P. Zero on normal WoW64. */
+extern ULONG_PTR guest_base;
+/* Rebase a 32-bit WoW64 guest value to its host pointer, NULL-preserving. guest_base
+ * is 0 on normal WoW64, so this is byte-identical to plain zero-extension there. Used
+ * by the wow64 unix-call thunks for the 32-bit pointer fields inside their arg blocks
+ * (the arg block pointer itself is already rebased by the emulator). */
+#define WOW64_GUEST_PTR(u) ((void *)((ULONG)(u) ? guest_base + (ULONG_PTR)(ULONG)(u) : 0))
 extern SECTION_IMAGE_INFORMATION main_image_info;
 
 static inline WOW_TEB *get_wow_teb( TEB *teb )

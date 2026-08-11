@@ -20,6 +20,17 @@
 
 
 #include "config.h"
+#include <sys/mman.h>
+#include <fcntl.h>
+
+/* In-process (iOS single-threaded cooperative) server: wineserver_inproc_drive()
+ * runs non-blocking passes over the poll-based fd set (pollfd/poll_users/nb_users),
+ * so force the portable poll() implementation instead of kqueue/epoll. */
+#define WINE_INPROC_POLL 1
+#ifdef WINE_INPROC_POLL
+# undef HAVE_KQUEUE
+# undef USE_EPOLL
+#endif
 
 #include <assert.h>
 #include <dirent.h>
@@ -32,7 +43,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <poll.h>
 #ifdef HAVE_LINUX_MAJOR_H
 #include <linux/major.h>
 #endif
@@ -917,6 +927,32 @@ static int get_next_timeout( struct timespec *ts )
 }
 
 /* server main poll() loop */
+/* In-process (iOS single-threaded cooperative) server drive: run non-blocking
+ * poll+process passes over all server fds until no more work is pending. Called
+ * inline by the wine client (same thread) whenever it is about to wait for the
+ * server, so no separate server thread or process is needed. */
+__attribute__((visibility("default")))
+void wineserver_inproc_drive(void)
+{
+    int i, ret, passes;
+
+    set_current_time();
+    for (passes = 0; passes < 64 && active_users; passes++)
+    {
+        ret = poll( pollfd, nb_users, 0 );
+        if (ret <= 0) break;
+        for (i = 0; i < nb_users; i++)
+        {
+            if (pollfd[i].revents)
+            {
+                fd_poll_event( poll_users[i], pollfd[i].revents );
+                if (!--ret) break;
+            }
+        }
+        set_current_time();
+    }
+}
+
 void main_loop(void)
 {
     int i, ret, timeout;

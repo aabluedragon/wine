@@ -291,6 +291,16 @@ void get_winproc_params( struct win_proc_params *params, BOOL fixup_ansi_dst )
         params->procA = proc->procA;
         params->procW = proc->procW;
 
+        /* A winproc may exist only on one side (A or W); the missing side falls back to the
+         * raw winproc handle below, which dispatch_win_proc_params would call directly and
+         * crash on. Even when we do not run the full ansi_dst fixup (dialogs), never select a
+         * side that has no real proc when the other side does: dispatch converts the message
+         * as needed, so calling the extant proc is always correct. On a normal build the
+         * window's ansi flag matches its proc so this is a no-op; under wow64 the two can
+         * disagree, which is what left a bare handle getting called. */
+        if (params->ansi_dst && !params->procA && params->procW) params->ansi_dst = FALSE;
+        else if (!params->ansi_dst && !params->procW && params->procA) params->ansi_dst = TRUE;
+
         if (fixup_ansi_dst)
         {
             if (params->ansi)

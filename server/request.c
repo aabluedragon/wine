@@ -20,6 +20,9 @@
 
 #include "config.h"
 
+#ifdef __APPLE__
+# include <TargetConditionals.h>
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -617,7 +620,9 @@ static char *create_server_dir( int force )
 
     /* create the base directory if needed */
 
-#ifdef __ANDROID__  /* there's no /tmp dir on Android */
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    /* there's no writable /tmp on Android or inside the iOS app sandbox; keep the
+     * server socket dir under the (writable) prefix instead. */
     if (asprintf( &base_dir, "%s/.wineserver", config_dir ) == -1)
         fatal_error( "out of memory\n" );
 #else
