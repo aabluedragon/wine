@@ -32,6 +32,7 @@ app:
 	cp $(EDUKE32)/vibebuild32.exe staging/netduke32/netduke32.exe
 	cp $(EDUKE32)/DUKE3D.GRP $(EDUKE32)/eduke32.dat $(EDUKE32)/vacation.grp staging/netduke32/
 	cp $(EDUKE32)/netduke32.cfg staging/netduke32/vibebuild32.cfg
+	perl -0pi -e 's/^ScreenBPP = .*/ScreenBPP = 8/m; s/^ScreenWidth = .*/ScreenWidth = 640/m; s/^ScreenHeight = .*/ScreenHeight = 480/m; s/^ScreenMode = .*/ScreenMode = 0/m' staging/netduke32/vibebuild32.cfg
 	cd staging && zip -q -r ../$(OUT)/netduke32.zip netduke32
 
 serve:
