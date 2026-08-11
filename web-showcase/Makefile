@@ -4,6 +4,7 @@ EMSDK ?= /Users/alonamir/dev/emsdk
 OUT := build
 BOXEDWINE_WASM_PATCH := patches/boxedwine-wasm-jit-scheduler.patch
 BOXEDWINE_WASM_LOG_PATCH := patches/boxedwine-wasm-gl-log.patch
+BOXEDWINE_WASM_WINDOW_PATCH := patches/boxedwine-wasm-window-placement.patch
 
 .PHONY: all runtime app serve clean
 
@@ -20,6 +21,11 @@ runtime:
 	elif git -C $(BOXEDWINE) apply --check $(abspath $(BOXEDWINE_WASM_LOG_PATCH)) >/dev/null 2>&1; then \
 		git -C $(BOXEDWINE) apply $(abspath $(BOXEDWINE_WASM_LOG_PATCH)); \
 	fi
+	@if git -C $(BOXEDWINE) apply --reverse --check $(abspath $(BOXEDWINE_WASM_WINDOW_PATCH)) >/dev/null 2>&1; then \
+		:; \
+	else \
+		git -C $(BOXEDWINE) apply $(abspath $(BOXEDWINE_WASM_WINDOW_PATCH)); \
+	fi
 	. $(EMSDK)/emsdk_env.sh && $(MAKE) -C $(BOXEDWINE)/project/emscripten jit
 	mkdir -p $(OUT)
 	cp $(BOXEDWINE)/project/emscripten/Build/Jit/boxedwine.{html,js,wasm,css} $(OUT)/
@@ -32,7 +38,7 @@ app:
 	cp $(EDUKE32)/vibebuild32.exe staging/netduke32/netduke32.exe
 	cp $(EDUKE32)/DUKE3D.GRP $(EDUKE32)/eduke32.dat $(EDUKE32)/vacation.grp staging/netduke32/
 	cp $(EDUKE32)/netduke32.cfg staging/netduke32/vibebuild32.cfg
-	perl -0pi -e 's/^ScreenBPP = .*/ScreenBPP = 8/m; s/^ScreenWidth = .*/ScreenWidth = 640/m; s/^ScreenHeight = .*/ScreenHeight = 480/m; s/^ScreenMode = .*/ScreenMode = 0/m' staging/netduke32/vibebuild32.cfg
+	perl -0pi -e 's/^ScreenBPP = .*/ScreenBPP = 8/m; s/^ScreenWidth = .*/ScreenWidth = 320/m; s/^ScreenHeight = .*/ScreenHeight = 240/m; s/^ScreenMode = .*/ScreenMode = 0/m' staging/netduke32/vibebuild32.cfg
 	cd staging && zip -q -r ../$(OUT)/netduke32.zip netduke32
 
 serve:

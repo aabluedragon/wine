@@ -1,0 +1,19 @@
+diff --git a/source/x11/xwindow.cpp b/source/x11/xwindow.cpp
+index 696677a..13978ec 100644
+--- a/source/x11/xwindow.cpp
++++ b/source/x11/xwindow.cpp
+@@ -894,6 +894,14 @@ void XWindow::draw() {
+ 	}
+ 	S32 screenX = left;
+ 	S32 screenY = top;
++	// The browser canvas is the whole desktop. Large game windows can inherit a
++	// desktop-manager offset that lies outside that canvas, so anchor them.
++#ifdef __EMSCRIPTEN__
++	if (width() >= 640 && height() >= 400) {
++		screenX = 0;
++		screenY = 0;
++	}
++#endif
+ 	//windowToScreen(screenX, screenY);
+ 	lockData();
+ 	KNativeSystem::getScreen()->putBitsOnWnd(id, data, visual?visual->bits_per_rgb:32, bytes_per_line, screenX, screenY, width(), height(), palette, isDirty);

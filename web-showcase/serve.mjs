@@ -7,7 +7,7 @@ const mime = { '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript
 
 http.createServer((request, response) => {
   if (request.url === '/') {
-    response.writeHead(302, { Location: '/boxedwine.html?root=tinycore-wine11.zip&app=netduke32.zip&p=netduke32.exe&args=-nosetup%20-g%20DUKE3D.GRP&resolution=640x480&env=%22WINEDLLOVERRIDES:mscoree,mshtml=%22&runtime=2' });
+    response.writeHead(302, { Location: '/boxedwine.html?root=tinycore-wine11.zip&app=netduke32.zip&p=netduke32.exe&args=-nosetup%20-g%20DUKE3D.GRP&resolution=648x434&env=%22WINEDLLOVERRIDES:mscoree,mshtml=%22&runtime=2' });
     return response.end();
   }
   const pathname = request.url.split('?')[0];
