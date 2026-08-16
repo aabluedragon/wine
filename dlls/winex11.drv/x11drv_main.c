@@ -67,7 +67,9 @@ Window root_window;
 BOOL usexvidmode = TRUE;
 BOOL usexrandr = TRUE;
 BOOL usexcomposite = TRUE;
-BOOL use_egl = TRUE;
+/* WebGL-backed Wine builds provide GLX through the emulator bridge; prefer it
+ * over EGL, whose Mesa device backend is unavailable inside WASM. */
+BOOL use_egl = FALSE;
 BOOL use_take_focus = TRUE;
 BOOL use_primary_selection = FALSE;
 BOOL use_system_cursors = TRUE;
