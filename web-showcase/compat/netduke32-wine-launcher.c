@@ -32,8 +32,12 @@ static const BYTE expected_sha256[32] = {
 enum {
     GLAD_BIND_SAMPLER_RVA = 0x015c6164,
     GLAD_IS_SYNC_RVA = 0x0164a770,
+    GLAD_VERTEX_POINTER_RVA = 0x015ea2f4,
+    GLAD_TEXCOORD_POINTER_RVA = 0x015ea2f8,
     BIND_SAMPLER_CALL_RVA = 0x00129596,
     IS_SYNC_CALL_RVA = 0x00155a6c,
+    VERTEX_POINTER_CALL_RVA = 0x00139b4c,
+    TEXCOORD_POINTER_CALL_RVA = 0x00139b03,
     PEB32_IMAGE_BASE_OFFSET = 8,
 };
 
@@ -167,6 +171,36 @@ static BOOL install_guarded_slot(HANDLE process, BYTE *image_base, DWORD slot_rv
     return FlushInstructionCache(process, remote_stub, stub_size);
 }
 
+static BOOL install_call_redirect(HANDLE process, BYTE *image_base, DWORD call_rva,
+                                  DWORD slot_rva, const BYTE *stub, SIZE_T stub_size)
+{
+    void *remote_stub;
+    BYTE instruction[6], replacement[6];
+    DWORD operand, relative;
+    SIZE_T transferred;
+
+    if (!ReadProcessMemory(process, image_base + call_rva, instruction,
+                           sizeof(instruction), &transferred) ||
+        transferred != sizeof(instruction) || instruction[0] != 0xff ||
+        instruction[1] != 0x15) return FALSE;
+    memcpy(&operand, instruction + 2, sizeof(operand));
+    if (operand != (DWORD)(uintptr_t)(image_base + slot_rva)) return FALSE;
+    remote_stub = VirtualAllocEx(process, NULL, stub_size, MEM_RESERVE | MEM_COMMIT,
+                                 PAGE_EXECUTE_READWRITE);
+    if (!remote_stub) return FALSE;
+    if (!WriteProcessMemory(process, remote_stub, stub, stub_size, &transferred) ||
+        transferred != stub_size) return FALSE;
+    relative = (DWORD)((intptr_t)(uintptr_t)remote_stub -
+                       ((intptr_t)(uintptr_t)(image_base + call_rva) + 5));
+    replacement[0] = 0xe8;
+    memcpy(replacement + 1, &relative, sizeof(relative));
+    replacement[5] = 0x90;
+    if (!WriteProcessMemory(process, image_base + call_rva, replacement,
+                            sizeof(replacement), &transferred) ||
+        transferred != sizeof(replacement)) return FALSE;
+    return FlushInstructionCache(process, image_base + call_rva, sizeof(replacement));
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *arguments, int show)
 {
     /* cmp dword ptr [esp+8],0; jne ud2; ret 8; ud2 */
@@ -183,6 +217,33 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *arguments, in
         0x31, 0xc0,
         0xc2, 0x04, 0x00,
         0x0f, 0x0b,
+    };
+    /* Translate legacy array pointers to GLES2 glVertexAttribPointer. The
+     * cdecl caller keeps its original four arguments; this stub only removes
+     * its six temporary bridge arguments before returning. */
+    static const BYTE vertex_pointer_stub[] = {
+        0xff, 0x74, 0x24, 0x10, /* pointer */
+        0xff, 0x74, 0x24, 0x10, /* stride */
+        0x6a, 0x00,             /* normalized = false */
+        0xff, 0x74, 0x24, 0x10, /* type */
+        0xff, 0x74, 0x24, 0x10, /* size */
+        0x6a, 0x00,             /* attribute 0 */
+        0x68, 0xbe, 0x0a, 0x00, 0x00, /* glVertexAttribPointer */
+        0xcd, 0x99,
+        0x83, 0xc4, 0x18,
+        0xc3,
+    };
+    static const BYTE texcoord_pointer_stub[] = {
+        0xff, 0x74, 0x24, 0x10,
+        0xff, 0x74, 0x24, 0x10,
+        0x6a, 0x00,
+        0xff, 0x74, 0x24, 0x10,
+        0xff, 0x74, 0x24, 0x10,
+        0x6a, 0x01,             /* attribute 1 */
+        0x68, 0xbe, 0x0a, 0x00, 0x00,
+        0xcd, 0x99,
+        0x83, 0xc4, 0x18,
+        0xc3,
     };
     STARTUPINFOW startup = { 0 };
     PROCESS_INFORMATION process = { 0 };
@@ -233,14 +294,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *arguments, in
                               BIND_SAMPLER_CALL_RVA, GLAD_BIND_SAMPLER_RVA) ||
         !verify_indirect_call(process.hProcess, image_base,
                               IS_SYNC_CALL_RVA, GLAD_IS_SYNC_RVA) ||
+        !verify_indirect_call(process.hProcess, image_base,
+                              VERTEX_POINTER_CALL_RVA, GLAD_VERTEX_POINTER_RVA) ||
+        !verify_indirect_call(process.hProcess, image_base,
+                              TEXCOORD_POINTER_CALL_RVA, GLAD_TEXCOORD_POINTER_RVA) ||
         !install_guarded_slot(process.hProcess, image_base, GLAD_BIND_SAMPLER_RVA,
                               sampler_zero_stub, sizeof(sampler_zero_stub)) ||
         !install_guarded_slot(process.hProcess, image_base, GLAD_IS_SYNC_RVA,
-                              null_sync_stub, sizeof(null_sync_stub)))
+                              null_sync_stub, sizeof(null_sync_stub)) ||
+        !install_guarded_slot(process.hProcess, image_base, GLAD_VERTEX_POINTER_RVA,
+                              vertex_pointer_stub, sizeof(vertex_pointer_stub)) ||
+        !install_guarded_slot(process.hProcess, image_base, GLAD_TEXCOORD_POINTER_RVA,
+                              texcoord_pointer_stub, sizeof(texcoord_pointer_stub)) ||
+        !install_call_redirect(process.hProcess, image_base, VERTEX_POINTER_CALL_RVA,
+                               GLAD_VERTEX_POINTER_RVA, vertex_pointer_stub,
+                               sizeof(vertex_pointer_stub)) ||
+        !install_call_redirect(process.hProcess, image_base, TEXCOORD_POINTER_CALL_RVA,
+                               GLAD_TEXCOORD_POINTER_RVA, texcoord_pointer_stub,
+                               sizeof(texcoord_pointer_stub)))
         goto child_error;
 
     OutputDebugStringA(
-        "NetDuke32 Wine compatibility: installed guarded glBindSampler(0) and glIsSync(NULL) slots\n");
+        "NetDuke32 Wine compatibility: installed guarded sampler/sync and translated legacy pointer slots\n");
     if (ResumeThread(process.hThread) == (DWORD)-1) goto child_error;
 
     CloseHandle(process.hThread);
