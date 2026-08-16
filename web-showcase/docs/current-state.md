@@ -279,3 +279,42 @@ edit, build, clean, reset, or otherwise experiment with `/Users/alonamir/dev/edu
 or any other sibling project unless the user explicitly authorizes that named
 action. A real completion still requires a sustained non-black 32-bpp frame,
 pixel updates over time, and keyboard/mouse input.
+
+## Latest continuation: slotshim4 pointer boundary (2026-08-17)
+
+The only executable in scope is `/Users/alonamir/games/netduke32_v1.2.1/netduke32.exe`,
+SHA-256 `547dea93d40114dee7757a049f20e0f7659cbd0c221ae9cf4258338e94c33878`.
+The Wine-only diagnostic artifacts are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `web-showcase/build-gl/netduke32-v1.2.1-slotshim4.zip` | `594fc6e205edc7d74286ede2b365ff1080d69d911c698cfb016bba6771146c42` |
+| `web-showcase/build-gl/tinycore-wine11-parent-inline-webgl-pci-glxshim-legacyctxattrib-fixeddefaults.zip` | `d3d4cc92121be806ad4228c086818474f9f5ff3ccc772a00c1d4c074a8d027c7` |
+
+The launcher clears the earlier sampler/sync NULL calls and translates legacy
+pointer calls, but the run still faults after the second `glBufferData`:
+
+```text
+eip=00000000, info[0]=00000008
+0x00539b4c: call *0x019ea2f4
+return:     0x00539b52
+slot:       0x019ea2f4 (glad_glVertexPointer)
+```
+
+The guest translation and direct call redirect did not remove the NULL target;
+the remaining likely boundary is BoxedWine's host `pglVertexAttribPointer`
+slot, or a runtime that lacks that handler. The blurry animated screenshot is
+only a 10x10 (sometimes 0x0) WebGL backing buffer magnified by CSS, not a game
+frame. Context teardown later returns it to 10x10/black. Sustained rendering,
+temporal pixel changes, process liveness, and input remain unproven.
+
+### Scope rule for future sessions
+
+Only files under `/Users/alonamir/dev/wine` may be edited. Never edit, build,
+clean, reset, stash, or otherwise experiment with `/Users/alonamir/dev/eduke32`
+or `/Users/alonamir/dev/boxedwine` unless the user explicitly authorizes that
+named action. Keep branch `vibe`; never rebuild or substitute the supplied PE.
+
+The next safe action is Wine-repository-only instrumentation or binary
+diagnostics to prove the host pointer slot. A matched sibling BoxedWine rebuild
+requires explicit authorization and must not be performed implicitly.

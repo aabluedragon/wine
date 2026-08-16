@@ -315,4 +315,22 @@ provenance and a matched rebuild procedure.
 - Do not switch to 8-bpp software output to claim pixels.
 - Do not copy Wine 11.14 modules into the Wine 11.0 root.
 - Do not infer runtime identity from a ZIP filename or browser tab.
+
+## Post-buffer pointer boundary (2026-08-17)
+
+The current Wine-only diagnostic is `netduke32-v1.2.1-slotshim4.zip`
+(`594fc6e205edc7d74286ede2b365ff1080d69d911c698cfb016bba6771146c42`) with
+root `tinycore-wine11-parent-inline-webgl-pci-glxshim-legacyctxattrib-fixeddefaults.zip`
+(`d3d4cc92121be806ad4228c086818474f9f5ff3ccc772a00c1d4c074a8d027c7`).
+After buffer setup it faults at `eip=00000000`. PE disassembly maps this to
+`0x00539b4c call *0x019ea2f4`, returning at `0x00539b52`; the slot is
+`glad_glVertexPointer`. Wine-only guest translation and launcher call redirect
+were exercised but did not remove the NULL target. Prove the host
+`pglVertexAttribPointer` slot and runtime hash before any further workaround.
+
+The low-resolution animated screenshot is a CSS-scaled 10x10/0x0 backing
+buffer, not game output. Do not add broad client-state/fixed-function no-ops:
+legacy state, matrices, fog, and GLSL 1.20 shaders require a coherent layer.
+Only the Wine repository may be edited; sibling EDuke32/BoxedWine changes need
+explicit authorization.
 - Do not call context creation, video-mode selection, or a black canvas a pass.

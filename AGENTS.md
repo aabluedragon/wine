@@ -43,14 +43,12 @@ input. A boot log, GL context creation, or an all-black canvas is not success.
 
 The current preserved diagnostic uses a pthread, interpreter-only BoxedWine
 `Build/Control` runtime and an explicit Wine 11.0 GLX-shim root ZIP. The old
-make-current fault, NULL `glGetStringi`, and two optional startup NULL calls
-(`glBindSampler(0,0)` and `glIsSync(NULL)`) are cleared by Wine-repository
-diagnostic derivatives. The latest client-state derivative reaches a real
-640x480 canvas and produces a non-black startup frame, but then tears the
-context down; sustained rendering and input are not yet proven. Its current
-guest-GL blocker is the broader legacy fixed-function/WebGL1 boundary, not a
-source change in the supplied executable. All such patches are binary
-diagnostics under `web-showcase/tools/` and must remain inside this Wine repo.
+make-current fault, NULL `glGetStringi`, and optional sampler/sync NULL calls
+are cleared by Wine-repository diagnostic derivatives. The latest slotshim4
+run still reaches a NULL `glad_glVertexPointer`/host attribute-pointer
+boundary; the low-resolution browser image is only a scaled 10x10/0x0 backing
+buffer, not gameplay. Sustained rendering and input are not proven. All
+patches must stay inside this Wine repo.
 Bare `/` on the development server selects a different root, and `make runtime`
 builds a different JIT configuration. Always use the artifact hashes and
 explicit URL from `web-showcase/docs/current-state.md` before comparing

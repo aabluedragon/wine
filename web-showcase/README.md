@@ -7,18 +7,12 @@ not a native web port.
 
 ## Current status
 
-As last verified on 2026-08-16 23:07 IDT, the 32-bit OpenGL path is **not yet
-playable in a browser**. The application boots, selects its 640x480 32-bpp
-windowed renderer, and gets through the previously failing Wine/GLX
-make-current sequence. A hash-pinned Wine 11.0 diagnostic patch now also
-clears the NULL `glGetStringi` crash: BoxedWine receives
-`GL_NUM_EXTENSIONS` and returns zero for the legacy GL 2 context. Startup then
-reaches `glShadeModel` and aborts in the browser with
-`RuntimeError: null function`. The failure is now mapped to BoxedWine's NULL
-`pglShadeModel`, which WebGL does not export; the compatible fallback is
-documented but not yet applied or rebuilt. The canvas still has no rendered
-frame. Do not treat a successful boot, context log, or cleared intermediate
-crash as rendering success.
+As last verified on 2026-08-17, the 32-bit OpenGL path is **not yet playable in
+a browser**. Wine-only diagnostic derivatives clear the earlier context,
+`glGetStringi`, sampler, and sync crashes. The current slotshim4 run reaches a
+NULL `glad_glVertexPointer` call after buffer setup. The blurry low-resolution
+image is a scaled 10x10/0x0 WebGL backing buffer, not gameplay; it later tears
+down to black. Sustained rendering and input remain unproven.
 
 The work is deliberately preserved for continuation. Start with the
 [handoff index](docs/README.md) and its
@@ -68,6 +62,10 @@ served diagnostic ZIP.
 - Do not reset or clean the sibling BoxedWine or EDuke32 checkouts. Both are
   heavily dirty, and the verified GLX unbind/GL2 bridge work is currently
   local. A PE32 rebuild incorporates all current EDuke32 changes.
+- Only this Wine repository may be edited. Do not edit, build, clean, reset,
+  stash, or experiment with sibling `/Users/alonamir/dev/eduke32` or
+  `/Users/alonamir/dev/boxedwine` unless the user explicitly authorizes that
+  named action. Run only `/Users/alonamir/games/netduke32_v1.2.1/netduke32.exe`.
 - `tools/patch-webgl-version.mjs` is required after an Emscripten runtime
   build: Wine's version parser rejects Emscripten's default `OpenGL ES ...`
   string.

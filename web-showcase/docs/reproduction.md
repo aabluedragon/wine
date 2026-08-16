@@ -118,6 +118,43 @@ For each material test, save or report:
 - SHA-256 of `boxedwine.js`, `boxedwine.wasm`, the root ZIP, and app ZIP.
 - The full launch URL and guest command line printed by BoxedWine.
 - The log from the last successful GLX call through the exception.
+
+## Current slotshim4 continuation
+
+Use the Wine-only diagnostic package and the supplied executable overlay; do
+not rebuild an application from the EDuke32 checkout:
+
+```sh
+cd /Users/alonamir/dev/wine
+shasum -a 256 \
+  web-showcase/build-gl/netduke32-v1.2.1-slotshim4.zip \
+  web-showcase/build-gl/tinycore-wine11-parent-inline-webgl-pci-glxshim-legacyctxattrib-fixeddefaults.zip
+node web-showcase/serve_gl.mjs web-showcase/build-gl
+```
+
+The current server redirect selects those slotshim4/fixed-defaults artifacts.
+If using a direct URL, set `root` to
+`tinycore-wine11-parent-inline-webgl-pci-glxshim-legacyctxattrib-fixeddefaults.zip`,
+`app` to `netduke32-v1.2.1-slotshim4.zip`, resolution `640x480`, storage
+`memory`, and run `cmd /c run.bat -cfg netduke32.cfg -nosetup -g DUKE3D.GRP
+-v1 -l1 -s3`. The exact executable under test is
+`/Users/alonamir/games/netduke32_v1.2.1/netduke32.exe`, SHA
+`547dea93d40114dee7757a049f20e0f7659cbd0c221ae9cf4258338e94c33878`.
+
+Expected current failure: GL initialization reaches the second
+`glBufferData`, then `eip=00000000` at the PE `glad_glVertexPointer` callsite
+(`0x00539b4c`, slot `0x019ea2f4`). A blurry 10x10/0x0 canvas is only CSS
+scaling of an undersized backing buffer and is not a pass. Record the browser
+exception, canvas backing dimensions, screenshot, and whether the process
+stays alive before changing anything.
+
+## Fresh-session scope rule
+
+Only `/Users/alonamir/dev/wine` is in scope. Do not edit, build, clean, reset,
+stash, or otherwise experiment with `/Users/alonamir/dev/eduke32` or
+`/Users/alonamir/dev/boxedwine` unless the user explicitly authorizes that
+named action. Do not use a rebuilt or substituted PE. Keep branch `vibe` and
+preserve unrelated dirty/untracked artifacts.
 - Browser console errors.
 - A screenshot and the canvas backing dimensions, for example:
 

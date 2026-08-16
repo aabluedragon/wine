@@ -50,31 +50,29 @@ Expected branch: `vibe`. Compare hashes with `current-state.md`. Artifact names
 alone are not authoritative; several experimental ZIPs have similar names,
 and `build-gl/tinycore-wine11.zip` is a symlink to the unmodified base root.
 
-Before editing, inspect the focused state in all three working trees:
+Before editing, inspect only this repository's focused state:
 
 ```sh
 git diff -- web-showcase dlls/winex11.drv/x11drv_main.c
-git -C /Users/alonamir/dev/boxedwine diff -- \
-  source/opengl/sdl/sdlgl.cpp source/opengl/glcommon.cpp
-git -C /Users/alonamir/dev/eduke32 status --short
-git -C /Users/alonamir/dev/eduke32 diff -- \
-  source/imgui/src/imgui_impl_opengl3.cpp GNUmakefile
 ```
+
+Do not replace this with `git -C` commands that build or modify the sibling
+trees. Their provenance is already recorded in the checkpoint; this session's
+authorized work area is the Wine repository only.
 
 ## Truthful checkpoint
 
-At handoff, the old `wglMakeCurrent returned 0xc0000005` stale-context crash is
-fixed. The original GLX-shim root still reproduces the later NULL
-`glGetStringi` regression. The newer `gl2ext` derivative proves that Wine
-11.0 had synthesized a positive extension count before guest-driver dispatch;
-falling through to BoxedWine produces the expected zero and clears that crash.
-The latest run reaches `glShadeModel`, then throws browser-side
-`RuntimeError: null function`. WASM disassembly and resolver tracing prove the
-NULL target is BoxedWine `pglShadeModel`; the WebGL-compatible fallback is
-documented but not yet applied. The newer client-state diagnostic reaches a
-non-black startup frame but tears the context down, so it is not rendering
-success. Read the exact artifact comparison in [current-state.md](current-state.md)
-before making another change.
+At handoff, the stale-context crash, NULL `glGetStringi`, and optional sampler/
+sync NULL calls are cleared in Wine-only diagnostic derivatives. The current
+slotshim4 run still reaches a NULL `glad_glVertexPointer`/host attribute-pointer
+boundary after buffer setup. The blurry low-resolution image is only a scaled
+10x10/0x0 backing buffer, not gameplay; it later tears down to black. Read
+[current-state.md](current-state.md) for exact hashes and scope.
+
+Only `/Users/alonamir/dev/wine` may be edited. Never edit, build, clean, reset,
+stash, or experiment with sibling `/Users/alonamir/dev/eduke32` or
+`/Users/alonamir/dev/boxedwine` without explicit authorization. Run only the
+user-supplied PE documented in the checkpoint.
 
 Scope rule: only this Wine repository may be edited. Never edit, build, clean,
 reset, stash, or otherwise experiment with `/Users/alonamir/dev/eduke32`,
