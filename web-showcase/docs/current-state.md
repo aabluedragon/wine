@@ -19,6 +19,13 @@ the actual hot syscall needs emulator-side instrumentation (out of scope
 under the no-sibling-edit constraint). Day's ladder: 24.6 → 45.6 → 63 →
 70.6 → 71.7 fps.
 
+Also ruled out (measured): `cpu=p3` URL param = 68.2 (PIII feature level is
+no better — SIMD paths cost more emulated than they save);
+`WINEDEBUG=+server` profiling through the console is unusable (the flood
+throttles boot so hard the game never starts in 420 s), and the boot-era
+trace shows only registry churn — wineserver is not the gameplay
+bottleneck.
+
 ## 2026-08-18 evening: 70 fps with sound and factor-3 visuals (up3m)
 
 `netduke32-up3m.zip` (autoexec: `r_upscalefactor 3`, `snd_mixrate 22050`,
