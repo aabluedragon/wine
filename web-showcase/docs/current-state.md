@@ -1,5 +1,40 @@
 # Current browser checkpoint
 
+## 2026-08-19: mobile performance envelope + factor-4 variant
+
+Added CPU-throttle emulation (`--throttle N`) and frame-interval/jitter metrics
+(`frame-intervals.json`, p50/p95/p99 + hitch %) to cdp-run so mobile behaviour
+can be measured on the desktop. A mid phone is ~4x slower than this M5, a
+high-end phone ~2x. Clean-machine numbers (steady state, after warmup):
+
+| device (throttle) | factor 3 (up3m250s) | factor 4 (mob4) |
+| --- | --- | --- |
+| desktop (1x)  | ~115 fps | ~55–90 fps, p99 29 ms |
+| high-end (2x) | — | ~28 fps, 1.7% frames >100 ms |
+| mid (4x)      | 19.5 fps | **23 fps, min 20** |
+| low (6x)      | 5.5 fps  | 6.6 fps (unplayable) |
+
+**`netduke32-mob4.zip`** (`r_upscalefactor 4` = 160x100 internal, else same as
+up3m250s) is the mobile recommendation: +19% fps and tighter frame times than
+factor 3, at the cost of a chunkier 3D view. Serve build-jitgl; same URL params
+with `app=netduke32-mob4.zip`.
+
+**All hitches are JIT warmup** in the first ~15–20 s (compile burst); after that
+zero stalls >200 ms for minutes. Two mobile-smoothness attempts that FAILED and
+were reverted: (1) rate-limiting JIT compile to a duty cycle — starves warmup on
+slow devices (guest runs interpreted → 1.6 fps at 4x, a death spiral; fast
+warmup wins on mobile even with some early hitches); (2) an `r_maxfps 30` cap —
+no benefit, the device runs below the cap so it never binds. Real remaining
+levers need engine work: background-thread JIT compile (the MT build doesn't
+launch the guest), higher JIT block coverage, or the persisted cache without its
+re-install pathology. iOS caveats (unverified): Safari has **no Pointer Lock**
+(mouselook won't engage) and strict per-tab memory limits vs the JIT's ~290 MB
+of modules — a crash risk to watch.
+
+Measurement note: throttle runs are extremely sensitive to other CPU load
+(a second Chrome or a native build tanks them to near-zero) — only trust
+throttled numbers on a quiet machine, or use back-to-back A/B under equal load.
+
 ## 2026-08-18: click-jump fix (Pointer Lock acquire spike + drifted click pos)
 
 After relative mouselook worked, clicking snapped the aim. Two causes, both

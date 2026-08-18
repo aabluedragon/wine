@@ -135,6 +135,15 @@ await send('Runtime.enable');
 await send('Log.enable');
 await send('Page.enable');
 
+// --throttle <N>: slow the page's JS/wasm execution by Nx to emulate a weaker
+// (mobile) CPU. 1 = no throttle. A mid-range phone is roughly 4-6x slower than
+// this desktop for this workload.
+const throttle = Number(arg('throttle', 1));
+if (throttle > 1) {
+  await send('Emulation.setCPUThrottlingRate', { rate: throttle });
+  console.log(`CPU throttled ${throttle}x (mobile emulation)`);
+}
+
 // Frame counter. The emulator presents each guest frame by uploading the
 // framebuffer as a texture and drawing it, so counting texture uploads on the
 // WebGL context counts presented frames exactly, with none of the cost or the
@@ -143,6 +152,7 @@ await send('Page.enable');
 const FRAME_HOOK = `(() => {
   const counters = { upload: 0, draw: 0, bind: 0 };
   window.__bwCounters = counters;
+  window.__bwFrameIntervals = [];
   window.__bwBinds = [];
   window.__bwShaders = [];
   // Capture the exact source each shader is given, plus its compile result, so
@@ -217,6 +227,19 @@ const FRAME_HOOK = `(() => {
       if (!original) continue;
       proto.prototype[name] = function (...args) {
         counters[bucket]++;
+        // Frame-interval ring buffer for smoothness (jitter) analysis: record
+        // the time between presented frames (one upload per frame on the
+        // glsurface path).
+        if (bucket === 'upload') {
+          const now = performance.now();
+          if (window.__bwLastUpload !== undefined) {
+            const dt = now - window.__bwLastUpload;
+            const buf = window.__bwFrameIntervals;
+            buf.push(dt);
+            if (buf.length > 4000) buf.shift();
+          }
+          window.__bwLastUpload = now;
+        }
         // Per-texture upload journal: which texture got which data. LUMINANCE
         // textures cannot be attached to an FBO in WebGL 1, so upload-side
         // accounting is the only way to know their content.
@@ -557,6 +580,24 @@ if (tail.length) {
   const rates = tail.map((s) => s.fps).sort((a, b) => a - b);
   const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
   console.log(`fps (last ${tail.length}s): mean ${mean.toFixed(2)}  median ${rates[rates.length >> 1]}  min ${rates[0]}  max ${rates[rates.length - 1]}`);
+}
+
+// Smoothness: per-frame interval distribution (ms). p95/p99/max reveal the
+// hitches a mean fps hides — the thing that makes a game feel janky on mobile.
+try {
+  const r = await send('Runtime.evaluate', { expression: 'JSON.stringify(window.__bwFrameIntervals||[])', returnByValue: true });
+  const iv = JSON.parse(r.result.value || '[]').filter((x) => x > 0 && x < 5000);
+  if (iv.length > 20) {
+    const s = [...iv].sort((a, b) => a - b);
+    const pct = (p) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+    const mean = iv.reduce((a, b) => a + b, 0) / iv.length;
+    const over = (ms) => (100 * iv.filter((x) => x > ms).length / iv.length).toFixed(1);
+    writeFileSync(resolve(outDir, 'frame-intervals.json'), JSON.stringify(iv));
+    console.log(`frame ms: mean ${mean.toFixed(1)} p50 ${pct(0.5).toFixed(1)} p95 ${pct(0.95).toFixed(1)} p99 ${pct(0.99).toFixed(1)} max ${s[s.length - 1].toFixed(0)}`);
+    console.log(`hitches:  >50ms ${over(50)}%  >100ms ${over(100)}%  >200ms ${over(200)}%  (${iv.length} frames)`);
+  }
+} catch (e) {
+  console.log('frame-interval read failed: ' + e);
 }
 
 ws.close();
