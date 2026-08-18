@@ -74,6 +74,7 @@ const child = spawn(chrome, [
   '--use-gl=angle',
   '--enable-unsafe-swiftshader',
   '--enable-features=SharedArrayBuffer',
+  '--ignore-certificate-errors',
   '--window-size=1280,900',
   '--mute-audio',
   'about:blank',

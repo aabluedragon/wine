@@ -1,5 +1,37 @@
 # Current browser checkpoint
 
+## 2026-08-18: mouse aim fix (relative/Pointer Lock) + LAN HTTPS serving
+
+**Crazy FPS aim fixed.** Two compounding causes: (1) the shell's
+"Lock/hide mouse pointer" checkbox defaulted OFF, which forced
+`disableHideCursor=true` so the guest could never hide its cursor to enter
+mouselook; (2) even with lock, BoxedWine fed **absolute** cursor coords to
+Wine's relative-mouse path, which reads them as raw deltas → spinning.
+
+Fixes (BoxedWine sibling tree + this repo's deployed shell):
+- `platform/sdl/knativescreenSDL.cpp`: when the guest hides its cursor (FPS
+  mouselook), enter `SDL_SetRelativeMouseMode(TRUE)` (browser Pointer Lock,
+  granted on next click) and set `Module.boxedwineCaptureMouse=1`; restore on
+  cursor-show. `emscripten.h` now included whenever `__EMSCRIPTEN__`.
+- `platform/sdl/knativeinputSDL.cpp`: under relative mode, deliver
+  `e->motion.xrel/yrel` (real movementX/Y) instead of absolute x/y, scaled by
+  the display→guest ratio with no offset.
+- `source/x11/xserver.cpp`: `mouseMove(dx,dy,relative=true)` sends the delta
+  straight to the grabbed window as XI2 raw motion — no warp (warp is a no-op
+  in the browser without Pointer Lock).
+- Shell (`boxedwine.html` checkbox default `checked`; `boxedwine-shell.js`
+  `requestCanvasPointerLock` guarded on `Module.boxedwineCaptureMouse` so it
+  only locks during gameplay, never in menus).
+
+**LAN testing (phones/tablets):** `serve-https.mjs` serves over HTTPS with a
+self-signed cert — required because the threaded WASM build needs
+`crossOriginIsolated` (SharedArrayBuffer), which browsers grant only in a
+secure context; `http://<LAN-IP>` is not one. Run:
+`PORT=8443 CERT=<cert> KEY=<key> node serve-https.mjs build-jitgl`. cdp-run
+gained `--ignore-certificate-errors` so it can test the https endpoint.
+Verified: game renders in-level over `https://<LAN-IP>:8443` with the
+Pointer-Lock checkbox pre-checked.
+
 ## 2026-08-18 latest: paced flushes validated head-to-head
 
 Interleaved A/B (paced on 8093 vs unpaced flag-build `BOXEDWINE_WASM_JIT_-
