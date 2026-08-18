@@ -39,19 +39,26 @@ const BUILD_DIR = process.argv[2] || path.resolve(here, '..', 'build');
 const RECORD_MS = (parseInt(process.argv[3] || '45', 10)) * 1000;
 const BOXEDWINE_BUILD = process.env.BOXEDWINE_BUILD ||
   '/Users/alonamir/dev/boxedwine/project/emscripten/Build/Jit';
-const OUT = path.join(BUILD_DIR, 'netduke32-jit-modules.zip');
+// The root/app packages and the DLL overrides have to match the browser run
+// exactly: a block cache recorded against a different Wine root or a different
+// renderer path is keyed on addresses that will not be hit, so it silently
+// degrades to compiling everything again.
+const ROOT_ZIP = process.env.ROOT_ZIP || 'tinycore-wine11.zip';
+const APP_ZIP = process.env.APP_ZIP || 'netduke32.zip';
+const DLL_OVERRIDES = process.env.DLL_OVERRIDES || 'mscoree,mshtml=';
+const OUT = path.join(BUILD_DIR, process.env.OUT_NAME || 'netduke32-jit-modules.zip');
 
 const boxedwineJs = path.join(BOXEDWINE_BUILD, 'boxedwine.js');
 if (!existsSync(boxedwineJs)) { console.error('boxedwine.js not found at ' + boxedwineJs + ' (set BOXEDWINE_BUILD)'); process.exit(1); }
-for (const z of ['tinycore-wine11.zip', 'netduke32.zip'])
+for (const z of [ROOT_ZIP, APP_ZIP])
   if (!existsSync(path.join(BUILD_DIR, z))) { console.error('missing ' + z + ' in ' + BUILD_DIR); process.exit(1); }
 
 installShims();
 
-const args = ['-root', '/root', '-zip', 'tinycore-wine11.zip', '-mount', 'netduke32.zip',
+const args = ['-root', '/root', '-zip', ROOT_ZIP, '-mount', APP_ZIP,
   '/home/username/.wine/dosdevices/c:/files', '-mount_drive', '/d_drive', 'd',
   '-resolution', '640x480', '-novideo', '-disableHideCursor',
-  '-env', 'WINEDLLOVERRIDES=mscoree,mshtml=',
+  '-env', 'WINEDLLOVERRIDES=' + DLL_OVERRIDES,
   '-w', '/home/username/.wine/dosdevices/c:/files/netduke32',
   // RUNBAT=1 mirrors the browser's launch: cmd -> run.bat -> Wine virtual desktop
   // (explorer), so the record captures the ~4000 desktop/cmd/explorer blocks the
@@ -62,7 +69,7 @@ const args = ['-root', '/root', '-zip', 'tinycore-wine11.zip', '-mount', 'netduk
 
 const t0 = Date.now();
 function pre() {
-  for (const z of ['tinycore-wine11.zip', 'netduke32.zip']) {
+  for (const z of [ROOT_ZIP, APP_ZIP]) {
     const b = readFileSync(path.join(BUILD_DIR, z));
     cfg.FS.writeFile('/' + z, new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
   }

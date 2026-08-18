@@ -3,6 +3,8 @@ import { createReadStream, statSync, writeFileSync } from 'node:fs';
 import { resolve, normalize, extname } from 'node:path';
 
 const root = resolve(process.argv[2] ?? 'build');
+// Allow a second showcase root to be served next to the default one.
+const port = Number(process.env.PORT ?? 8080);
 const mime = { '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.zip': 'application/zip' };
 
 http.createServer((request, response) => {
@@ -46,4 +48,4 @@ http.createServer((request, response) => {
   } catch {
     response.writeHead(404).end();
   }
-}).listen(8080, () => console.log('Open http://localhost:8080/'));
+}).listen(port, () => console.log(`Open http://localhost:${port}/`));

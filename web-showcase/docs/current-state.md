@@ -1,6 +1,355 @@
 # Current browser checkpoint
 
-Last verified: **2026-08-16 23:07 IDT (+03:00)**.
+Last verified: **2026-08-18 (morning, +03:00)** — the verified GL config
+re-measured **34–35 fps** (last-60s window; samples 32–36) on the freshly
+rebuilt clean `controlGL` runtime in `build-ctlgl2` (port 8089), screenshot
+showing in-game E1L1 with HUD after Space input. Same URL as the 28.9 fps
+entry below; the improvement is machine-load variance plus the clean rebuild.
+
+## 2026-08-18 afternoon: r_upscalefactor 2 — 45.6 fps mean (1.85x)
+
+The game ignores the cfg's 320x240 (its own log shows `Setting video mode
+640x400 (8-bpp windowed)`; OSD keystrokes never reach it), but it executes
+`autoexec.cfg` at startup. `netduke32-up2.zip` = the verified package plus an
+`autoexec.cfg` containing `r_upscalefactor 2`: the classic renderer then
+rasterizes 320x200 internally and the GPU upscales (glsurface texture drops
+from 640x400 to 320x200). Back-to-back A/B under identical machine load:
+**baseline 24.6 fps mean vs 45.6 mean / 43 median / 66 peak** over the last
+60 s of gameplay. Same URL as below with `app=netduke32-up2.zip`.
+
+Measurement discipline learned today: fps runs must be **solo** — a concurrent
+second emulator, the log-dump bat loop, the user's native processes, or macOS
+`mediaanalysisd` bursts each halve the number (the 12 fps "regression" and a
+9 fps reading were pure contention). Diagnostics that worked: a run.bat that
+`start`s the game then periodically `type`s `netduke32.log` to the console
+(cmd for-loops run ~2k iterations/sec emulated — keep loops ≤20k, `@echo off`
+mandatory); `--readfile` via emscripten FS does NOT reach the guest disk.
+
+## 2026-08-18: Polymost 32-bpp status; fps work
+
+Polymost (ScreenBPP=32, `netduke32-gl32.zip`) now runs **crash-free** on the
+`controlLegacyGL` build (`web-showcase/build-legacy2`, port 8091) — 230 s,
+~473k draws, no exception — but renders **black**. The chain that got it
+crash-free, all inside this repo (no sibling-source edits since the constraint):
+
+1. `tools/patch-boxedwine-legacy-gl-imports.mjs` (applied to the deployed
+   `build-legacy2/boxedwine.js`): the wasm import object snapshots
+   `_emscripten_gl*` before LEGACY_GL_EMULATION wraps them, so all guest GL
+   bypassed the emulation layer. The patch late-binds all 246 entries,
+   adds draw-time bookkeeping repair (`__bwEnsureGLBookkeeping`), and makes
+   `glDetachShader`/`glDeleteShader` record-preserving (the game detaches and
+   deletes shaders after link; the emulation's wrappers erased the records
+   `Renderer.init` needs).
+2. Page-level GLSL ES repair in `tools/cdp-run.mjs` FRAME_HOOK: libglemu
+   prepends declarations before the precision header and after `#extension`
+   lines — hoist `#extension`, prepend guarded `precision highp float`. All 21
+   shader compiles then pass.
+
+Remaining black-output fault: draws land on the default framebuffer, viewport
+640x480, program bound, all three samplers verified valid at draw time
+(tile LUMINANCE, palswap 256x32 LUMINANCE, palette 256x1 RGBA) — readPixels is
+uniformly (0,0,0,255). Next unexamined link: libglemu's user-program
+vertex-attribute delivery at flush.
+
+**Strategic finding:** Polymost through int99 dispatch sustains only
+~2,400–3,500 draws/sec → a 5–10 fps ceiling at its 300–800 draws/frame. The
+glsurface path (1 upload + 1 draw/frame) is the high-fps route. Measured
+legacy-GL tax on the same glsurface config: 14.9 fps (controlLegacyGL) vs 28.9
+(controlGL). A 320x240-desktop variant (`netduke32-sw-320d.zip`) measured
+12.07 fps on the freshly rebuilt ControlGL, while the verified 640x480-desktop
+config re-measured 34–35 fps on the same build — the 320x240-desktop variant is
+a dead end, not a build regression.
+
+## OPENGL WORKS END TO END (2026-08-17 evening)
+
+The supplied `netduke32.exe` (`547dea93…33878`) renders its OpenGL path in the
+browser with working keyboard input at **28.9 fps mean / 29 median** (640x400
+GL surface, 320x240 game resolution config). Screenshots show E1L1 rendered
+through the palette shader with correct colours and HUD; the view changes after
+w/a/d input.
+
+Serve `web-showcase/build-ctlgl2` (`controlLegacyGL`-era `controlGL` BoxedWine
+build, `boxedwine.wasm` SHA `dc2dcfdb…`) on port 8089 and open:
+
+```text
+http://localhost:8089/boxedwine.html?root=tinycore-wine11-glxshim-browserboot-noerror.zip&app=netduke32-sw-320.zip&resolution=640x480&storage=memory&w=/home/username/.wine/dosdevices/c:/files/netduke32&p=run.bat&args=-cfg%20netduke32.cfg%20-nosetup%20-g%20DUKE3D.GRP%20-v1%20-l1%20-s3&env=%22WINEDLLOVERRIDES:mscoree,mshtml=%22
+```
+
+The complete fix chain (Wine-repo scripts + sibling BoxedWine changes, all under
+explicit user authorisation for the performance/OpenGL task):
+
+1. `wineboot`/`services` browser stubs with builtins removed (make-browser-root.mjs).
+2. `WGL_CONTEXT_OPENGL_NO_ERROR_ARB` dropped from packaged winex11 (patch script).
+3. BoxedWine: single browser GL window reused and resized per drawable
+   (was: every SDL_CreateWindow rebound the canvas; Wine's 1x1/10x10 GLX probe
+   drawables left it 10x10).
+4. BoxedWine: `GL_ARB_sampler_objects` advertised; NULL host GL pointers are
+   skip-and-log instead of jump-to-0 (glBindSampler was NULL and the game calls
+   it unconditionally: eip=0 err=17, retAddr in netduke32.exe).
+5. BoxedWine: `GL_RED`/`GL_R8` mapped to `GL_LUMINANCE` for WebGL 1 uploads.
+6. BoxedWine: desktop `#version 110` stripped from guest shaders for WebGL
+   (GLSL ES), with guarded float precision; shader compile/link failures now log
+   the driver's info log.
+7. BoxedWine: `KThread::runSignal` re-entrancy guard (fault during signal
+   delivery killed the emulator with stack exhaustion; now kills the process).
+8. **The black-frame root cause:** SDL's renderer presents the X11 screen
+   through the same WebGL context the guest renders with, rebinding its own
+   program and textures every frame. Wine's GLX probes also created windows.
+   Fixed by gating `drawRect`/`present` on `visible && !glWindowOwnsDisplay()`,
+   where the latter is `shownGlWindows > 0 || guestOwnsGlContext` — the flag set
+   when the guest makes a GL context current. Confirmed by draw-state probes:
+   sampler units went from `34,32 -> 32,32` (clobbered) to a stable `34,35`.
+
+Measured GL vs software on the same runtime: 28.9 fps GL vs 10.1 fps software.
+
+Caveat for productisation: while a guest GL context is current, the SDL screen
+presentation is fully suppressed, so the Wine desktop chrome is not drawn.
+Correct for a fullscreen GL game; needs state save/restore around SDL_RenderCopy
+if desktop compositing and GL are ever wanted simultaneously.
+
+## 2026-08-17: the supplied PE runs and renders in the browser
+
+The supplied executable now boots, renders sustained frames, and responds to
+keyboard input in headless Chrome. It runs through its 8-bpp presentation path,
+not the 32-bpp OpenGL path that the sections below track; that objective is
+still open and its blocker is unchanged.
+
+### Identity
+
+`/Users/alonamir/dev/wine` at `9a57a7d913a0424e09660d5284669132299db6f4`,
+branch `vibe`. The working tree is dirty and carries large untracked build
+directories; preserve them. Only files under this repository were edited.
+
+The executable is the supplied `/Users/alonamir/games/netduke32_v1.2.1/netduke32.exe`,
+SHA-256 `547dea93d40114dee7757a049f20e0f7659cbd0c221ae9cf4258338e94c33878`,
+re-verified for this run. Nothing was rebuilt or substituted.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `web-showcase/build-gl/netduke32-sw.zip` | `c5b849432de5da22890dd5fe129bee63131b7f8514c4589ea22a62fe80cda430` |
+| `web-showcase/build-gl/tinycore-wine11-glxshim-browserboot.zip` | `49576ad784dc773c2ae8a8d92599a93e1046d8a4ac3a7fe118779361ad364e07` |
+| `web-showcase/build-gl/tinycore-wine11-glxshim-browserboot-noerror.zip` | `a47512f0b5c5e6b94239ff0d1e1a6fdb6dcc9281adb9a606861902085c520931` |
+| `web-showcase/tools/make-browser-root.mjs` | `1ec468003f34fd41ff9ec2af23f627d07f420b8317d4c2811b827033302696eb` |
+| `web-showcase/tools/patch-wine11-no-error-attrib.mjs` | `c24f9d4ba79a8dc699b39759a4602b29e7ca6868a4f4298f5ba5c3bba76a2c75` |
+| `web-showcase/tools/cdp-run.mjs` | `d0aa3beecd66777abca7a14f5fa2cc191101f2bb6d965606052417e96c06e08f` |
+
+Both roots derive from `tinycore-wine11-parent-inline-webgl-pci-glxshim.zip`
+(`47e1d4d0…`). The runtime is the `build-gl` interpreter Control build; the
+`build` JIT runtime does not start the guest with this root at all.
+
+### Reproduce
+
+```sh
+cd /Users/alonamir/dev/wine/web-showcase
+node tools/make-browser-root.mjs \
+  build-gl/tinycore-wine11-parent-inline-webgl-pci-glxshim.zip \
+  build-gl/tinycore-wine11-glxshim-browserboot.zip
+node tools/patch-wine11-no-error-attrib.mjs \
+  build-gl/tinycore-wine11-glxshim-browserboot.zip \
+  build-gl/tinycore-wine11-glxshim-browserboot-noerror.zip
+node serve_gl.mjs build-gl
+```
+
+Exact URL (port 8082):
+
+```text
+http://localhost:8082/boxedwine.html?root=tinycore-wine11-glxshim-browserboot-noerror.zip&app=netduke32-sw.zip&resolution=640x480&storage=memory&w=/home/username/.wine/dosdevices/c:/files/netduke32&p=run.bat&args=-cfg%20netduke32.cfg%20-nosetup%20-g%20DUKE3D.GRP%20-v1%20-l1%20-s3&env=%22WINEDLLOVERRIDES:mscoree,mshtml,opengl32=%22
+```
+
+### The three Wine-side changes that were needed
+
+1. **Bootstrap.** `wineboot`/`services` were replaced by the browser stubs.
+   The prefix copies alone had no effect, because a module in the system
+   directory loads builtin-first; `make-browser-root.mjs` now also drops
+   `opt/wine/lib/wine/i386-{windows,unix}/{wineboot,services}.exe{,.so}` so the
+   native stub is the only candidate. Before this the guest deadlocked:
+
+   ```text
+   009c:err:sync:RtlpWaitForCriticalSection section 10B453C0
+     "dlls/ntdll/loader.c: loader_section" wait timed out in thread 009c,
+     blocked by 0094, retrying (60 sec)
+   003c:err:service:process_send_command receiving command result timed out
+   ```
+
+2. **`WGL_CONTEXT_OPENGL_NO_ERROR_ARB`.** `dlls/winex11.drv/opengl.c` forwards
+   this token to GLX without checking for `GLX_ARB_create_context_no_error`.
+   BoxedWine's GLX shim rejects it and the emulator then traps:
+
+   ```text
+   gl_common_XCreateContextAttribsARB unhandled attribute 31b3
+   Uncaught RuntimeError: memory access out of bounds
+   ```
+
+   `patch-wine11-no-error-attrib.mjs` applies the equivalent of deleting that
+   switch case to the prebuilt i386 module. Wine then logs the harmless
+   `err:wgl:x11drv_context_create Unhandled attribList pair: 0x31b3 0` and
+   context creation succeeds.
+
+3. **`opengl32` disabled.** With GL available, NetDuke32 loads glad against
+   BoxedWine's WebGL, which has no desktop-GL entry points, logs
+   `Failed to initialize OpenGL loader!`, and dies on a NULL pointer
+   (`Caught signal: SIGSEGV`). Overriding `opengl32=` makes
+   `SDL_GL_CreateContext` fail cleanly, so the game takes its 8-bpp path:
+
+   ```text
+   79.2220s  GFX| Setting video mode 640x480 (8-bpp windowed).
+   61.6410s  ASS| Initialized sound at 44.1 KHz stereo with 96 voices
+   ```
+
+### Measured result
+
+`tools/cdp-run.mjs` run of 210 s, keys sent after clicking the canvas:
+**193 of 210 samples non-black, 72 distinct frames**, canvas internally
+640x480 for the whole run, no exception and no teardown. Screenshots show
+E1L1's rooftop with a correct HUD (health 100, armour 0, ammo 48), and the
+view changes after `w`/`a`/`d`, so input reaches the game.
+
+Sampling had to change to prove this. The old probe copied the canvas with
+`drawImage`; the emulator presents through a WebGL context without
+`preserveDrawingBuffer`, so every sample read as pure black while the page was
+visibly rendering. `cdp-run.mjs` now samples `Page.captureScreenshot` over the
+canvas rectangle. **Earlier "black canvas" conclusions taken with the old probe
+are unreliable and should be re-measured before being trusted.**
+
+### Still open
+
+The 32-bpp OpenGL objective below is unchanged: BoxedWine's WebGL backend has
+no fixed-function/legacy desktop GL, and that code is in a sibling repository
+that must not be modified without explicit authorisation.
+
+## 2026-08-17: performance work
+
+Measured with `tools/cdp-run.mjs`, which now counts presented frames by hooking
+WebGL texture uploads on the emulator canvas (`--fps` output). Every figure
+below is the mean over the last ~50 s of a run that is in-game, not at a menu.
+
+| Configuration | fps | MIPS | Verdict |
+| --- | --- | --- | --- |
+| 640x480, interpreter (`Control`) | **10.3** | 171 | baseline |
+| 320x240, interpreter | **19.9** | 171 | **adopted, 1.93x** |
+| 320x240, sound disabled (`-ns -nm`) | 19.8 | — | no effect, rejected |
+| 320x240, desktop+screen also 320x240 | 19.1 | 174 | no effect, rejected |
+| 320x240, `bpp=8` | 11.2 | 173 | worse, rejected |
+| 320x240, WASM JIT, cold | 15.1 | 236 | worse, rejected |
+| 320x240, WASM JIT, 99.9% warm cache | 13.9 | 222 | worse, rejected |
+
+### The JIT is a net loss here, and the earlier 24x claim was wrong
+
+An earlier note in this session put the JIT at ~2,170 MIPS against ~90 MIPS for
+the interpreter. That reading was taken from a run where the guest was **hung,
+spinning in a tight loop** — the best possible case for a block JIT and wholly
+unrepresentative. Measured during real gameplay the JIT reaches 222–236 MIPS
+against the interpreter's 171, i.e. ~1.4x raw throughput, and it still loses on
+frame rate.
+
+The reason is visible in its own counters. Cold, it compiled **48,000 blocks
+into 16,416 separate WebAssembly modules, 291 MB of generated code**, and was
+still climbing after 320 s. A cache was therefore recorded for this exact
+root/app/override combination (`tools/gen-jit-cache.mjs`, now parameterised by
+`ROOT_ZIP`/`APP_ZIP`/`DLL_OVERRIDES`/`OUT_NAME`), giving 37,246 blocks and a
+99.9% hit rate (`hits=47900 freshCompiled=50`). Frame rate still came out below
+the interpreter, because `cachedInstalls` tracks `hits` one-for-one — every hit
+re-installs its module rather than staying resident. Until that is fixed in
+BoxedWine, the JIT should not be used for this workload.
+
+### Where the remaining time goes
+
+MIPS is pinned near 171 in *every* working interpreter configuration, so the
+interpreter's throughput is the ceiling and frame rate is set purely by
+instructions per frame. From the two resolution points, frame cost is roughly
+**34 ms fixed + 63 ms pixel-dependent at 640x480**; at 320x240 the fixed part
+already dominates, so further resolution cuts have little left to give. The
+fixed part is not the desktop or emulator screen size (tested, no change) and
+not audio (tested, no change).
+
+At 320x240 the game spends ~8.6M emulated instructions per frame for 76,800
+pixels — about 112 instructions per pixel, far above what a classic-mode
+software renderer should need. The likely cause is the number of full-frame
+passes between the game and the canvas (game buffer → SDL surface → GDI DIB
+→ 8-bpp-to-32-bpp conversion → XImage → texture upload). Collapsing that chain
+is the next real lever and much of it is Wine-side.
+
+### 2026-08-17 (later): the OpenGL blocker was a canvas-ownership bug
+
+The long-standing "10x10 WebGL backing buffer" symptom is **not** a consequence
+of the NULL fixed-function calls. It is a window/canvas ownership bug in
+BoxedWine, and it is now fixed.
+
+Instrumenting every GL window creation gave the sequence outright:
+
+```text
+BOXEDWINE GL WINDOW: create 100 x 100   <- BoxedWine's probe context
+BOXEDWINE GL WINDOW: create 1 x 1       <- Wine GLX probe drawable
+BOXEDWINE GL WINDOW: create 10 x 10     <- Wine GLX probe drawable
+BOXEDWINE GL WINDOW: create 10 x 10
+BOXEDWINE GL WINDOW: create 640 x 400   <- the real game window
+```
+
+`glResizeWindow` was never called. The browser has one canvas and every
+`SDL_CreateWindow` rebinds it, so BoxedWine's one-SDL-window-per-X-drawable
+design let Wine's probe drawables resize the canvas out from under the real
+window. Measured canvas timeline was `640x480 -> 0x0 -> 10x10 -> 0x0`.
+
+Two changes in `source/opengl/sdl/sdlgl.cpp` fix it:
+
+- `glCreateWindow` no longer materialises an SDL window on emscripten.
+- `glMakeCurrent` reuses the single browser-owned `webWindow` and resizes it to
+  the drawable being made current, and only when the size actually changed
+  (it runs every frame; resizing the canvas recreates the WebGL context).
+
+The canvas now settles at **640x400 and stays**, and the game window is drawn
+at the correct size inside the Wine desktop.
+
+### What is proven about OpenGL now
+
+- Every `wglGetProcAddress` the game issues **succeeds** (FBOs, VAOs, samplers,
+  `glGetStringi`). The `glad_glVertexPointer` NULL documented in the sections
+  below no longer reproduces.
+- GL draw calls run continuously — the `draw` counter reaches ~10,000 over a
+  180 s run, roughly 66 draws/second.
+- Of the fixed-function core, only `glFogf`, `glFogi` and `glTexEnvf` are
+  unresolved under `LEGACY_GL_EMULATION`; emscripten implements all three in
+  `libglemu.js` but does not publish them through `SDL_GL_GetProcAddress`, so
+  they are now bound directly (guarded by `BOXEDWINE_LEGACY_GL_EMULATION`).
+
+### Remaining OpenGL blocker
+
+The run still ends in `RuntimeError: null function`, thrown directly from the
+emscripten main loop (`MainLoop_runner` -> `runIter` -> `callUserCallback`) with
+no wasm frames beneath it. Three candidate sources have been **ruled out** by
+instrumentation:
+
+- not a NULL `pgl*` host pointer (`BOXEDWINE GL CALLED-NULL` never fires),
+- not a hole in the int99 dispatch table (`GL UNIMPLEMENTED dispatch slot`
+  never fires; unset slots are now filled with a naming stub),
+- not repeated GL re-resolution (`initSdlOpenGL` is now called once).
+
+It is GL-specific: the same runtime runs the software path for 320 s without it.
+The most likely remaining explanation is wasm-table churn — the JIT's
+`addFunction`/`removeFunction` reclaiming a slot that is still referenced — which
+would explain a null call target with no wasm frames. Diagnosis is hampered
+because the `Jit` runtime does not forward guest stdout, while `Control` (which
+does) is interpreter-only.
+
+### Diagnostics added to BoxedWine
+
+All behind `-DBOXEDWINE_LOG_MISSING_GL` (set only by the `jitLegacyGL` target):
+unresolved entry points at load, called-NULL entry points, GL window
+create/resize sizes, and unimplemented dispatch slots. The dispatch-slot filling
+is unconditional and is a genuine robustness fix, not just a diagnostic.
+
+**The shipped configuration is unaffected by any of this.** It runs on the
+`Control` runtime (`build-gl/boxedwine.wasm`, unchanged since 2026-08-16 23:20),
+and none of the BoxedWine rebuilds above touch it.
+
+### Rejected runtime rebuilds
+
+`multiThreadedJit` and `multiThreaded` were both rebuilt from the sibling
+BoxedWine tree. Both link, but neither launches the guest in the browser: they
+mount the zips and stop before `Launching /bin/wine`. Removing
+`-sPROXY_TO_PTHREAD=1` from `multiThreaded` was not sufficient. `Control`
+remains the only runtime that runs Wine reliably, and the packaged
+`build-gl/boxedwine.*` files come from it.
 
 ## Objective and result
 
