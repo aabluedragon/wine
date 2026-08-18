@@ -6,6 +6,19 @@ rebuilt clean `controlGL` runtime in `build-ctlgl2` (port 8089), screenshot
 showing in-game E1L1 with HUD after Space input. Same URL as the 28.9 fps
 entry below; the improvement is machine-load variance plus the clean rebuild.
 
+## 2026-08-18 final: 71.7 fps; the plateau and what's left
+
+Adding `&audioFreq=22050` to the URL (host SDL audio matched to the guest's
+22 kHz mix rate) measures 71.7 mean / 71.5 median — a marginal consistent
+gain; host `sound=false` is no better (71.1) and unstable (min 53). This is
+the plateau for config-level work: the remaining ~14 ms frame is emulated
+game logic + Wine plumbing at ~170 MIPS. The persistent MIPS hotspot (libc
+memcpy, ret at `ntdll.so+0x8c000`) is not a code address — 0x8c000 is
+.got.plt in the packaged ntdll — i.e. the syscall-dispatch gate; finding
+the actual hot syscall needs emulator-side instrumentation (out of scope
+under the no-sibling-edit constraint). Day's ladder: 24.6 → 45.6 → 63 →
+70.6 → 71.7 fps.
+
 ## 2026-08-18 evening: 70 fps with sound and factor-3 visuals (up3m)
 
 `netduke32-up3m.zip` (autoexec: `r_upscalefactor 3`, `snd_mixrate 22050`,
