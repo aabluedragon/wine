@@ -2222,16 +2222,24 @@ static bool feature_level_9_3_supported(const struct wined3d_physical_device_inf
             && info->features2.features.independentBlend;
 }
 
-static bool feature_level_10_supported(const struct wined3d_physical_device_info *info, unsigned int shader_model)
+static bool feature_level_10_supported(const struct wined3d_physical_device_info *info,
+        unsigned int shader_model, bool apple)
 {
+    /* Apple GPUs (Metal via MoltenVK) have no geometry shaders and no
+     * pipeline-statistics queries, so requiring them here caps every adapter at
+     * feature level 9_3 and makes D3D10/11 device creation fail outright — even
+     * for games that never issue a geometry-shader draw (Build-engine ports like
+     * Duke3D World Tour). Treat those two as non-blocking on Apple: a title that
+     * actually needs geometry shaders still won't render them, but the vast
+     * majority that only request FL10/11 for the API now get a working device. */
     return shader_model >= 4
             && info->features2.features.multiViewport
-            && info->features2.features.geometryShader
+            && (info->features2.features.geometryShader || apple)
             && info->features2.features.depthClamp
             && info->features2.features.depthBiasClamp
-            && info->features2.features.pipelineStatisticsQuery
+            && (info->features2.features.pipelineStatisticsQuery || apple)
             && info->features2.features.shaderClipDistance
-            && info->features2.features.shaderCullDistance
+            && (info->features2.features.shaderCullDistance || apple)
             && info->draw_parameters_features.shaderDrawParameters
             && info->vertex_divisor_features.vertexAttributeInstanceRateDivisor
             && info->vertex_divisor_features.vertexAttributeInstanceRateZeroDivisor;
@@ -2242,14 +2250,18 @@ static bool feature_level_10_1_supported(const struct wined3d_physical_device_in
     return info->features2.features.imageCubeArray;
 }
 
-static bool feature_level_11_supported(const struct wined3d_physical_device_info *info, unsigned int shader_model)
+static bool feature_level_11_supported(const struct wined3d_physical_device_info *info,
+        unsigned int shader_model, bool apple)
 {
+    /* MoltenVK exposes tessellation on Apple GPUs (via compute), but older/ some
+     * configs report it off; don't let its absence block FL11 on Apple for the
+     * same reason as geometry shaders above. */
     return shader_model >= 5
             && info->features2.features.multiDrawIndirect
             && info->features2.features.drawIndirectFirstInstance
             && info->features2.features.fragmentStoresAndAtomics
             && info->features2.features.shaderImageGatherExtended
-            && info->features2.features.tessellationShader;
+            && (info->features2.features.tessellationShader || apple);
 }
 
 static bool feature_level_11_1_supported(const struct wined3d_physical_device_info *info)
@@ -2258,7 +2270,7 @@ static bool feature_level_11_1_supported(const struct wined3d_physical_device_in
 }
 
 static enum wined3d_feature_level feature_level_from_caps(const struct wined3d_physical_device_info *info,
-        const struct shader_caps *shader_caps)
+        const struct shader_caps *shader_caps, bool apple)
 {
     unsigned int shader_model;
 
@@ -2279,13 +2291,13 @@ static enum wined3d_feature_level feature_level_from_caps(const struct wined3d_p
     if (!feature_level_9_3_supported(info, shader_model))
         return WINED3D_FEATURE_LEVEL_9_2;
 
-    if (!feature_level_10_supported(info, shader_model))
+    if (!feature_level_10_supported(info, shader_model, apple))
         return WINED3D_FEATURE_LEVEL_9_3;
 
     if (!feature_level_10_1_supported(info, shader_model))
         return WINED3D_FEATURE_LEVEL_10;
 
-    if (!feature_level_11_supported(info, shader_model))
+    if (!feature_level_11_supported(info, shader_model, apple))
         return WINED3D_FEATURE_LEVEL_10_1;
 
     if (!feature_level_11_1_supported(info))
@@ -2361,7 +2373,15 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     d3d_info->full_ffp_varyings = !!(shader_caps.wined3d_caps & WINED3D_SHADER_CAP_FULL_FFP_VARYINGS);
     d3d_info->scaled_resolve = false;
     d3d_info->pbo = true;
-    d3d_info->feature_level = feature_level_from_caps(&device_info, &shader_caps);
+    {
+        /* driver_info (and its vendor) is filled in after this function runs, so
+         * read the vendor straight from the physical device here. */
+        VkPhysicalDeviceProperties fl_props;
+
+        VK_CALL(vkGetPhysicalDeviceProperties(adapter_vk->physical_device, &fl_props));
+        d3d_info->feature_level = feature_level_from_caps(&device_info, &shader_caps,
+                fl_props.vendorID == HW_VENDOR_APPLE);
+    }
     d3d_info->subpixel_viewport = true;
     d3d_info->fences = true;
     d3d_info->persistent_map = true;
