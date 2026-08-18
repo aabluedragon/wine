@@ -57,8 +57,11 @@ const log = (line) => {
   appendFileSync(logPath, line + '\n');
 };
 
-const profile = resolve(outDir, 'profile');
-rmSync(profile, { recursive: true, force: true });
+// --profile-dir <path>: reuse a persistent Chrome profile (IndexedDB survives
+// across runs — needed to test the emulator's persisted JIT cache). Without
+// it, each run gets a fresh wiped profile as before.
+const profile = arg('profile-dir', null) ? resolve(arg('profile-dir')) : resolve(outDir, 'profile');
+if (!arg('profile-dir', null)) rmSync(profile, { recursive: true, force: true });
 
 const child = spawn(chrome, [
   '--headless=new',
@@ -343,6 +346,7 @@ const NAMED_KEYS = {
   Backquote: { key: '`',      code: 'Backquote',  vk: 192, text: '`' },
   Escape:    { key: 'Escape', code: 'Escape',     vk: 27 },
   Space:     { key: ' ',      code: 'Space',      vk: 32, text: ' ' },
+  Control:   { key: 'Control',    code: 'ControlLeft', vk: 17 },
   ArrowUp:   { key: 'ArrowUp',    code: 'ArrowUp',    vk: 38 },
   ArrowDown: { key: 'ArrowDown',  code: 'ArrowDown',  vk: 40 },
   ArrowLeft: { key: 'ArrowLeft',  code: 'ArrowLeft',  vk: 37 },

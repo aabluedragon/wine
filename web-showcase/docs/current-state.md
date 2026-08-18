@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-08-18 night II: stutter hardening — paced JIT flushes, cache verdict
+
+Three further anti-stutter results on the JIT runtime (port 8093):
+
+1. **20-min soak**: after the stored-zip fix, all gameplay stalls were JIT
+   warmup in the first ~3 min (564/260/221 ms, decaying), then zero stalls
+   for 15 straight minutes.
+2. **Persistent JIT cache is a stutter source, confirmed with a paired
+   run** (new `--profile-dir` in cdp-run keeps IndexedDB): the warm second
+   session hit a **2.5 s stall** and lower fps. `jit-cache=off` must stay
+   in every URL.
+3. **Paced batch flushes** (BoxedWine edits: `queueRuntimeFlushes` now
+   compiles at most one batch per call; `wasmJitDrainSealedRequests()`
+   drains one batch per browser tick from the emscripten mainloop):
+   warmup stalls drop to **worst 121–275 ms even under external CPU
+   contention** (was 337–927 ms). Guest threads that reach a still-pending
+   block still take the urgent pending-hit flush, so warmup coverage keeps
+   up. Deployed on 8093.
+
+
 ## 2026-08-18 late: seconds-long stutters fixed — store the GRP uncompressed
 
 The user-reported multi-second freezes "in some places" were BoxedWine's
