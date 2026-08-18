@@ -2,35 +2,52 @@
 
 ## 2026-08-18: mouse aim fix (relative/Pointer Lock) + LAN HTTPS serving
 
-**Crazy FPS aim fixed.** Two compounding causes: (1) the shell's
-"Lock/hide mouse pointer" checkbox defaulted OFF, which forced
-`disableHideCursor=true` so the guest could never hide its cursor to enter
-mouselook; (2) even with lock, BoxedWine fed **absolute** cursor coords to
-Wine's relative-mouse path, which reads them as raw deltas → spinning.
+**Crazy FPS aim — root-caused by instrumentation, then fixed.** Added
+`[MOUSEDBG]` logging to the mouse path and drove it with cdp-run's new
+`--mouselook`. Findings: netduke32 under Wine grabs the pointer and selects
+**XInput2 raw motion** (`grabbed=1 rawMotion=1`), but BoxedWine fed Wine the
+**absolute** cursor position, read as a raw delta → spin. My first attempt
+(tie relative mode to cursor-hide in setCursor) failed: the cursor is set
+several times at boot (a cached *visible* cursor among them) and the spurious
+"visible" event turned relative mode back off; also `SDL_SetRelativeMouseMode`
+at boot silently fails (Pointer Lock needs a user gesture). Confirmed via the
+log: `relMode=0`, `xrel=0`.
 
-Fixes (BoxedWine sibling tree + this repo's deployed shell):
-- `platform/sdl/knativescreenSDL.cpp`: when the guest hides its cursor (FPS
-  mouselook), enter `SDL_SetRelativeMouseMode(TRUE)` (browser Pointer Lock,
-  granted on next click) and set `Module.boxedwineCaptureMouse=1`; restore on
-  cursor-show. `emscripten.h` now included whenever `__EMSCRIPTEN__`.
-- `platform/sdl/knativeinputSDL.cpp`: under relative mode, deliver
-  `e->motion.xrel/yrel` (real movementX/Y) instead of absolute x/y, scaled by
-  the display→guest ratio with no offset.
-- `source/x11/xserver.cpp`: `mouseMove(dx,dy,relative=true)` sends the delta
-  straight to the grabbed window as XI2 raw motion — no warp (warp is a no-op
-  in the browser without Pointer Lock).
-- Shell (`boxedwine.html` checkbox default `checked`; `boxedwine-shell.js`
-  `requestCanvasPointerLock` guarded on `Module.boxedwineCaptureMouse` so it
-  only locks during gameplay, never in menus).
+Working design (grab-driven, gesture-correct):
+- `source/x11/xserver.cpp`: on every mouseMove, set `Module.boxedwineCaptureMouse`
+  from the reliable **grab + XI raw-motion** state (the real "wants mouselook"
+  signal), and when called with `relative=true` deliver the delta straight to
+  the grabbed window as XI2 raw motion (no warp — warp is a browser no-op
+  without Pointer Lock). `emscripten.h` included under `__EMSCRIPTEN__`.
+- `platform/sdl/knativescreenSDL.cpp`: export `boxedwine_set_relative_mouse(int)`
+  (EMSCRIPTEN_KEEPALIVE) so the shell can enter/leave SDL relative mode from
+  inside a click gesture (the only context where the browser grants Pointer
+  Lock). The old cursor-hide relative toggle was removed.
+- `platform/sdl/knativeinputSDL.cpp`: under `SDL_GetRelativeMouseMode()`,
+  deliver `e->motion.xrel/yrel` (real movementX/Y) instead of absolute x/y,
+  scaled by the display→guest ratio, no offset.
+- makefile: `_boxedwine_set_relative_mouse` added to jitControlGL exports.
+- Shell (`boxedwine.html` checkbox default `checked`; `boxedwine-shell.js`):
+  on canvas click, if `Module.boxedwineCaptureMouse`, call
+  `ccall('boxedwine_set_relative_mouse',...,[1])` — engages SDL relative mode +
+  Pointer Lock inside the gesture; on `pointerlockchange` to unlocked, call it
+  with 0 (menus / Escape return to absolute).
+
+Verified links (headless/headful): grab+rawMotion detected; the click ccall
+flips `relMode` 0→1. The final `movementX → xrel → delivery` link can only be
+exercised with a **physical mouse** — synthetic CDP/headless input cannot
+produce `movementX` (Pointer Lock is refused headless: `WrongDocumentError`),
+so `xrel` stays 0 in automation regardless. Needs a hands-on confirm.
 
 **LAN testing (phones/tablets):** `serve-https.mjs` serves over HTTPS with a
 self-signed cert — required because the threaded WASM build needs
 `crossOriginIsolated` (SharedArrayBuffer), which browsers grant only in a
 secure context; `http://<LAN-IP>` is not one. Run:
-`PORT=8443 CERT=<cert> KEY=<key> node serve-https.mjs build-jitgl`. cdp-run
-gained `--ignore-certificate-errors` so it can test the https endpoint.
-Verified: game renders in-level over `https://<LAN-IP>:8443` with the
-Pointer-Lock checkbox pre-checked.
+`PORT=8443 CERT=<cert> KEY=<key> node serve-https.mjs build-jitgl`. Generate
+the cert with the **current** LAN IP in the SAN (DHCP can change it — re-gen
+and restart if the phone can't connect). cdp-run gained
+`--ignore-certificate-errors` and `--headful`. Verified: game renders in-level
+over `https://<LAN-IP>:8443` with the Pointer-Lock checkbox pre-checked.
 
 ## 2026-08-18 latest: paced flushes validated head-to-head
 

@@ -63,8 +63,9 @@ const log = (line) => {
 const profile = arg('profile-dir', null) ? resolve(arg('profile-dir')) : resolve(outDir, 'profile');
 if (!arg('profile-dir', null)) rmSync(profile, { recursive: true, force: true });
 
+const headful = argv.includes('--headful'); // real window: Pointer Lock works
 const child = spawn(chrome, [
-  '--headless=new',
+  ...(headful ? [] : ['--headless=new']),
   `--remote-debugging-port=${port}`,
   `--user-data-dir=${profile}`,
   '--no-first-run',
@@ -381,6 +382,35 @@ async function typeText(text) {
   }
 }
 
+// --mouselook <sec>: at <sec>, click the canvas (grants Pointer Lock) then
+// dispatch a burst of horizontal mouse moves so the diagnostics show what the
+// guest does with relative motion.
+const mouselookAt = arg('mouselook', null) !== null ? Number(arg('mouselook')) : null;
+let mouselookDone = false;
+async function mouselookTick(t) {
+  if (mouselookAt === null || mouselookDone || t < mouselookAt) return;
+  mouselookDone = true;
+  const r = await send('Runtime.evaluate', { expression: PROBE, returnByValue: true });
+  const c = JSON.parse(r.result.value ?? '{}');
+  if (!c.canvas) { console.log(`t=${t}s  mouselook: no canvas`); return; }
+  const cx = c.x + Math.floor(c.cssW / 2);
+  const cy = c.y + Math.floor(c.cssH / 2);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', buttons: 1, clickCount: 1 });
+  await sleep(30);
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', buttons: 0, clickCount: 1 });
+  await sleep(200);
+  const locked = await send('Runtime.evaluate', { expression: `(document.pointerLockElement === document.querySelector('canvas'))`, returnByValue: true });
+  console.log(`t=${t}s  mouselook: clicked canvas, pointerLocked=${locked.result.value}`);
+  // Drag right in steps: the browser derives movementX from position deltas.
+  let px = cx;
+  for (let i = 0; i < 20; i++) {
+    px += 25;
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px, y: cy, button: 'none', buttons: 0 });
+    await sleep(50);
+  }
+  console.log(`t=${t}s  mouselook: dispatched 20 right-moves (+25px each)`);
+}
+
 // --readfile <emulator path>@<sec>: dump the tail of a file from the
 // emscripten FS (the guest's disk) into the run log — e.g. the game's own
 // netduke32.log, which never reaches stdout.
@@ -444,6 +474,7 @@ async function cpuProfileTick(t) {
 for (let t = 1; t <= seconds; t++) {
   await sleep(1000);
   await cpuProfileTick(t).catch((e) => console.log('cpuprofile error: ' + e));
+  await mouselookTick(t).catch((e) => console.log('mouselook error: ' + e));
   while (readfileQueue.length && readfileQueue[0].at <= t) {
     const f = readfileQueue.shift();
     const content = await readEmuFile(f.path).catch((e) => `READFILE-ERR: ${e}`);
