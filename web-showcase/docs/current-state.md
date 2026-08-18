@@ -1,5 +1,16 @@
 # Current browser checkpoint
 
+## 2026-08-18 latest: paced flushes validated head-to-head
+
+Interleaved A/B (paced on 8093 vs unpaced flag-build `BOXEDWINE_WASM_JIT_-
+UNPACED_FLUSH` on 8094, same URL, alternating 4-min runs): the unpaced
+build hit a **2639 ms** freeze in round 1; the paced build's worst pause
+across both rounds was **150 ms**. Matched-contention round 2 shows fps
+parity (53.6 vs 52.2 mean) — pacing costs nothing at steady state because
+the flush queue is empty once warm. Paced stays the production build on
+8093; the unpaced comparison build is served on 8094. Note the zsh trap
+that ate the first A/B attempt: `set -- $var` does not word-split in zsh.
+
 ## 2026-08-18 night II: stutter hardening — paced JIT flushes, cache verdict
 
 Three further anti-stutter results on the JIT runtime (port 8093):
