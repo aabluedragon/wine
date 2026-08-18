@@ -9,9 +9,12 @@ dominated CPU-profile buckets mid-walk, and `fszipopennode.cpp` shows
 stored entries (`compressionMethod == 0`) get a direct lseek+read path
 while deflated entries re-run `setupZipRead`. Fix with no code change:
 **`netduke32-up3m250s.zip`** = same package re-zipped with `zip -0`
-(store). Scripted-walk A/B (new `--hold key@from:to` in cdp-run):
+(store); `netduke32-up3m250.zip` and `netduke32-up3m.zip` were then replaced
+with stored repacks too, so every published URL carries the fix. Scripted-walk A/B (new `--hold key@from:to` in cdp-run):
 49 stalls (worst 591 ms) → **4 stalls (worst 337 ms)**, walk-phase fps
-70.9 → 95.4 mean. Root-zip repack was attempted for boot speed and
+70.9 → 95.4 mean. Final validation: a 345 s combat walk (movement + firing
++ doors, `--light`, quiet machine) shows **zero** main-loop stalls, zero
+sub-30 fps seconds, 134.6 fps mean / 68 min. Root-zip repack was attempted for boot speed and
 abandoned (unzip/zip roundtrip breaks `.link` symlink entries).
 
 Instrumentation honesty: cdp-run's per-second `Page.captureScreenshot`
