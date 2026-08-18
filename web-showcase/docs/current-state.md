@@ -6,6 +6,18 @@ rebuilt clean `controlGL` runtime in `build-ctlgl2` (port 8089), screenshot
 showing in-game E1L1 with HUD after Space input. Same URL as the 28.9 fps
 entry below; the improvement is machine-load variance plus the clean rebuild.
 
+## 2026-08-18 later: upscale tiers — 63 fps at factor 3, 70 at factor 4
+
+`r_upscalefactor` scales further (solo serial runs, same conditions,
+last-60 s gameplay means): factor 2 = 40.9–45.6, **factor 3 = 63.1 (median
+63, min 51)**, factor 4 = 70.4 (median 70, min 65). Factor 3 (~213x133
+internal 3D view) is visually near-identical to factor 2 in screenshots and
+is the recommended default: `app=netduke32-up3.zip`. Factor 4 (160x100) is
+the speed tier: `netduke32-up4.zip`. All keep the 320x200 glsurface upload
+(the engine software-doubles the low-res view into it), so draws/s equals
+uploads/s — the fps metric stays valid. `-ns -nm` (no sound) measured
+*slower* (33 vs 41 control) — not a lever.
+
 ## 2026-08-18 afternoon: r_upscalefactor 2 — 45.6 fps mean (1.85x)
 
 The game ignores the cfg's 320x240 (its own log shows `Setting video mode
