@@ -15,6 +15,17 @@ Named profile shows the next ceiling: ~40% interpreter dispatch
 (NormalCPU::run/normalDispatch/normal_*) even with the JIT on, plus 11.6%
 wasmStartJITOp — JIT block coverage/entry cost is the next target.
 
+**Compile-threshold experiments (conclusive negatives):** guest execution
+splits 52.4% interpreter / 24.7% JIT-generated / 11.6% JIT entry gate.
+`JIT_RUN_COUNT` (blocks compile after N executions, default 200, overridable
+via `GCC_EXTRA_FLAGS=-DJIT_RUN_COUNT=N`) is well-tuned: N=100 measures
+**81.9 clean** (compile churn of cold blocks costs more than the coverage
+gains) and N=20 **crashes the emulator during boot** (memory access out of
+bounds — latent bug with eager compilation during process startup). The
+default-200 build is restored and redeployed on 8093. Raising JIT coverage
+needs a different mechanism (e.g. trace-based selection or cheaper entry),
+not a lower threshold.
+
 ## 2026-08-18 night, clean re-measure: **115 fps median**
 
 On a quiet machine, `netduke32-up3m250.zip` on the JIT runtime (port 8093,
