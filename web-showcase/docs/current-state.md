@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-08-18: click-jump fix (Pointer Lock acquire spike + drifted click pos)
+
+After relative mouselook worked, clicking snapped the aim. Two causes, both
+fixed:
+- **Acquire spike:** the first browser `movementX/Y` after Pointer Lock is
+  granted (which happens on the locking click) is the huge jump to the lock
+  centre. `knativeinputSDL`: on the transition into relative mode, arm an
+  8-frame settle window that drops deltas > 150 px; a permanent 1000 px clamp
+  also catches any later glitch spike, both well above real flicks.
+- **Drifted click position:** under Pointer Lock the synthetic absolute
+  position drifts far off-screen as you turn; delivering it with a button
+  press jumped the guest pointer. `xserver.cpp mouseButton` now feeds a
+  neutral (0,0) position for grabbed + XI-raw-motion clicks under emscripten
+  (mirrors the existing `forceRelativeMouse` button handling, minus the warp).
+
+Note: `ipconfig getifaddr en0` can report a **VPN** address (utun*) instead
+of the Wi-Fi LAN IP — check `ifconfig | grep 'inet '` for the real
+192.168.x.x before generating the cert / handing out the URL.
+
 ## 2026-08-18: mouse aim fix (relative/Pointer Lock) + LAN HTTPS serving
 
 **Crazy FPS aim — root-caused by instrumentation, then fixed.** Added
