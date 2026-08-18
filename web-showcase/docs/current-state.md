@@ -1,5 +1,17 @@
 # Current browser checkpoint
 
+## 2026-08-18 night, clean re-measure: **115 fps median**
+
+On a quiet machine, `netduke32-up3m250.zip` on the JIT runtime (port 8093,
+`&audioFreq=22050&jit-cache=off`) measures **113.5 fps mean / 115 median /
+99 min / 131 max** over the last 60 s of gameplay — the 81 below was
+contention-depressed. Factor 4 + uncap is *slower* (99.9) — the extra
+software-upscale pass outweighs the raster saving once uncapped; factor 3
+wins on both axes. Also: the "warm cache pathology" attribution for today's
+slow runs was wrong — those runs compiled all 48k blocks fresh; the
+variance was external CPU load (the user's native tests) — but keep
+`jit-cache=off` anyway. Gameplay screenshot verified; MIPS ~270 sustained.
+
 ## 2026-08-18 night: JIT runtime + uncapped frame limit — 81 fps median
 
 The sibling-edit constraint was lifted (goal re-issued without it), enabling a
