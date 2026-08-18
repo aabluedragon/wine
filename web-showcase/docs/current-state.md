@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-08-18 night: JIT runtime + uncapped frame limit — 81 fps median
+
+The sibling-edit constraint was lifted (goal re-issued without it), enabling a
+new BoxedWine make target `jitControlGL` (WASM JIT + FULL_ES2, no indexed
+renderer — the makefile edit is in the BoxedWine tree). Deployed at
+`web-showcase/build-jitgl`, served on port **8093**. Findings:
+
+- The JIT lifts guest throughput to **404–437 MIPS** (vs ~170 interpreted),
+  but fps stayed ~70: the game's own frame limiter was the ceiling all along.
+- `netduke32-up3m250.zip` adds `r_maxfps 250` to the autoexec. On the JIT
+  runtime with `&jit-cache=off&audioFreq=22050`: **81.6 mean / 81 median**,
+  measured *under* heavy external CPU contention — clean numbers should be
+  higher. Compile stalls cause occasional hitches (min 40, "ran main loop in
+  940ms").
+- `jit-cache=off` is required: the persisted module cache makes warm runs
+  *slower* (130 MIPS vs 404 cold — the known re-install pathology).
+- On the interpreter, `r_maxfps 250` gains nothing (CPU-bound at ~170 MIPS);
+  the interpreter URL (port 8089, up3m, 71.7 fps) remains the stable
+  fallback with no hitches.
+
 Last verified: **2026-08-18 (morning, +03:00)** — the verified GL config
 re-measured **34–35 fps** (last-60s window; samples 32–36) on the freshly
 rebuilt clean `controlGL` runtime in `build-ctlgl2` (port 8089), screenshot
