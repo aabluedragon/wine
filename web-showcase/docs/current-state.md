@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-08-18 late: seconds-long stutters fixed — store the GRP uncompressed
+
+The user-reported multi-second freezes "in some places" were BoxedWine's
+zip FS re-inflating the deflated 44 MB DUKE3D.GRP on in-game asset reads
+(lazy tile/sound loads when entering new areas): `unzReadCurrentFile`
+dominated CPU-profile buckets mid-walk, and `fszipopennode.cpp` shows
+stored entries (`compressionMethod == 0`) get a direct lseek+read path
+while deflated entries re-run `setupZipRead`. Fix with no code change:
+**`netduke32-up3m250s.zip`** = same package re-zipped with `zip -0`
+(store). Scripted-walk A/B (new `--hold key@from:to` in cdp-run):
+49 stalls (worst 591 ms) → **4 stalls (worst 337 ms)**, walk-phase fps
+70.9 → 95.4 mean. Root-zip repack was attempted for boot speed and
+abandoned (unzip/zip roundtrip breaks `.link` symlink entries).
+
+Instrumentation honesty: cdp-run's per-second `Page.captureScreenshot`
+sampling is itself a multi-second `readPixels` stall under SwiftShader —
+the 4.3 s "stall" in the first stored-zip run was harness-induced. New
+`--light` flag disables readbacks; use it for any pacing measurement.
+
 ## 2026-08-18 late night: main-loop timing fix — **126 fps median**
 
 A V8 CPU profile (new `--cpuprofile start:dur` option in cdp-run.mjs)

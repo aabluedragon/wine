@@ -40,6 +40,13 @@ const keys = [
     return { text: k.slice(0, k.lastIndexOf('@')), at: Number(at) };
   }),
 ].sort((a, b) => a.at - b.at);
+// --hold <name>@<startSec>:<endSec> — keyDown at start, keyUp at end (movement).
+const holds = all('hold').map((k) => {
+  const [name, span] = k.split('@');
+  const [from, to] = span.split(':').map(Number);
+  return { name, from, to, down: false };
+});
+
 const port = Number(arg('port', 9222));
 const chrome = arg('chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
 
@@ -289,7 +296,13 @@ const PROBE = `(() => {
 
 // Mean luminance and a hash of the composited canvas region, decoded from an
 // uncompressed-enough JPEG. Successive hashes prove pixels actually change.
+// --light: skip the per-second screenshot sampling (Page.captureScreenshot
+// forces a GPU readback — measured as multi-second readPixels stalls under
+// SwiftShader). Upload/draw counting stays, so fps numbers remain valid.
+const light = argv.includes('--light');
+
 async function sampleCanvas(info) {
+  if (light) return {};
   if (!info.canvas || !info.cssW || !info.cssH) return {};
   const shot = await send('Page.captureScreenshot', {
     format: 'jpeg',
@@ -430,6 +443,23 @@ for (let t = 1; t <= seconds; t++) {
     const f = readfileQueue.shift();
     const content = await readEmuFile(f.path).catch((e) => `READFILE-ERR: ${e}`);
     console.log(`t=${t}s  readfile ${f.path} >>>\n${content}\n<<< end readfile`);
+  }
+  for (const h of holds) {
+    if (!h.down && t >= h.from && t < h.to) {
+      if (!focused) {
+        focused = await focusCanvas().catch(() => false);
+        console.log(`t=${t}s  focused canvas: ${focused}`);
+      }
+      h.down = true;
+      const { text, ...common } = keyDescriptor(h.name);
+      await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', text, ...common }).catch(() => {});
+      console.log(`t=${t}s  hold-down '${h.name}'`);
+    } else if (h.down && t >= h.to) {
+      h.down = false;
+      const { text, ...common } = keyDescriptor(h.name);
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common }).catch(() => {});
+      console.log(`t=${t}s  hold-up '${h.name}'`);
+    }
   }
   while (keyQueue.length && keyQueue[0].at <= t) {
     const k = keyQueue.shift();
