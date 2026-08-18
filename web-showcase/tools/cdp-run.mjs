@@ -382,8 +382,50 @@ async function readEmuFile(path) {
   return r.result.value;
 }
 
+// --cpuprofile <startSec>:<durationSec> — collect a V8 CPU profile of the page
+// (JS + wasm, with wasm function names) and write it next to the samples.
+const cpuprofileArg = arg('cpuprofile', null);
+let cpuprofile = null;
+if (cpuprofileArg) {
+  const [at, dur] = cpuprofileArg.split(':').map(Number);
+  cpuprofile = { at, dur, state: 'idle' };
+}
+
+async function cpuProfileTick(t) {
+  if (!cpuprofile) return;
+  if (cpuprofile.state === 'idle' && t >= cpuprofile.at) {
+    cpuprofile.state = 'running';
+    await send('Profiler.enable');
+    await send('Profiler.setSamplingInterval', { interval: 500 });
+    await send('Profiler.start');
+    console.log(`t=${t}s  cpu profile started (${cpuprofile.dur}s)`);
+  } else if (cpuprofile.state === 'running' && t >= cpuprofile.at + cpuprofile.dur) {
+    cpuprofile.state = 'done';
+    const r = await send('Profiler.stop');
+    const profile = r.profile;
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(`${outDir}/page.cpuprofile`, JSON.stringify(profile));
+    // Self-time summary: hits per node, resolved to function names.
+    const nodes = new Map(profile.nodes.map((n) => [n.id, n]));
+    const hits = new Map();
+    for (const n of profile.nodes) {
+      if (!n.hitCount) continue;
+      const f = n.callFrame;
+      const name = (f.functionName || '(anonymous)') + ' @ ' + (f.url || '').split('/').pop();
+      hits.set(name, (hits.get(name) || 0) + n.hitCount);
+    }
+    const total = [...hits.values()].reduce((a, b) => a + b, 0) || 1;
+    const top = [...hits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25);
+    console.log(`t=${t}s  cpu profile done, ${total} samples; top self-time:`);
+    for (const [name, h] of top) {
+      console.log(`  ${(100 * h / total).toFixed(1)}%  ${name}`);
+    }
+  }
+}
+
 for (let t = 1; t <= seconds; t++) {
   await sleep(1000);
+  await cpuProfileTick(t).catch((e) => console.log('cpuprofile error: ' + e));
   while (readfileQueue.length && readfileQueue[0].at <= t) {
     const f = readfileQueue.shift();
     const content = await readEmuFile(f.path).catch((e) => `READFILE-ERR: ${e}`);

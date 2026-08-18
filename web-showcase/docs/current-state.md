@@ -1,5 +1,20 @@
 # Current browser checkpoint
 
+## 2026-08-18 late night: main-loop timing fix — **126 fps median**
+
+A V8 CPU profile (new `--cpuprofile start:dur` option in cdp-run.mjs)
+showed **27.9% idle wall-time**: BoxedWine's emscripten mainloop used
+`EM_TIMING_SETTIMEOUT, 1`, and Chrome clamps nested setTimeout to ~4 ms.
+Switching to `EM_TIMING_SETIMMEDIATE, 0` (postMessage, unclamped — edit in
+`source/sdl/emscripten/mainloop.cpp`, jitControlGL relinked with
+`--profiling-funcs` for named wasm frames) measures **124.7 mean /
+126 median / 106 min** clean on the same up3m250 URL (port 8093).
+Contended runs mislead badly here: the same build read 75 with the user's
+native test running — never trust a number without checking `ps aux -r`.
+Named profile shows the next ceiling: ~40% interpreter dispatch
+(NormalCPU::run/normalDispatch/normal_*) even with the JIT on, plus 11.6%
+wasmStartJITOp — JIT block coverage/entry cost is the next target.
+
 ## 2026-08-18 night, clean re-measure: **115 fps median**
 
 On a quiet machine, `netduke32-up3m250.zip` on the JIT runtime (port 8093,
