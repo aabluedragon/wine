@@ -6,6 +6,18 @@ rebuilt clean `controlGL` runtime in `build-ctlgl2` (port 8089), screenshot
 showing in-game E1L1 with HUD after Space input. Same URL as the 28.9 fps
 entry below; the improvement is machine-load variance plus the clean rebuild.
 
+## 2026-08-18 evening: 70 fps with sound and factor-3 visuals (up3m)
+
+`netduke32-up3m.zip` (autoexec: `r_upscalefactor 3`, `snd_mixrate 22050`,
+`snd_numvoices 16`) sustains **70.6 fps mean / 70 median / 68 min** — audio
+mixing at 44.1 kHz / 96 voices was costing ~1.7 ms/frame, the entire gap
+between the factor-3 (63) and factor-4 (70) tiers. This is the recommended
+default: factor-3 sharpness, sound retained at 22 kHz. Also measured:
+factor 6 = 70.6 (upscale clamps at the factor-4 floor, no further gain);
+ScreenSize=8 = 68 mean but min 52 and a smaller view — rejected. Curiously
+`-ns -nm` (sound fully off) measured *slower* — reduce the mix cost, don't
+remove the mixer.
+
 ## 2026-08-18 later: upscale tiers — 63 fps at factor 3, 70 at factor 4
 
 `r_upscalefactor` scales further (solo serial runs, same conditions,
