@@ -990,6 +990,14 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             *funcs = (const void *)(ULONG_PTR)1;
             status = STATUS_SUCCESS;
         }
+        else if (builtin->unix_path && strstr( builtin->unix_path, "ws2_32.so" ))
+        {
+            /* ws2_32 uses the unix_call funcs-table form: its dispatch handle is
+             * the table itself (interpreter's unix_call: funcs[code](args)). */
+            extern const unixlib_entry_t __wine_unix_call_funcs[];
+            *funcs = __wine_unix_call_funcs;
+            status = STATUS_SUCCESS;
+        }
         else
 #endif
         if (builtin->unix_path && !builtin->unix_handle)

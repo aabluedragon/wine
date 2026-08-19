@@ -1021,6 +1021,24 @@ static void run( struct x86cpu *c )
                 int sz=(op2&1)?os:1; m=decode_modrm(c,&d); a=read_rm(c,&m,sz); b=read_reg(c,m.reg,sz);
                 write_rm(c,&m,sz,a+b); write_reg(c,m.reg,sz,a); set_lazy(c,K_ADD,a,b,a+b,sz); break;
             }
+            case 0xc7: /* cmpxchg8b m64 (reg field 1) */
+            {
+                m = decode_modrm(c,&d);
+                if (m.reg == 1) {
+                    uint64_t mem = rd32(m.ea) | ((uint64_t)rd32(m.ea+4) << 32);
+                    uint64_t edxeax = c->regs[EAX] | ((uint64_t)c->regs[EDX] << 32);
+                    c->eflags = get_flags(c);           /* materialize; only ZF changes */
+                    if (mem == edxeax) {
+                        wr32(m.ea, c->regs[EBX]); wr32(m.ea+4, c->regs[ECX]);
+                        c->eflags |= ZF;
+                    } else {
+                        c->regs[EAX] = (uint32_t)mem; c->regs[EDX] = (uint32_t)(mem >> 32);
+                        c->eflags &= ~ZF;
+                    }
+                    c->lf_size = 0;
+                }
+                break;
+            }
             case 0xc8: case 0xc9: case 0xca: case 0xcb: case 0xcc: case 0xcd: case 0xce: case 0xcf: /* bswap */
                 { int rr=op2&7; uint32_t v=c->regs[rr]; c->regs[rr]=((v>>24)&0xff)|((v>>8)&0xff00)|((v<<8)&0xff0000)|((v<<24)&0xff000000); } break;
             default: unimplemented(c,start,0x0f); return;
