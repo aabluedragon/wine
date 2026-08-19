@@ -68,7 +68,7 @@ struct x86cpu
 #define OF 0x0800
 
 /* flag-op kinds */
-enum { K_NONE, K_ADD, K_SUB, K_LOGIC, K_INCDEC, K_ADC, K_SBB };
+enum { K_NONE, K_ADD, K_SUB, K_LOGIC, K_INCDEC, K_ADC, K_SBB, K_INC, K_DEC };
 
 static int x86_trace = -1;
 static int trace(void)
@@ -79,10 +79,37 @@ static int trace(void)
 
 /* ---- flat memory (identity map) ---- */
 uint32_t g_insn_eip;   /* address of the instruction currently executing (debug) */
+struct callrec { uint32_t site, target, arg0, arg1; };
+struct callrec g_callring[32];
+int g_callpos;
+int g_lowwrite_dumped;
+static void dump_callring(void)
+{
+    int i;
+    fprintf( stderr, "wasm_x86: --- recent calls (oldest first) ---\n" );
+    for (i = 0; i < 32; i++)
+    {
+        struct callrec *r = &g_callring[(g_callpos + i) & 31];
+        if (r->site)
+            fprintf( stderr, "wasm_x86:   %08x -> %08x  (arg0=%08x arg1=%08x)\n",
+                     r->site, r->target, r->arg0, r->arg1 );
+    }
+}
 static inline void wguard( uint32_t a )
 {
     if (a < 0x10000 && trace())
+    {
         fprintf( stderr, "wasm_x86: LOW WRITE addr=%08x from insn @ %08x\n", a, g_insn_eip );
+        if (!g_lowwrite_dumped) { g_lowwrite_dumped = 1; dump_callring(); }
+    }
+}
+static inline uint32_t rd32_(uint32_t a){ return *(uint32_t*)(uintptr_t)a; }
+static inline void record_call( uint32_t site, uint32_t target, uint32_t esp )
+{
+    struct callrec *r = &g_callring[g_callpos & 31];
+    r->site = site; r->target = target;
+    r->arg0 = rd32_(esp+4); r->arg1 = rd32_(esp+8);
+    g_callpos++;
 }
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
@@ -136,6 +163,16 @@ static uint32_t get_flags( struct x86cpu *c )
     case K_INCDEC: /* preserve CF from eflags */
         f |= (c->eflags & CF);
         if (((op1 ^ op2) & (op1 ^ res)) & sm) f |= OF;
+        break;
+    case K_INC: /* res = op1 + 1; CF preserved */
+        f |= (c->eflags & CF);
+        if (((op1 ^ res) & (op2 ^ res)) & sm) f |= OF;
+        if (((op1 ^ op2 ^ res) & 0x10)) f |= AF;
+        break;
+    case K_DEC: /* res = op1 - 1; CF preserved */
+        f |= (c->eflags & CF);
+        if (((op1 ^ op2) & (op1 ^ res)) & sm) f |= OF;
+        if (((op1 ^ op2 ^ res) & 0x10)) f |= AF;
         break;
     }
     return f;
@@ -335,9 +372,9 @@ static void run( struct x86cpu *c )
         case 0xff: m = decode_modrm(c,&d);
             switch (m.reg)
             {
-            case 0: a = read_rm(c,&m,os); r = a+1; write_rm(c,&m,os,r); set_lazy(c,K_INCDEC,a,1,r,os); break; /* inc */
-            case 1: a = read_rm(c,&m,os); r = a-1; write_rm(c,&m,os,r); set_lazy(c,K_INCDEC,a,1,r,os); break; /* dec */
-            case 2: a = read_rm(c,&m,os); push32(c, d.eip); c->eip = a; goto next; /* call r/m */
+            case 0: a = read_rm(c,&m,os); r = a+1; write_rm(c,&m,os,r); set_lazy(c,K_INC,a,1,r,os); break; /* inc */
+            case 1: a = read_rm(c,&m,os); r = a-1; write_rm(c,&m,os,r); set_lazy(c,K_DEC,a,1,r,os); break; /* dec */
+            case 2: a = read_rm(c,&m,os); push32(c, d.eip); c->eip = a; record_call(start,a,c->regs[ESP]); goto next; /* call r/m */
             case 4: a = read_rm(c,&m,os); c->eip = a; goto next; /* jmp r/m */
             case 6: push32(c, read_rm(c,&m,os)); break; /* push r/m */
             default: unimplemented(c,start,op); return;
@@ -401,9 +438,9 @@ static void run( struct x86cpu *c )
 
         /* inc/dec reg */
         case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
-            a=c->regs[op&7]; r=a+1; c->regs[op&7]=r; set_lazy(c,K_INCDEC,a,1,r,os); break;
+            a=c->regs[op&7]; r=a+1; c->regs[op&7]=r; set_lazy(c,K_INC,a,1,r,os); break;
         case 0x48: case 0x49: case 0x4a: case 0x4b: case 0x4c: case 0x4d: case 0x4e: case 0x4f:
-            a=c->regs[op&7]; r=a-1; c->regs[op&7]=r; set_lazy(c,K_INCDEC,a,1,r,os); break;
+            a=c->regs[op&7]; r=a-1; c->regs[op&7]=r; set_lazy(c,K_DEC,a,1,r,os); break;
 
         /* xchg */
         case 0x86: m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); write_rm(c,&m,1,b); write_reg(c,m.reg,1,a); break;
@@ -413,7 +450,7 @@ static void run( struct x86cpu *c )
         case 0x90: break; /* nop / xchg eax,eax */
 
         /* control flow */
-        case 0xe8: { int32_t rel = f32(&d); push32(c, d.eip); c->eip = d.eip + rel; goto next; } /* call rel */
+        case 0xe8: { int32_t rel = f32(&d); push32(c, d.eip); c->eip = d.eip + rel; record_call(start,c->eip,c->regs[ESP]); goto next; } /* call rel */
         case 0xe9: { int32_t rel = f32(&d); c->eip = d.eip + rel; goto next; }
         case 0xeb: { int32_t rel = (int8_t)f8(&d); c->eip = d.eip + rel; goto next; }
         case 0xc3: c->eip = pop32(c); goto next;                 /* ret */
@@ -462,16 +499,53 @@ static void run( struct x86cpu *c )
             cnt &= 31;
             a=read_rm(c,&m,sz);
             uint32_t sm=signmask(sz), mask=sizemask(sz);
-            switch (m.reg)
-            {
-            case 4: /* shl */ r=(a<<cnt); if(cnt){uint32_t cf=(a>>(sz*8-cnt))&1; c->eflags=(c->eflags&~CF)|(cf?CF:0);} write_rm(c,&m,sz,r); set_lazy(c,K_LOGIC,a,cnt,r,sz); c->eflags|= (get_flags(c)&CF); break;
-            case 5: /* shr */ r=(a&mask)>>cnt; if(cnt){uint32_t cf=(a>>(cnt-1))&1; c->eflags=(c->eflags&~CF)|(cf?CF:0);} write_rm(c,&m,sz,r); set_lazy(c,K_LOGIC,a,cnt,r,sz); break;
-            case 7: /* sar */ { int32_t sa=(int32_t)(a<<(32-sz*8)); sa>>=(32-sz*8); r=((uint32_t)sa)>>cnt | 0; r=(uint32_t)(sa>>cnt); write_rm(c,&m,sz,r); set_lazy(c,K_LOGIC,a,cnt,r,sz);} break;
-            case 0: /* rol */ if(cnt){r=((a<<cnt)|((a&mask)>>(sz*8-cnt)))&mask;} else r=a; write_rm(c,&m,sz,r); break;
-            case 1: /* ror */ if(cnt){r=(((a&mask)>>cnt)|(a<<(sz*8-cnt)))&mask;} else r=a; write_rm(c,&m,sz,r); break;
-            default: r=(a<<cnt); write_rm(c,&m,sz,r); break;
+            a &= mask;
+            if (cnt == 0) { write_rm(c,&m,sz,a); break; }  /* x86: count 0 leaves flags */
+            { int W = sz*8; uint32_t cf=0, of=0; int rotate=0;
+              switch (m.reg)
+              {
+              case 4: case 6: /* shl/sal */
+                  cf = (cnt <= (uint32_t)W) ? ((a >> (W-cnt)) & 1) : 0;
+                  r = (a << cnt) & mask;
+                  of = ((r & sm)?1:0) ^ cf;
+                  break;
+              case 5: /* shr */
+                  cf = (a >> (cnt-1)) & 1;
+                  r = a >> cnt;
+                  of = (a & sm)?1:0;
+                  break;
+              case 7: /* sar */
+                  { int32_t sa=(int32_t)(a<<(32-W)); sa>>=(32-W);
+                    cf = (a >> (cnt-1)) & 1;
+                    r = ((uint32_t)(sa >> cnt)) & mask; of = 0; }
+                  break;
+              case 0: /* rol */
+                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a<<n)|(a>>(W-n)))&mask) : a;
+                    cf = r & 1; of = ((r & sm)?1:0) ^ cf; rotate=1; }
+                  break;
+              case 1: /* ror */
+                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a>>n)|(a<<(W-n)))&mask) : a;
+                    cf = (r >> (W-1)) & 1; of = ((r & sm)?1:0) ^ (((r>>(W-2))&1)); rotate=1; }
+                  break;
+              default: r = (a<<cnt)&mask; write_rm(c,&m,sz,r); c->lf_size=0; break;
+              }
+              if (m.reg <= 1 || (m.reg >= 4 && m.reg <= 7))
+              {
+                  write_rm(c,&m,sz,r);
+                  if (rotate) { /* rotates affect only CF/OF; preserve SF/ZF/PF */
+                      c->eflags = get_flags(c);
+                      c->eflags = (c->eflags & ~(CF|OF)) | (cf?CF:0) | (of?OF:0);
+                  } else {
+                      uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+                      if (cf) f|=CF; if (of) f|=OF;
+                      if (!(r & mask)) f|=ZF;
+                      if (r & sm) f|=SF;
+                      if (parity((uint8_t)r)) f|=PF;
+                      c->eflags = f;
+                  }
+                  c->lf_size = 0;
+              }
             }
-            (void)sm;
             break;
         }
 
@@ -872,6 +946,8 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
 
     fprintf( stderr, "wasm_x86: signal_start_thread entry=%p thunk=%p ctx=%p stack=%p\n",
              (void*)entry, pLdrInitializeThunk, (void*)ctx, (void*)stack );
+    fprintf( stderr, "wasm_x86: TEB=%p fs:[0x18](Self)=%08x fs:[0x30](Peb)=%08x\n",
+             (void*)teb, rd32((uint32_t)(uintptr_t)teb + 0x18), rd32((uint32_t)(uintptr_t)teb + 0x30) );
 
     run( &g_cpu );
 
