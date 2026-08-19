@@ -1384,6 +1384,10 @@ void set_session_mapping( struct mapping *mapping )
     size_t size = mapping->size;
     struct session_block *block;
     void *tmp;
+#ifdef __wasm__
+    if (getenv("WINEWASMLOADTRACE")) { struct stat st; fstat(unix_fd,&st);
+        fprintf(stderr,"wasm_srv: set_session_mapping unix_fd=%d ino=%llu size=%zx\n",unix_fd,(unsigned long long)st.st_ino,size); }
+#endif
 
     if (!(block = mem_alloc( sizeof(*block) ))) return;
     if ((tmp = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, unix_fd, 0 )) == MAP_FAILED)

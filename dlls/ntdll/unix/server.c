@@ -1095,6 +1095,10 @@ int wine_server_receive_fd( obj_handle_t *handle )
 #endif
             }
             if (fd != -1) fcntl( fd, F_SETFD, FD_CLOEXEC ); /* in case MSG_CMSG_CLOEXEC is not supported */
+#ifdef __wasm__
+            { static int t=-1; if(t<0){const char*e=getenv("WINEWASMLOADTRACE");t=e&&*e&&*e!='0';}
+              if(t){ struct stat st; int r=fstat(fd,&st); fprintf(stderr,"wasm_cli: receive_fd handle=%x fd=%d ino=%llu (fstat=%d)\n",(unsigned)(ULONG_PTR)*handle,fd,r==0?(unsigned long long)st.st_ino:0,r);} }
+#endif
             return fd;
         }
         if (!ret) break;

@@ -325,6 +325,8 @@ int close( int fd )
      * the process. The guest's std handles alias these fds; keep them open. */
     if (fd >= 0 && fd <= 2) return 0;
     {
+        if (getenv("WINEWASMLOADTRACE")) { struct stat st; int rr=fstat(fd,&st);
+            fprintf(stderr,"wasm_ipc: close real fd=%d ino=%llu\n", fd, rr==0?(unsigned long long)st.st_ino:0); }
         long r = host_close( fd );
         if (r < 0) { errno = -r; return -1; }
         return 0;

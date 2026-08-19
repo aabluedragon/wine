@@ -488,6 +488,10 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
 
     if (debug_level)
         fprintf( stderr, "%04x: *fd* %04x -> %d\n", current ? current->id : process->id, handle, fd );
+#ifdef __wasm__
+    { static int t=-1; if(t<0){const char*e=getenv("WINEWASMLOADTRACE");t=e&&*e&&*e!='0';}
+      if(t){ struct stat st; int r=fstat(fd,&st); fprintf(stderr,"wasm_srv: send_client_fd handle=%x fd=%d ino=%llu (fstat=%d)\n",(unsigned)handle,fd,r==0?(unsigned long long)st.st_ino:0,r);} }
+#endif
 
     ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
 
