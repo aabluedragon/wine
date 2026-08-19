@@ -144,3 +144,18 @@ WINEUNIXDIR=<fakeroot>/lib/wine/wasm32-unix WINEDLLPATH=<fakeroot>/lib/wine \
 WINEDATADIR=~/dev/wine/wine-macos/share/wine WINEPREFIX=<prefix> \
 node out/wine.js ret42.exe
 ```
+
+---
+### Correction to the frontier diagnosis (latest)
+
+The blocker is **not** `current` (which `call_req_handler` sets). It is an
+**fd-arrival ordering race**: `call_req_handler` sends the reply only if
+`current->reply_fd` is set, else it `kill_thread`s ("no way to continue without
+reply fd"). The client passes its reply/wait fds (773/775) over the **socket**
+channel (769->768) via separate `sendmsg`s, while the request arrives on the
+**request** channel (770). The drive's `poll` returns both 768 and 770 ready; if
+it dispatches the request (770) before draining the passed fds from 768,
+`reply_fd` is still NULL and the thread is killed (drive then idles forever —
+the exact observed trace). Fix: drain the socket fd (delivers passed fds via
+`wine_server_receive_fd`) before dispatching the request fd, or defer request
+dispatch until the thread has a reply_fd.
