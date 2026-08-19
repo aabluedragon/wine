@@ -44,66 +44,55 @@ registry → NLS → process init entirely as **native wasm**, reaching
 `server_connect` (i.e. "could not exec wineserver"). Every earlier boot wall
 (dynamic-linking, view-block alloc, shared-user-data map, uid check) is cleared.
 
-## Update: in-process wineserver runs in the SAME module ✅
+## LANDMARK: native-wasm Wine boots to the CPU-bridge seam ✅✅
 
-`webwine/build-combined.sh` links the wine client (ntdll unix side) **and** the
-whole wineserver **and** the ring-buffer transport into ONE wasm module and boots
-both. Results:
+`webwine/build-combined.sh` links the wine client (ntdll unix side) + the whole
+wineserver + the ring-buffer transport into ONE wasm module. Run under node with
+a synthetic install tree (`webwine/make-fakeroot.sh`), it now boots **all the way
+through Wine's process initialization** and stops exactly where the x86 emulator
+must take over:
 
-- The server's symbol overlap with ntdll in one address space is tiny: **2
-  functions** (`get_thread_context`/`set_thread_context` in `server/thread.c`,
-  ntdll wins) and **5 data globals** (`user_shared_data`, `server_start_time`,
-  `native_machine`, `supported_machines`, `supported_machines_count`), all
-  resolved by `-D` renames at compile. `server main()` -> `wineserver_main()`.
-- The only missing OS primitive is the client<->server AF_UNIX socket:
-  `wasm_ipc.c` provides it as in-memory ring buffers + an fd queue behind "magic"
-  fd numbers, linked with `-Wl,--wrap=` on the **data plane only**
-  (read/write/close/poll/fcntl/sendmsg/recvmsg); the server's own real socket
-  calls (`sock_check_pollhup`, master socket) are left to emscripten. The
-  client/server channel is created explicitly (`webwine_make_channel`).
-- Tree changes that make the server build+run for wasm (committed): `server/fd.c`
-  epoll guard (`WINE_INPROC_POLL`), `server/registry.c` wasm32 machine case,
-  `server/sock.c` BPF guard, `server/main.c` `wineserver_main`/foreground,
-  `server/request.c` master-socket skip on `__wasm32__`.
+```
+webwine: booting in-process wineserver (fd 768)
+webwine: entering wine client __wine_main
+0024: init_first_thread() = 0 { ... machines={014c} }        # server handshake
+0024: open_mapping(...__wine_user_shared_data) = 0            # + fd passing
+0024: get_token_sid() = 0 { sid=S-1-5-21-0-0-0-1000 }
+0024: create_key(...\Software\Wine) ...                       # registry
+... (a full flood of real client<->server RPCs) ...
+wine-wasm: CPU bridge entry 'signal_start_thread' reached (guest execution requested)
+```
 
-**Boot reaches the client<->server request/reply exchange.** The server initializes fully
-(sock_init, registry, client injection), returns from `wineserver_main` in COOP
-mode, and the client enters `__wine_main` and connects to fd 769. Transport
-proven: data + SCM_RIGHTS fd passing both cross the ring buffer (earlier run
-logged `fd 21/23 passed over 769`).
+So the **entire Wine runtime runs as native WebAssembly**: the loader, the
+virtual-memory manager, the registry, NLS, process/thread init, the in-process
+wineserver protocol (requests, replies, SCM_RIGHTS fd passing), and the **PE
+`ntdll.dll` is loaded**. `signal_start_thread` is the seam where Wine hands
+control to the guest's entry point — the one remaining subsystem is the x86->wasm
+emulator that runs there (and at `__wine_syscall_dispatcher`).
 
-### Current frontier (the resumption point)
+### What made it work (all in this tree / webwine/)
 
-Data now flows **both directions** over the transport, plus SCM_RIGHTS fd
-passing and real-file reads (NLS/registry via node `fs`). The boot advanced
-through: server init -> client inject -> `__wine_main` -> config dir -> NLS +
-registry -> reply/wait pipes -> **the first server request writes, and the
-client blocks reading the reply**. Fixes that got here, all channel-backed via
-`webwine_make_channel` (ring buffers behind magic fds): `server_pipe()` in
-`dlls/ntdll/unix/server.c` and `pipe(request_pipe)` in `server/thread.c`; the
-transport uses strong symbol overrides (not `-Wl,--wrap`, which does not
-intercept Wine's calls into precompiled libc) and delegates non-magic fds to
-node `fs` via `EM_JS`.
-
-**Solved since:** identity-fd channels needed **refcounting** — passing a pipe
-end via SCM_RIGHTS then closing the local copy (normal pipe semantics) was
-destroying the channel the peer still used; `wasm_ipc.c` now refs++ on pass,
-refs-- on close, free at zero. The request/reply channels are created correctly
-(no fd reuse), **the request is written by the client, delivered through the
-ring, and read by the server** (drive poll returns ready, read_request runs).
-
-**The one remaining piece:** `wineserver_inproc_drive()` must process the
-pending request. The client's `wait_reply` read spins the drive but the reply
-is not produced within the spin budget (`read: Resource temporarily
-unavailable`). The drive does non-blocking `poll()` sweeps over the server fd
-set + `fd_poll_event`; the request arrives on the server's request_fd (a magic
-channel) — verify `poll()` reports POLLIN for it (the override does) and that
-`fd_poll_event`/`read_request` runs and writes the reply to the client's
-reply channel. Likely a small wiring/ordering fix (register the request_fd's
-events, or raise the read-side spin/drive budget). Once the version handshake
-completes, the client loads `ntdll.dll` (PE) and hits the CPU-bridge seam.
+- **Transport** (`wasm_ipc.c`): strong symbol overrides for the AF_UNIX data
+  plane (not `-Wl,--wrap`, which misses Wine's calls into precompiled libc);
+  ring buffers + fd queue behind magic fds; **refcounted** channels (passing a
+  fd co-owns it, close frees at zero — fixes fd-number reuse from normal
+  pipe-close semantics); **`writev`/`readv` overrides** (Wine's
+  send_request/send_reply use them — the decisive fix); one-fd-per-`recvmsg`
+  (Wine pairs one fd per `send_fd`); blocking magic-fd reads (Wine's wait_reply
+  treats EAGAIN as fatal); non-magic fds delegate to node `fs` via `EM_JS`;
+  `ioctl` handles the terminal queries emscripten's node tty stub crashes on.
+- **Tree** (all `__wasm32__`-guarded / additive): `server/registry.c` machine
+  case; `server/fd.c` poll backend; `server/sock.c` BPF guard; `server/main.c`
+  `wineserver_main` + foreground; `server/request.c` skip master AF_UNIX socket;
+  `server/thread.c` request pipe via the channel factory;
+  `dlls/ntdll/unix/server.c` `server_pipe` via the channel factory.
+- **Link/run**: `-sENVIRONMENT=node` (default multi-env asserts corrupt the
+  reply path); the install-tree unix dir MUST be named `i386-unix` (current
+  machine is i386 on wasm) so the loader resolves the PE dir to `i386-windows`.
 
 ## What's left (the two hard subsystems)
+
+
 
 1. **In-process wineserver.** Committed already (`server/main.c`,
    `server/fd.c` `wineserver_inproc_drive`, `dlls/ntdll/unix/server.c` — the iOS

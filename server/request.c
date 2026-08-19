@@ -383,6 +383,15 @@ int receive_fd( struct process *process )
             if (cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg);
         }
     }
+#if defined(__wasm32__)
+    {
+        static int rt = -1;
+        if (rt < 0) { const char *e = getenv("WINEWASMIPCTRACE"); rt = e && *e && *e!='0'; }
+        if (rt) fprintf( stderr, "wasm_ipc: receive_fd msg_fd=%d ret=%d gotfd=%d logical=%d tid=%04x\n",
+                         get_unix_fd( process->msg_fd ), ret, fd, ret==(int)sizeof(data)?data.fd:-1,
+                         ret==(int)sizeof(data)?data.tid:0 );
+    }
+#endif
 
     if (ret == sizeof(data))
     {

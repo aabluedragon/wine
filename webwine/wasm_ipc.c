@@ -1,16 +1,20 @@
 /*
- * In-process AF_UNIX transport for the single-module wasm Wine.
+ * In-process AF_UNIX transport + terminal ioctl for the single-module wasm Wine.
  *
  * The wine client and wineserver live in ONE wasm module (cooperative,
- * single-threaded; the client drives the server via wineserver_inproc_drive).
- * The only piece of Unix plumbing emscripten lacks for that arrangement is
- * the AF_UNIX socket between them: byte stream + SCM_RIGHTS fd passing.
- * Since both ends share one process and one fd table, fd passing is the
- * identity function — so the whole transport is a pair of in-memory ring
- * buffers plus an fd queue, surfaced through "magic" fd numbers.
+ * single-threaded; the client drives the server via wineserver_inproc_drive()).
+ * The only Unix plumbing emscripten lacks for that arrangement is the AF_UNIX
+ * socket between them (byte stream + SCM_RIGHTS fd passing) and working
+ * reply/request pipes. Both ends share one process and one fd table, so fd
+ * passing is the identity function (refcounted: passing a fd co-owns its
+ * channel, close frees at zero) and the transport is a pair of ring buffers +
+ * an fd queue behind "magic" fd numbers.
  *
- * Real fds keep working: overridden entry points delegate to the WASI/
- * syscall layer for non-magic fds.
+ * These are STRONG symbol overrides (not -Wl,--wrap, which does not intercept
+ * Wine's calls into emscripten's precompiled libc). read/write/readv/writev/
+ * recvmsg/close/poll/fcntl route magic fds through the rings and delegate real
+ * fds to node fs via EM_JS; ioctl handles the terminal queries emscripten's
+ * node tty stub crashes on.
  */
 
 #include <errno.h>
@@ -27,6 +31,8 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <emscripten.h>
 
 
@@ -136,7 +142,6 @@ ssize_t sendmsg( int fd, const struct msghdr *msg, int flags )
     struct cmsghdr *cmsg;
     size_t total = 0, i;
 
-    if (trace()) fprintf( stderr, "wasm_ipc: sendmsg fd=%d magic=%d\n", fd, is_magic(fd) );
     if (!is_magic( fd )) { errno = EBADF; return -1; }
     self = chan_of( fd );
     if (self->peer < 0) { errno = ENOTCONN; return -1; }
@@ -178,7 +183,7 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
     {
         /* cooperative single thread: let the server produce the data */
         if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
-        if (++spins > 64) { errno = EAGAIN; return -1; }
+        if (++spins > 2000000) { errno = EAGAIN; return -1; }
     }
 
     for (i = 0; i < (size_t)msg->msg_iovlen && ring_avail( self ); i++)
@@ -193,7 +198,10 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
         if (cmsg && maxfds)
         {
             out = (int *)CMSG_DATA( cmsg );
-            while (n < maxfds && (self->fdq_tail - self->fdq_head))
+            /* Wine's protocol pairs exactly ONE fd with one send_fd payload per
+             * recvmsg; delivering more here would starve later receive_fd calls
+             * of their fd (they would read the data but get no descriptor). */
+            if (n < maxfds && (self->fdq_tail - self->fdq_head))
                 out[n++] = self->fdq[self->fdq_head++ % FDQ_SIZE];
             cmsg->cmsg_level = SOL_SOCKET;
             cmsg->cmsg_type  = SCM_RIGHTS;
@@ -205,11 +213,69 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
     return got;
 }
 
+/* writev/readv: Wine's send_request/send_reply/read_request use these on the
+ * socket + reply/request pipes, so they must honor magic fds too. */
+extern ssize_t write( int fd, const void *buf, size_t count );
+extern ssize_t read( int fd, void *buf, size_t count );
+
+ssize_t writev( int fd, const struct iovec *iov, int iovcnt )
+{
+    if (is_magic( fd ))
+    {
+        struct chan *self = chan_of( fd ), *peer;
+        size_t total = 0; int i;
+        if (self->peer < 0) { errno = ENOTCONN; return -1; }
+        peer = &chans[self->peer];
+        for (i = 0; i < iovcnt; i++) total += iov[i].iov_len;
+        if (ring_space( peer ) < total) { errno = EAGAIN; return -1; }
+        for (i = 0; i < iovcnt; i++) ring_write( peer, iov[i].iov_base, iov[i].iov_len );
+        return total;
+    }
+    {
+        ssize_t total = 0; int i;
+        for (i = 0; i < iovcnt; i++)
+        {
+            ssize_t r = write( fd, iov[i].iov_base, iov[i].iov_len );
+            if (r < 0) return total ? total : -1;
+            total += r;
+            if ((size_t)r < iov[i].iov_len) break;
+        }
+        return total;
+    }
+}
+
+ssize_t readv( int fd, const struct iovec *iov, int iovcnt )
+{
+    if (is_magic( fd ))
+    {
+        struct chan *self = chan_of( fd );
+        size_t got = 0; int i, spins = 0;
+        while (!ring_avail( self ))
+        {
+            if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
+            if (++spins > 2000000) { errno = EAGAIN; return -1; }
+        }
+        for (i = 0; i < iovcnt && ring_avail( self ); i++)
+            got += ring_read( self, iov[i].iov_base, iov[i].iov_len );
+        return got;
+    }
+    {
+        ssize_t total = 0; int i;
+        for (i = 0; i < iovcnt; i++)
+        {
+            ssize_t r = read( fd, iov[i].iov_base, iov[i].iov_len );
+            if (r < 0) return total ? total : -1;
+            total += r;
+            if ((size_t)r < iov[i].iov_len) break;
+        }
+        return total;
+    }
+}
+
 /* byte-stream read/write on magic fds; delegate real fds to WASI */
 
 ssize_t read( int fd, void *buf, size_t count )
 {
-    if (trace()) fprintf( stderr, "wasm_ipc: read fd=%d n=%zu magic=%d\n", fd, count, is_magic(fd) );
     if (is_magic( fd ))
     {
         struct chan *self = chan_of( fd );
@@ -217,7 +283,7 @@ ssize_t read( int fd, void *buf, size_t count )
         while (!ring_avail( self ))
         {
             if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
-            if (++spins > 64) { errno = EAGAIN; return -1; }
+            if (++spins > 2000000) { errno = EAGAIN; return -1; }
         }
         return ring_read( self, buf, count );
     }
@@ -230,7 +296,6 @@ ssize_t read( int fd, void *buf, size_t count )
 
 ssize_t write( int fd, const void *buf, size_t count )
 {
-    if (trace()) fprintf( stderr, "wasm_ipc: write fd=%d n=%zu magic=%d\n", fd, count, is_magic(fd) );
     if (is_magic( fd ))
     {
         struct chan *self = chan_of( fd );
@@ -332,5 +397,36 @@ int fcntl( int fd, int cmd, ... )
     case F_GETFD: return 0;
     case F_SETFL: case F_SETFD: return 0;
     default: return 0;
+    }
+}
+
+
+/* emscripten's ___syscall_ioctl crashes on TIOCGWINSZ for non-tty node fds
+ * (stream.tty is undefined). Provide sane terminal ioctls ourselves. */
+int ioctl( int fd, int request, ... )
+{
+    va_list ap;
+    void *arg;
+    va_start( ap, request );
+    arg = va_arg( ap, void * );
+    va_end( ap );
+
+    switch (request)
+    {
+    case TIOCGWINSZ:
+    {
+        struct winsize *ws = arg;
+        if (ws) { ws->ws_row = 25; ws->ws_col = 80; ws->ws_xpixel = 0; ws->ws_ypixel = 0; }
+        return 0;
+    }
+    case TIOCGPGRP: if (arg) *(int *)arg = getpid(); return 0;
+    case TIOCSPGRP: return 0;
+    case FIONREAD:
+        if (is_magic( fd )) { struct chan *c = chan_of( fd ); if (arg) *(int *)arg = (int)ring_avail( c ); return 0; }
+        if (arg) *(int *)arg = 0; return 0;
+    case FIONBIO: return 0;
+    default:
+        errno = ENOTTY;
+        return -1;
     }
 }

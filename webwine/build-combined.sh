@@ -55,12 +55,17 @@ echo "$OUT/wasm_cpu_bridge.o" >> "$OUT/objs.rsp"
 echo "$OUT/wasm_vm.o"       >> "$OUT/objs.rsp"
 echo "$OUT/wasm_ipc.o"      >> "$OUT/objs.rsp"
 
-WRAPS="-Wl,--wrap=read -Wl,--wrap=write -Wl,--wrap=close -Wl,--wrap=poll -Wl,--wrap=fcntl -Wl,--wrap=sendmsg -Wl,--wrap=recvmsg"
-emcc -g -O1 @"$OUT/objs.rsp" $WRAPS -o "$OUT/webwine.js" \
-  -sNODERAWFS=1 -sASSERTIONS=1 \
+# wasm_ipc.c uses STRONG symbol overrides (not -Wl,--wrap: that does not
+# intercept Wine's calls into emscripten's precompiled libc). -sENVIRONMENT=node
+# is required (default multi-env asserts corrupt the reply path).
+emcc -g -O1 @"$OUT/objs.rsp" -o "$OUT/webwine.js" \
+  -sNODERAWFS=1 -sASSERTIONS=1 -sENVIRONMENT=node \
   -sGLOBAL_BASE=1879048192 -sINITIAL_MEMORY=2147483648 -sALLOW_MEMORY_GROWTH=0
 
 echo "[5/5] done -> $OUT/webwine.js"
-echo "run: WINELOADERNOEXEC=1 WINE_NO_SERVER_SPAWN=1 WINEUNIXDIR=<fakeroot>/lib/wine/wasm32-unix \\"
-echo "     WINEDLLPATH=<fakeroot>/lib/wine WINEDATADIR=<wine>/share/wine WINEPREFIX=<prefix> \\"
-echo "     node $OUT/webwine.js ret42.exe"
+echo "make a fakeroot with webwine/make-fakeroot.sh, then:"
+echo "  WINELOADERNOEXEC=1 WINE_NO_SERVER_SPAWN=1 WINEUNIXDIR=<root>/lib/wine/i386-unix \\"
+echo "  WINEDLLPATH=<root>/lib/wine WINEDATADIR=<wine>/share/wine WINEPREFIX=<prefix> \\"
+echo "  node $OUT/webwine.js ret42.exe"
+echo "Expected: boots through the wineserver handshake + registry + PE ntdll.dll,"
+echo "then stops at the CPU-bridge seam: 'signal_start_thread ... not yet implemented'."
