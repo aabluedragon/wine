@@ -27,10 +27,11 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <emscripten.h>
 
 
 #define MAGIC_BASE  0x300
-#define MAGIC_COUNT 8
+#define MAGIC_COUNT 64
 #define RING_SIZE   0x20000
 #define FDQ_SIZE    64
 
@@ -50,11 +51,22 @@ static struct chan chans[MAGIC_COUNT];
 extern void wineserver_inproc_drive(void) __attribute__((weak));
 
 /* real libc entry points, reached for non-magic fds (linker --wrap) */
-extern ssize_t __real_read( int fd, void *buf, size_t count );
-extern ssize_t __real_write( int fd, const void *buf, size_t count );
-extern int __real_close( int fd );
-extern int __real_poll( struct pollfd *fds, nfds_t nfds, int timeout );
-extern int __real_fcntl( int fd, int cmd, ... );
+/* Delegate non-magic fds to node's fs (NODERAWFS uses real OS fds). */
+extern long __syscall_poll( long fds, long nfds, long timeout );
+EM_JS(long, host_read, (int fd, void *buf, size_t n), {
+  try { var b = Buffer.from(HEAPU8.buffer, buf, n);
+        return require('fs').readSync(fd, b, 0, n, null); }
+  catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
+});
+EM_JS(long, host_write, (int fd, const void *buf, size_t n), {
+  try { var b = Buffer.from(HEAPU8.buffer, buf, n);
+        return require('fs').writeSync(fd, b, 0, n, null); }
+  catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
+});
+EM_JS(long, host_close, (int fd), {
+  try { require('fs').closeSync(fd); return 0; }
+  catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
+});
 
 static int is_magic( int fd ) { return fd >= MAGIC_BASE && fd < MAGIC_BASE + MAGIC_COUNT && chans[fd - MAGIC_BASE].used; }
 static struct chan *chan_of( int fd ) { return &chans[fd - MAGIC_BASE]; }
@@ -115,12 +127,13 @@ int webwine_make_channel( int sv[2] )
 
 /* ---- data-plane wrappers (only touch magic fds) ---- */
 
-ssize_t __wrap_sendmsg( int fd, const struct msghdr *msg, int flags )
+ssize_t sendmsg( int fd, const struct msghdr *msg, int flags )
 {
     struct chan *self, *peer;
     struct cmsghdr *cmsg;
     size_t total = 0, i;
 
+    if (trace()) fprintf( stderr, "wasm_ipc: sendmsg fd=%d magic=%d\n", fd, is_magic(fd) );
     if (!is_magic( fd )) { errno = EBADF; return -1; }
     self = chan_of( fd );
     if (self->peer < 0) { errno = ENOTCONN; return -1; }
@@ -148,7 +161,7 @@ ssize_t __wrap_sendmsg( int fd, const struct msghdr *msg, int flags )
     return total;
 }
 
-ssize_t __wrap_recvmsg( int fd, struct msghdr *msg, int flags )
+ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
 {
     struct chan *self;
     size_t got = 0, i;
@@ -190,8 +203,9 @@ ssize_t __wrap_recvmsg( int fd, struct msghdr *msg, int flags )
 
 /* byte-stream read/write on magic fds; delegate real fds to WASI */
 
-ssize_t __wrap_read( int fd, void *buf, size_t count )
+ssize_t read( int fd, void *buf, size_t count )
 {
+    if (trace()) fprintf( stderr, "wasm_ipc: read fd=%d n=%zu magic=%d\n", fd, count, is_magic(fd) );
     if (is_magic( fd ))
     {
         struct chan *self = chan_of( fd );
@@ -203,11 +217,16 @@ ssize_t __wrap_read( int fd, void *buf, size_t count )
         }
         return ring_read( self, buf, count );
     }
-    return __real_read( fd, buf, count );
+    {
+        long r = host_read( fd, buf, count );
+        if (r < 0) { errno = -r; return -1; }
+        return r;
+    }
 }
 
-ssize_t __wrap_write( int fd, const void *buf, size_t count )
+ssize_t write( int fd, const void *buf, size_t count )
 {
+    if (trace()) fprintf( stderr, "wasm_ipc: write fd=%d n=%zu magic=%d\n", fd, count, is_magic(fd) );
     if (is_magic( fd ))
     {
         struct chan *self = chan_of( fd );
@@ -218,17 +237,25 @@ ssize_t __wrap_write( int fd, const void *buf, size_t count )
         ring_write( peer, buf, count );
         return count;
     }
-    return __real_write( fd, buf, count );
+    {
+        long r = host_write( fd, buf, count );
+        if (r < 0) { errno = -r; return -1; }
+        return r;
+    }
 }
 
-int __wrap_close( int fd )
+int close( int fd )
 {
     if (is_magic( fd )) { chan_of( fd )->used = 0; return 0; }
-    return __real_close( fd );
+    {
+        long r = host_close( fd );
+        if (r < 0) { errno = -r; return -1; }
+        return 0;
+    }
 }
 
 /* poll: answer for magic fds ourselves, delegate the rest */
-int __wrap_poll( struct pollfd *fds, nfds_t nfds, int timeout )
+int poll( struct pollfd *fds, nfds_t nfds, int timeout )
 {
     int ready = 0;
     nfds_t i;
@@ -264,7 +291,7 @@ int __wrap_poll( struct pollfd *fds, nfds_t nfds, int timeout )
                 map[n++] = i;
             }
         }
-        r = __real_poll( tmp, n, 0 );
+        r = __syscall_poll( (long)tmp, n, 0 );
         if (r > 0)
         {
             int j;
@@ -276,13 +303,14 @@ int __wrap_poll( struct pollfd *fds, nfds_t nfds, int timeout )
 }
 
 /* fcntl: accept anything on magic fds, delegate the rest */
-int __wrap_fcntl( int fd, int cmd, ... )
+int fcntl( int fd, int cmd, ... )
 {
     va_list args;
     intptr_t arg;
     va_start( args, cmd );
     arg = va_arg( args, intptr_t );
     va_end( args );
+    if (trace()) fprintf( stderr, "wasm_ipc: fcntl fd=%d cmd=%d magic=%d\n", fd, cmd, is_magic(fd) );
     if (is_magic( fd ))
     {
         switch (cmd)
@@ -294,5 +322,11 @@ int __wrap_fcntl( int fd, int cmd, ... )
         default: return 0;
         }
     }
-    return __real_fcntl( fd, cmd, arg );
+    switch (cmd)
+    {
+    case F_GETFL: return O_RDWR;
+    case F_GETFD: return 0;
+    case F_SETFL: case F_SETFD: return 0;
+    default: return 0;
+    }
 }

@@ -1354,6 +1354,13 @@ NTSTATUS unixcall_wine_server_handle_to_fd( void *args )
 int server_pipe( int fd[2] )
 {
     int ret;
+#if defined(__wasm32__)
+    /* No OS pipes in the single-module wasm build: back reply/wait pipes with
+     * the same in-process ring-buffer channels used for the server socket.
+     * fd[0] is the read end, fd[1] the write end (one direction is used). */
+    extern int webwine_make_channel( int sv[2] );
+    return webwine_make_channel( fd );
+#endif
 #ifdef HAVE_PIPE2
     static BOOL have_pipe2 = TRUE;
 

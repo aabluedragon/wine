@@ -66,30 +66,35 @@ both. Results:
   `server/sock.c` BPF guard, `server/main.c` `wineserver_main`/foreground,
   `server/request.c` master-socket skip on `__wasm32__`.
 
-**Boot reaches the client<->server handshake.** The server initializes fully
+**Boot reaches the client<->server request/reply exchange.** The server initializes fully
 (sock_init, registry, client injection), returns from `wineserver_main` in COOP
 mode, and the client enters `__wine_main` and connects to fd 769. Transport
 proven: data + SCM_RIGHTS fd passing both cross the ring buffer (earlier run
 logged `fd 21/23 passed over 769`).
 
-### Exact current failures (the resumption to-do)
+### Current frontier (the resumption point)
 
-1. Server `send_reply` path: `Protocol error: process 0020: sendmsg: Bad file
-   descriptor`. The reply mechanism uses per-thread **reply pipes**: the client
-   creates them with `server_pipe()` (pipe/socketpair) and passes the write end
-   to the server via SCM_RIGHTS; the server `sendmsg`s replies back over that fd.
-   Under emscripten `pipe()`/`socketpair()` don't yield working fds, so this
-   needs the transport to also back **reply pipes** with magic channels (route
-   `server_pipe` through `webwine_make_channel`, or emulate `pipe()`). This is
-   the same ring-buffer machinery, applied to a second fd pair.
-2. Client: `wine: Bad server socket 769 : Bad file descriptor` — a socket call
-   the client makes on `fd_socket` during `server_init_process` (likely a
-   `getsockopt`/`setsockopt`/`recv` not yet wrapped). Trace which with
-   `WINEWASMIPCTRACE=1` and add the wrapper.
+Data now flows **both directions** over the transport, plus SCM_RIGHTS fd
+passing and real-file reads (NLS/registry via node `fs`). The boot advanced
+through: server init -> client inject -> `__wine_main` -> config dir -> NLS +
+registry -> reply/wait pipes -> **the first server request writes, and the
+client blocks reading the reply**. Fixes that got here, all channel-backed via
+`webwine_make_channel` (ring buffers behind magic fds): `server_pipe()` in
+`dlls/ntdll/unix/server.c` and `pipe(request_pipe)` in `server/thread.c`; the
+transport uses strong symbol overrides (not `-Wl,--wrap`, which does not
+intercept Wine's calls into precompiled libc) and delegates non-magic fds to
+node `fs` via `EM_JS`.
 
-Item 1 also needs reply-pipe backing (above); item 2 a wrapper. Once the
-handshake completes, the client loads `ntdll.dll` (PE) and hits the CPU-bridge
-seam (`__wine_syscall_dispatcher`) — the second hard subsystem below.
+**The one remaining piece:** `wineserver_inproc_drive()` must process the
+pending request. The client's `wait_reply` read spins the drive but the reply
+is not produced within the spin budget (`read: Resource temporarily
+unavailable`). The drive does non-blocking `poll()` sweeps over the server fd
+set + `fd_poll_event`; the request arrives on the server's request_fd (a magic
+channel) — verify `poll()` reports POLLIN for it (the override does) and that
+`fd_poll_event`/`read_request` runs and writes the reply to the client's
+reply channel. Likely a small wiring/ordering fix (register the request_fd's
+events, or raise the read-side spin/drive budget). Once the version handshake
+completes, the client loads `ntdll.dll` (PE) and hits the CPU-bridge seam.
 
 ## What's left (the two hard subsystems)
 

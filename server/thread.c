@@ -460,7 +460,14 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
 
     if (fd == -1)
     {
+#if defined(__wasm32__)
+        /* single-module in-process build: back the request channel with the
+         * ring-buffer transport instead of an OS pipe (see webwine/wasm_ipc.c) */
+        extern int webwine_make_channel( int sv[2] );
+        if (webwine_make_channel( request_pipe ) == -1)
+#else
         if (pipe( request_pipe ) == -1)
+#endif
         {
             file_set_error();
             return NULL;
