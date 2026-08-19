@@ -38,6 +38,7 @@
 struct chan
 {
     int   used;
+    int   refs;
     int   listener;         /* master-socket dummy: never readable */
     int   peer;             /* index of peer chan */
     char  ring[RING_SIZE];  /* data written BY the peer, read by us */
@@ -119,6 +120,8 @@ int webwine_make_channel( int sv[2] )
     if (a < 0 || b < 0) return -1;
     chans[a].peer = b;
     chans[b].peer = a;
+    chans[a].refs = 1;
+    chans[b].refs = 1;
     sv[0] = MAGIC_BASE + a;
     sv[1] = MAGIC_BASE + b;
     if (trace()) fprintf( stderr, "wasm_ipc: channel -> %d,%d\n", sv[0], sv[1] );
@@ -152,7 +155,8 @@ ssize_t sendmsg( int fd, const struct msghdr *msg, int flags )
             {
                 if (peer->fdq_tail - peer->fdq_head >= FDQ_SIZE) { errno = ENOBUFS; return -1; }
                 peer->fdq[peer->fdq_tail++ % FDQ_SIZE] = fds[i];
-                if (trace()) fprintf( stderr, "wasm_ipc: fd %d passed over %d\n", fds[i], fd );
+                if (is_magic( fds[i] )) chan_of( fds[i] )->refs++;  /* receiver co-owns */
+                if (trace()) fprintf( stderr, "wasm_ipc: fd %d passed over %d (refs=%d)\n", fds[i], fd, is_magic(fds[i])?chan_of(fds[i])->refs:-1 );
             }
         }
     }
@@ -246,7 +250,7 @@ ssize_t write( int fd, const void *buf, size_t count )
 
 int close( int fd )
 {
-    if (is_magic( fd )) { chan_of( fd )->used = 0; return 0; }
+    if (is_magic( fd )) { struct chan *c = chan_of( fd ); if (--c->refs <= 0) c->used = 0; return 0; }
     {
         long r = host_close( fd );
         if (r < 0) { errno = -r; return -1; }

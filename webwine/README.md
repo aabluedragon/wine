@@ -85,6 +85,13 @@ transport uses strong symbol overrides (not `-Wl,--wrap`, which does not
 intercept Wine's calls into precompiled libc) and delegates non-magic fds to
 node `fs` via `EM_JS`.
 
+**Solved since:** identity-fd channels needed **refcounting** — passing a pipe
+end via SCM_RIGHTS then closing the local copy (normal pipe semantics) was
+destroying the channel the peer still used; `wasm_ipc.c` now refs++ on pass,
+refs-- on close, free at zero. The request/reply channels are created correctly
+(no fd reuse), **the request is written by the client, delivered through the
+ring, and read by the server** (drive poll returns ready, read_request runs).
+
 **The one remaining piece:** `wineserver_inproc_drive()` must process the
 pending request. The client's `wait_reply` read spins the drive but the reply
 is not produced within the spin budget (`read: Resource temporarily
