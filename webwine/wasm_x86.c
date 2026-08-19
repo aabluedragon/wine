@@ -79,41 +79,10 @@ static int trace(void)
 
 /* ---- flat memory (identity map) ---- */
 uint32_t g_insn_eip;   /* address of the instruction currently executing (debug) */
-uint32_t g_peb;        /* guest PEB address (debug) */
-struct callrec { uint32_t site, target, arg0, arg1; };
-struct callrec g_callring[32];
-int g_callpos;
-int g_lowwrite_dumped;
-static void dump_callring(void)
-{
-    int i;
-    if (g_peb)
-        fprintf( stderr, "wasm_x86: PEB=%08x ProcessHeap=%08x [PEB+0x1c]=%08x\n",
-                 g_peb, *(uint32_t*)(uintptr_t)(g_peb+0x18), *(uint32_t*)(uintptr_t)(g_peb+0x1c) );
-    fprintf( stderr, "wasm_x86: --- recent calls (oldest first) ---\n" );
-    for (i = 0; i < 32; i++)
-    {
-        struct callrec *r = &g_callring[(g_callpos + i) & 31];
-        if (r->site)
-            fprintf( stderr, "wasm_x86:   %08x -> %08x  (arg0=%08x arg1=%08x)\n",
-                     r->site, r->target, r->arg0, r->arg1 );
-    }
-}
 static inline void wguard( uint32_t a )
 {
     if (a < 0x10000 && trace())
-    {
         fprintf( stderr, "wasm_x86: LOW WRITE addr=%08x from insn @ %08x\n", a, g_insn_eip );
-        if (!g_lowwrite_dumped) { g_lowwrite_dumped = 1; dump_callring(); }
-    }
-}
-static inline uint32_t rd32_(uint32_t a){ return *(uint32_t*)(uintptr_t)a; }
-static inline void record_call( uint32_t site, uint32_t target, uint32_t esp )
-{
-    struct callrec *r = &g_callring[g_callpos & 31];
-    r->site = site; r->target = target;
-    r->arg0 = rd32_(esp+4); r->arg1 = rd32_(esp+8);
-    g_callpos++;
 }
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
@@ -378,7 +347,7 @@ static void run( struct x86cpu *c )
             {
             case 0: a = read_rm(c,&m,os); r = a+1; write_rm(c,&m,os,r); set_lazy(c,K_INC,a,1,r,os); break; /* inc */
             case 1: a = read_rm(c,&m,os); r = a-1; write_rm(c,&m,os,r); set_lazy(c,K_DEC,a,1,r,os); break; /* dec */
-            case 2: a = read_rm(c,&m,os); push32(c, d.eip); c->eip = a; record_call(start,a,c->regs[ESP]); goto next; /* call r/m */
+            case 2: a = read_rm(c,&m,os); push32(c, d.eip); c->eip = a; goto next; /* call r/m */
             case 4: a = read_rm(c,&m,os); c->eip = a; goto next; /* jmp r/m */
             case 6: push32(c, read_rm(c,&m,os)); break; /* push r/m */
             default: unimplemented(c,start,op); return;
@@ -454,7 +423,7 @@ static void run( struct x86cpu *c )
         case 0x90: break; /* nop / xchg eax,eax */
 
         /* control flow */
-        case 0xe8: { int32_t rel = f32(&d); push32(c, d.eip); c->eip = d.eip + rel; record_call(start,c->eip,c->regs[ESP]); goto next; } /* call rel */
+        case 0xe8: { int32_t rel = f32(&d); push32(c, d.eip); c->eip = d.eip + rel; goto next; } /* call rel */
         case 0xe9: { int32_t rel = f32(&d); c->eip = d.eip + rel; goto next; }
         case 0xeb: { int32_t rel = (int8_t)f8(&d); c->eip = d.eip + rel; goto next; }
         case 0xc3: c->eip = pop32(c); goto next;                 /* ret */
@@ -910,6 +879,17 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         if (num == 0x2c) /* NtTerminateProcess(handle, exit_status) */
             fprintf( stderr, "wasm_x86: *** NtTerminateProcess handle=%08x exit_status=%08x (%u) ***\n",
                      args[0], args[1], args[1] );
+        if (num == 0x43) /* NtContinue(context, alert): restore CPU state and jump */
+        {
+            uint32_t ctxp = args[0];
+            c->regs[EDI]=rd32(ctxp+0x9c); c->regs[ESI]=rd32(ctxp+0xa0); c->regs[EBX]=rd32(ctxp+0xa4);
+            c->regs[EDX]=rd32(ctxp+0xa8); c->regs[ECX]=rd32(ctxp+0xac); c->regs[EAX]=rd32(ctxp+0xb0);
+            c->regs[EBP]=rd32(ctxp+0xb4); c->eflags=rd32(ctxp+0xc0); c->regs[ESP]=rd32(ctxp+0xc4);
+            c->eip=rd32(ctxp+0xb8); c->lf_size=0;
+            if (trace()) fprintf( stderr, "wasm_x86: NtContinue -> eip=%08x esp=%08x eax=%08x ebx=%08x\n",
+                                  c->eip, c->regs[ESP], c->regs[EAX], c->regs[EBX] );
+            return 1;
+        }
         c->regs[EAX] = call_handler( fn, nargs, args );
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x returned eax=%08x ret_eip=%08x\n", num, c->regs[EAX], ret_eip );
         c->eip = ret_eip;
@@ -981,12 +961,10 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
     g_cpu.lf_size = 0;
     g_cpu.fs_base = (uint32_t)(uintptr_t)teb;   /* i386 fs -> TEB linear address */
     g_cpu.gs_base = 0;
-    g_peb = rd32( (uint32_t)(uintptr_t)teb + 0x30 );
 
-    fprintf( stderr, "wasm_x86: signal_start_thread entry=%p thunk=%p ctx=%p stack=%p\n",
-             (void*)entry, pLdrInitializeThunk, (void*)ctx, (void*)stack );
-    fprintf( stderr, "wasm_x86: TEB=%p fs:[0x18](Self)=%08x fs:[0x30](Peb)=%08x\n",
-             (void*)teb, rd32((uint32_t)(uintptr_t)teb + 0x18), rd32((uint32_t)(uintptr_t)teb + 0x30) );
+    if (trace())
+        fprintf( stderr, "wasm_x86: signal_start_thread entry=%p thunk=%p teb=%p\n",
+                 (void*)entry, pLdrInitializeThunk, (void*)teb );
 
     run( &g_cpu );
 

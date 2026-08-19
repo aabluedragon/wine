@@ -316,6 +316,10 @@ ssize_t write( int fd, const void *buf, size_t count )
 int close( int fd )
 {
     if (is_magic( fd )) { struct chan *c = chan_of( fd ); if (--c->refs <= 0) c->used = 0; return 0; }
+    /* In-process (single process) mode: the wineserver shares node's fd table,
+     * so closing the std streams (0/1/2) would close node's real stdio and kill
+     * the process. The guest's std handles alias these fds; keep them open. */
+    if (fd >= 0 && fd <= 2) return 0;
     {
         long r = host_close( fd );
         if (r < 0) { errno = -r; return -1; }
