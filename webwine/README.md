@@ -10,6 +10,23 @@ paid only by the game's own instructions.
 This is the ARM-Mac Wine model (native Wine + Rosetta for app code), ported to
 the browser (native-wasm Wine + an x86→wasm emulator for app code).
 
+## Status: an unmodified i386 exe runs end-to-end and returns 42 ✅✅
+
+`node out/webwine.js 'c:\ret42.exe'` **exits with code 42**. ret42.exe is an
+unmodified i386 PE that calls `ExitProcess(42)`; it boots through PE ntdll and
+kernel32 (400+ syscalls, all serviced by the native-wasm Wine unix side + the
+in-process wineserver) and runs its own entry point. Only the guest x86 is
+emulated, by the standalone interpreter `wasm_x86.c`. No BoxedWine.
+
+Getting here took six interpreter-correctness fixes (adc/sbb carry-in, the
+`fs:` segment base on both ModRM and moffs `mov`s, TEB->WOW32Reserved as the
+`call fs:[0xc0]` syscall-dispatcher pointer, shift/inc-dec flags, SHLD/SHRD,
+and in-interpreter **NtContinue**) plus keeping the shared-fd-table wineserver
+from closing node's std streams. See the `webwine-native-wasm-ret42` memory for
+the full list and the exact reconstruction/run recipe (the run needs a `c:`
+drive mapping and a `C:\windows\system32` symlink to the builtin PE dlls so the
+loader resolves kernel32).
+
 ## Status: the unix side boots as native WebAssembly ✅
 
 `build-wasm4/` is a cross-build of Wine's normal Unix layout for
