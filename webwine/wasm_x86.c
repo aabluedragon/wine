@@ -79,6 +79,7 @@ static int trace(void)
 
 /* ---- flat memory (identity map) ---- */
 uint32_t g_insn_eip;   /* address of the instruction currently executing (debug) */
+uint32_t g_peb;        /* guest PEB address (debug) */
 struct callrec { uint32_t site, target, arg0, arg1; };
 struct callrec g_callring[32];
 int g_callpos;
@@ -86,6 +87,9 @@ int g_lowwrite_dumped;
 static void dump_callring(void)
 {
     int i;
+    if (g_peb)
+        fprintf( stderr, "wasm_x86: PEB=%08x ProcessHeap=%08x [PEB+0x1c]=%08x\n",
+                 g_peb, *(uint32_t*)(uintptr_t)(g_peb+0x18), *(uint32_t*)(uintptr_t)(g_peb+0x1c) );
     fprintf( stderr, "wasm_x86: --- recent calls (oldest first) ---\n" );
     for (i = 0; i < 32; i++)
     {
@@ -465,11 +469,11 @@ static void run( struct x86cpu *c )
         case 0x98: /* cwde */ c->regs[EAX] = (int32_t)(int16_t)(c->regs[EAX] & 0xffff); break;
         case 0x99: /* cdq */ c->regs[EDX] = (c->regs[EAX] & 0x80000000) ? 0xffffffff : 0; break;
 
-        /* mov al/eax <-> moffs32 */
-        case 0xa0: c->regs[EAX] = (c->regs[EAX] & 0xffffff00) | rd8(f32(&d)); break;
-        case 0xa1: write_reg(c,EAX,os, os==2?rd16(f32(&d)):rd32(f32(&d))); break;
-        case 0xa2: wr8(f32(&d), c->regs[EAX] & 0xff); break;
-        case 0xa3: { uint32_t off=f32(&d); if(os==2) wr16(off,c->regs[EAX]); else wr32(off,c->regs[EAX]); } break;
+        /* mov al/eax <-> moffs32 (honor segment base: fs->TEB, else flat) */
+        case 0xa0: { uint32_t off=f32(&d)+(uint32_t)d.seg; c->regs[EAX]=(c->regs[EAX]&0xffffff00)|rd8(off); } break;
+        case 0xa1: { uint32_t off=f32(&d)+(uint32_t)d.seg; write_reg(c,EAX,os, os==2?rd16(off):rd32(off)); } break;
+        case 0xa2: { uint32_t off=f32(&d)+(uint32_t)d.seg; wr8(off, c->regs[EAX]&0xff); } break;
+        case 0xa3: { uint32_t off=f32(&d)+(uint32_t)d.seg; if(os==2) wr16(off,c->regs[EAX]); else wr32(off,c->regs[EAX]); } break;
 
         /* adc / sbb (reg forms) */
         case 0x10: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a+b+ci; write_rm(c,&m,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break;
@@ -624,6 +628,32 @@ static void run( struct x86cpu *c )
             case 0xaf: m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); write_reg(c,m.reg,os,a*b); break; /* imul */
             case 0xbc: /* bsf */ m=decode_modrm(c,&d); a=read_rm(c,&m,os); if(a){ int i=0; while(!((a>>i)&1))i++; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
             case 0xbd: /* bsr */ m=decode_modrm(c,&d); a=read_rm(c,&m,os); if(a){ int i=os*8-1; while(!((a>>i)&1))i--; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
+            case 0xa4: case 0xa5: /* SHLD r/m, r, imm8/cl */
+            case 0xac: case 0xad: /* SHRD r/m, r, imm8/cl */
+            {
+                int left = (op2==0xa4||op2==0xa5);
+                m=decode_modrm(c,&d);
+                uint32_t dst=read_rm(c,&m,os), src=read_reg(c,m.reg,os);
+                uint32_t cnt = (op2==0xa4||op2==0xac) ? f8(&d) : (c->regs[ECX]&0xff);
+                cnt &= 31;
+                int W = os*8;
+                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
+                if (cnt >= (uint32_t)W) cnt %= (uint32_t)W;       /* 16-bit UB guard */
+                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
+                uint32_t mask=sizemask(os), sm=signmask(os), res, cf;
+                dst &= mask; src &= mask;
+                if (left) { res = ((dst<<cnt) | (src>>(W-cnt))) & mask; cf = (dst >> (W-cnt)) & 1; }
+                else      { res = ((dst>>cnt) | (src<<(W-cnt))) & mask; cf = (dst >> (cnt-1)) & 1; }
+                write_rm(c,&m,os,res);
+                { uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+                  if (cf) f|=CF;
+                  if (!(res & mask)) f|=ZF;
+                  if (res & sm) f|=SF;
+                  if (parity((uint8_t)res)) f|=PF;
+                  if (cnt==1 && ((res ^ dst) & sm)) f|=OF;
+                  c->eflags = f; c->lf_size = 0; }
+                break;
+            }
             case 0x1f: decode_modrm(c,&d); break; /* nop r/m */
             case 0x31: /* rdtsc */ c->regs[EAX]=0; c->regs[EDX]=0; break;
             case 0xa2: /* cpuid */ c->regs[EAX]=0; c->regs[EBX]=0; c->regs[ECX]=0; c->regs[EDX]=0; break;
@@ -877,6 +907,9 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         int nargs = t->ArgumentTable[idx] / 4;
         uint32_t *args = (uint32_t *)(uintptr_t)(c->regs[ESP] + 4); /* first arg (see i386 dispatcher) */
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x (%d args) -> handler %p\n", num, nargs, fn );
+        if (num == 0x2c) /* NtTerminateProcess(handle, exit_status) */
+            fprintf( stderr, "wasm_x86: *** NtTerminateProcess handle=%08x exit_status=%08x (%u) ***\n",
+                     args[0], args[1], args[1] );
         c->regs[EAX] = call_handler( fn, nargs, args );
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x returned eax=%08x ret_eip=%08x\n", num, c->regs[EAX], ret_eip );
         c->eip = ret_eip;
@@ -919,6 +952,11 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
     addr_cb       = (uint32_t)(uintptr_t)pKiUserCallbackDispatcher;
     (void)addr_apc; (void)addr_exc; (void)addr_cb;
 
+    /* TEB->WOW32Reserved (offset 0xc0) is the syscall-dispatcher pointer that
+     * half the i386 syscall thunks call through (`call fs:[0xc0]`). Native wine
+     * sets this in signal_i386.c, which we don't compile; set it ourselves. */
+    *(uint32_t *)((char *)teb + 0xc0) = addr_syscall;
+
     context.ContextFlags = CONTEXT_ALL;
     context.EFlags = 0x202;
     context.Eax = (DWORD)(ULONG_PTR)entry;
@@ -943,6 +981,7 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
     g_cpu.lf_size = 0;
     g_cpu.fs_base = (uint32_t)(uintptr_t)teb;   /* i386 fs -> TEB linear address */
     g_cpu.gs_base = 0;
+    g_peb = rd32( (uint32_t)(uintptr_t)teb + 0x30 );
 
     fprintf( stderr, "wasm_x86: signal_start_thread entry=%p thunk=%p ctx=%p stack=%p\n",
              (void*)entry, pLdrInitializeThunk, (void*)ctx, (void*)stack );
