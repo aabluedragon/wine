@@ -277,6 +277,10 @@ static void call_req_handler( struct thread *thread )
     current->reply_size = 0;
     clear_error();
     memset( &reply, 0, sizeof(reply) );
+#ifdef __wasm__
+    { static int t = -1; if (t < 0) { const char *e = getenv("WINEWASMIPCTRACE"); t = e && *e && *e!='0'; }
+      if (t) fprintf( stderr, "wasm_srv: call_req_handler req=%d\n", (int)req ); }
+#endif
 
     if (debug_level) trace_request();
 
@@ -293,6 +297,10 @@ static void call_req_handler( struct thread *thread )
             reply.reply_header.reply_size = current->reply_size;
             if (debug_level) trace_reply( req, &reply );
             send_reply( &reply );
+#ifdef __wasm__
+            { static int t = -1; if (t < 0) { const char *e = getenv("WINEWASMIPCTRACE"); t = e && *e && *e!='0'; }
+              if (t) fprintf( stderr, "wasm_srv: sent reply for req=%d size=%u\n", (int)req, (unsigned)current->reply_size ); }
+#endif
         }
         else
         {
@@ -307,11 +315,21 @@ static void call_req_handler( struct thread *thread )
 void read_request( struct thread *thread )
 {
     int ret;
+#ifdef __wasm__
+    { static int t = -1; if (t < 0) { const char *e = getenv("WINEWASMIPCTRACE"); t = e && *e && *e!='0'; }
+      if (t) fprintf( stderr, "wasm_srv: read_request enter req_toread=%u\n", thread->req_toread ); }
+#endif
 
     if (!thread->req_toread)  /* no pending request */
     {
         if ((ret = read( get_unix_fd( thread->request_fd ), &thread->req,
                          sizeof(thread->req) )) != sizeof(thread->req)) goto error;
+#ifdef __wasm__
+        { static int t = -1; if (t < 0) { const char *e = getenv("WINEWASMIPCTRACE"); t = e && *e && *e!='0'; }
+          if (t) fprintf( stderr, "wasm_srv: hdr read ret=%d req=%d request_size=%u reply_size=%u\n",
+                          ret, thread->req.request_header.req, thread->req.request_header.request_size,
+                          (unsigned)thread->req.request_header.reply_size ); }
+#endif
         if (!(thread->req_toread = thread->req.request_header.request_size))
         {
             /* no data, handle request at once */

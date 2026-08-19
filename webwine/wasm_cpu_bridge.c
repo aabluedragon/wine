@@ -56,11 +56,8 @@ void call_raise_user_exception_dispatcher( struct thread_data *data )
     bridge_unimplemented( "call_raise_user_exception_dispatcher" );
 }
 
-void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, void *arg, TEB *teb )
-{
-    bridge_unimplemented( "signal_start_thread" );
-    for (;;) ;
-}
+/* signal_start_thread + the syscall/unix-call dispatch seam now live in
+ * wasm_x86.c (the standalone i386 interpreter). */
 
 /* ---- init/config paths: succeed quietly so boot can continue ---- */
 

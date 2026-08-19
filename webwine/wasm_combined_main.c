@@ -39,7 +39,8 @@ int main( int argc, char *argv[] )
         wineserver_main( 1, sargv );   /* returns immediately in COOP mode */
     }
 
-    fprintf( stderr, "webwine: entering wine client __wine_main\n" );
+    fprintf( stderr, "webwine: entering wine client __wine_main argc=%d argv0=%s argv1=%s\n",
+             argc, argc>0?argv[0]:"(null)", argc>1?argv[1]:"(none)" );
     __wine_main( argc, argv );
 
     fprintf( stderr, "webwine: __wine_main returned\n" );

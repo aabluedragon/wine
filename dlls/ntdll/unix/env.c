@@ -1927,6 +1927,9 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
 
     get_full_path( main_argv[1], curdir, &nt_name );
     status = load_main_exe( &nt_name, 0, module );
+    if (getenv("WINEWASMBOOTTRACE"))
+        fprintf( stderr, "BOOT: build_initial_params argv1=%s load_main_exe status=%x module=%p machine=%x\n",
+                 main_argv[1], status, *module, main_image_info.Machine );
     /* fail only if the file contained an explicit path */
     if (status == STATUS_DLL_NOT_FOUND &&
         (strpbrk( main_argv[1], "/\\" ) || (main_argv[1][0] && main_argv[1][1] == ':')))
@@ -2028,6 +2031,8 @@ void init_startup_info(void)
     USHORT machine;
     BOOL debugged;
 
+    if (getenv("WINEWASMBOOTTRACE"))
+        fprintf( stderr, "BOOT: init_startup_info startup_info_size=%zu\n", (size_t)startup_info_size );
     if (!startup_info_size)
     {
         params = build_initial_params( &module );

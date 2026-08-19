@@ -942,8 +942,8 @@ void wineserver_inproc_drive(void)
     for (passes = 0; passes < 64 && active_users; passes++)
     {
         ret = poll( pollfd, nb_users, 0 );
-        if (drv_trace && passes == 0)
-            fprintf( stderr, "wasm_ipc: drive poll nb_users=%d ret=%d\n", nb_users, ret );
+        if (drv_trace && passes < 6)
+            fprintf( stderr, "wasm_ipc: drive poll pass=%d nb_users=%d ret=%d\n", passes, nb_users, ret );
         if (ret <= 0) break;
         for (i = 0; i < nb_users; i++)
         {
