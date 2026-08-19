@@ -186,7 +186,7 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
         if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
         if (++spins > 2000000) { errno = EAGAIN; return -1; }
     }
-    if (spins) wasm_vm_sync_shared();
+    wasm_vm_sync_shared();
 
     for (i = 0; i < (size_t)msg->msg_iovlen && ring_avail( self ); i++)
         got += ring_read( self, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len );
@@ -257,7 +257,7 @@ ssize_t readv( int fd, const struct iovec *iov, int iovcnt )
             if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
             if (++spins > 2000000) { errno = EAGAIN; return -1; }
         }
-        if (spins) wasm_vm_sync_shared();
+        wasm_vm_sync_shared();
         for (i = 0; i < iovcnt && ring_avail( self ); i++)
             got += ring_read( self, iov[i].iov_base, iov[i].iov_len );
         return got;
@@ -288,7 +288,7 @@ ssize_t read( int fd, void *buf, size_t count )
             if (&wineserver_inproc_drive && wineserver_inproc_drive) wineserver_inproc_drive();
             if (++spins > 2000000) { errno = EAGAIN; return -1; }
         }
-        if (spins) wasm_vm_sync_shared();
+        wasm_vm_sync_shared();
         return ring_read( self, buf, count );
     }
     {

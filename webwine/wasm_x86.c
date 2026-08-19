@@ -1183,6 +1183,7 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
             return 1;
         }
         c->regs[EAX] = call_handler( fn, nargs, args );
+        if (table == 1) { extern void wasm_vm_sync_shared(void); wasm_vm_sync_shared(); } /* win32u wrote shared session mem */
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x returned eax=%08x ret_eip=%08x\n", num, c->regs[EAX], ret_eip );
         c->eip = ret_eip;
         return 1;

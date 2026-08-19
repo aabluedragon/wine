@@ -1096,6 +1096,16 @@ int wine_server_receive_fd( obj_handle_t *handle )
             }
             if (fd != -1) fcntl( fd, F_SETFD, FD_CLOEXEC ); /* in case MSG_CMSG_CLOEXEC is not supported */
 #ifdef __wasm__
+            /* In-process transport passes the fd by identity (no SCM_RIGHTS dup),
+             * so the received number IS the server's own fd. The client caches
+             * and later close()s it (NtClose), which would close the SERVER's fd
+             * out from under its object. dup() a private copy for real fds (magic
+             * transport fds >= MAGIC_BASE are not real and must not be dup'd). */
+            if (fd >= 0 && fd < 0x300)
+            {
+                int d = dup( fd );
+                if (d != -1) fd = d;
+            }
             { static int t=-1; if(t<0){const char*e=getenv("WINEWASMLOADTRACE");t=e&&*e&&*e!='0';}
               if(t){ struct stat st; int r=fstat(fd,&st); fprintf(stderr,"wasm_cli: receive_fd handle=%x fd=%d ino=%llu (fstat=%d)\n",(unsigned)(ULONG_PTR)*handle,fd,r==0?(unsigned long long)st.st_ino:0,r);} }
 #endif
