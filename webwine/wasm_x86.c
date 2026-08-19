@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -54,6 +55,11 @@ struct x86cpu
     int      lf_size;     /* 1,2,4 bytes; 0 = flags are in eflags directly */
     int      lf_kind;     /* operation kind for CF/OF */
     int      lf_cin;      /* carry-in for K_ADC/K_SBB (0/1) */
+    /* x87 FPU: register stack of 8 doubles, top-of-stack index, control/status */
+    double   fpr[8];
+    int      fptop;       /* st(i) == fpr[(fptop + i) & 7] */
+    uint16_t fpcw;        /* control word */
+    uint16_t fpsw;        /* status word (C3 C2 C1 C0 + top field) */
     int      running;
     int      exit_code;
 };
@@ -252,6 +258,60 @@ static void write_reg( struct x86cpu *c, int reg, int size, uint32_t v )
 
 static void push32( struct x86cpu *c, uint32_t v ){ c->regs[ESP] -= 4; wr32( c->regs[ESP], v ); }
 static uint32_t pop32( struct x86cpu *c ){ uint32_t v = rd32( c->regs[ESP] ); c->regs[ESP] += 4; return v; }
+
+/* ---- x87 FPU ---- */
+static inline double fp_get( struct x86cpu *c, int i ) { return c->fpr[(c->fptop + i) & 7]; }
+static inline void   fp_set( struct x86cpu *c, int i, double v ) { c->fpr[(c->fptop + i) & 7] = v; }
+static inline void   fp_push( struct x86cpu *c, double v ) { c->fptop = (c->fptop - 1) & 7; c->fpr[c->fptop] = v; }
+static inline double fp_pop( struct x86cpu *c ) { double v = c->fpr[c->fptop]; c->fptop = (c->fptop + 1) & 7; return v; }
+
+/* 80-bit extended <-> double (long double is 64-bit on arm64, so do it by hand) */
+static double rd80( uint32_t a )
+{
+    uint64_t m = rd32(a) | ((uint64_t)rd32(a+4) << 32);
+    uint16_t se = rd16(a+8);
+    int sign = se >> 15, exp = se & 0x7fff;
+    double v;
+    if (exp == 0 && m == 0) return sign ? -0.0 : 0.0;
+    if (exp == 0x7fff) return m == 0 ? (sign ? -INFINITY : INFINITY) : NAN;
+    v = ldexp( (double)m, exp - 16383 - 63 );
+    return sign ? -v : v;
+}
+static void wr80( uint32_t a, double v )
+{
+    uint64_t m; uint16_t se; int e;
+    if (v == 0.0) { m = 0; se = signbit(v) ? 0x8000 : 0; }
+    else if (isinf(v)) { m = 0; se = 0x7fff | (v < 0 ? 0x8000 : 0); }
+    else if (isnan(v)) { m = 0xc000000000000000ULL; se = 0x7fff; }
+    else {
+        int sign = signbit(v); double f = frexp( fabs(v), &e );  /* f in [0.5,1) */
+        m = (uint64_t)ldexp( f, 64 );
+        se = (uint16_t)((e + 16382) & 0x7fff) | (sign ? 0x8000 : 0);
+    }
+    wr32( a, (uint32_t)m ); wr32( a+4, (uint32_t)(m >> 32) ); wr16( a+8, se );
+}
+static double rdf32( uint32_t a ) { uint32_t u = rd32(a); float f; memcpy(&f,&u,4); return (double)f; }
+static double rdf64( uint32_t a ) { uint64_t u = rd32(a) | ((uint64_t)rd32(a+4)<<32); double d; memcpy(&d,&u,8); return d; }
+static void   wrf32( uint32_t a, double v ) { float f = (float)v; uint32_t u; memcpy(&u,&f,4); wr32(a,u); }
+static void   wrf64( uint32_t a, double v ) { uint64_t u; memcpy(&u,&v,8); wr32(a,(uint32_t)u); wr32(a+4,(uint32_t)(u>>32)); }
+/* set condition codes C3,C2,C0 in the status word from a compare of a vs b */
+static void fp_compare( struct x86cpu *c, double a, double b )
+{
+    c->fpsw &= ~0x4500;  /* clear C3(0x4000) C2(0x400) C0(0x100) */
+    if (isnan(a) || isnan(b)) c->fpsw |= 0x4500;         /* unordered */
+    else if (a < b)           c->fpsw |= 0x0100;         /* C0 */
+    else if (a == b)          c->fpsw |= 0x4000;         /* C3 */
+    /* a > b: all clear */
+}
+/* set EFLAGS ZF/PF/CF from an ordered compare (fcomi/fucomi) */
+static void fp_compare_eflags( struct x86cpu *c, double a, double b )
+{
+    c->eflags &= ~(ZF|PF|CF);
+    if (isnan(a) || isnan(b)) c->eflags |= ZF|PF|CF;
+    else if (a < b)           c->eflags |= CF;
+    else if (a == b)          c->eflags |= ZF;
+    c->lf_size = 0;
+}
 
 /* forward: the native seam that runs when the guest calls a dispatcher */
 extern int wasm_x86_dispatch( struct x86cpu *c, uint32_t target );
@@ -566,7 +626,206 @@ static void run( struct x86cpu *c )
         case 0xfc: c->eflags &= ~DF; break;  /* cld */
         case 0xfd: c->eflags |= DF; break;   /* std */
 
-        /* string ops (minimal: stosd/movsd with rep) handled below via 0xaa.. */
+        /* ---- x87 FPU (0xd8-0xdf) ---- */
+        case 0xd8: /* arithmetic with m32real / st(i), dest st0 */
+        {
+            m = decode_modrm(c,&d);
+            double src = m.is_reg ? fp_get(c,m.rm) : rdf32(m.ea);
+            double s0 = fp_get(c,0);
+            switch (m.reg) {
+            case 0: fp_set(c,0,s0+src); break;
+            case 1: fp_set(c,0,s0*src); break;
+            case 2: fp_compare(c,s0,src); break;
+            case 3: fp_compare(c,s0,src); fp_pop(c); break;
+            case 4: fp_set(c,0,s0-src); break;
+            case 5: fp_set(c,0,src-s0); break;
+            case 6: fp_set(c,0,s0/src); break;
+            case 7: fp_set(c,0,src/s0); break;
+            }
+            break;
+        }
+        case 0xd9:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c, rdf32(m.ea)); break;        /* fld m32 */
+                case 2: wrf32(m.ea, fp_get(c,0)); break;       /* fst m32 */
+                case 3: wrf32(m.ea, fp_pop(c)); break;         /* fstp m32 */
+                case 5: c->fpcw = rd16(m.ea); break;           /* fldcw */
+                case 7: wr16(m.ea, c->fpcw); break;            /* fnstcw */
+                default: break;                                /* fldenv/fnstenv: skip */
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (m.reg == 0) { double v=fp_get(c,m.rm); fp_push(c,v); }   /* fld st(i) */
+                else if (m.reg == 1) { double t=fp_get(c,0); fp_set(c,0,fp_get(c,m.rm)); fp_set(c,m.rm,t); } /* fxch */
+                else switch (b) {
+                    case 0xe0: fp_set(c,0,-fp_get(c,0)); break;        /* fchs */
+                    case 0xe1: fp_set(c,0,fabs(fp_get(c,0))); break;   /* fabs */
+                    case 0xe4: fp_compare(c,fp_get(c,0),0.0); break;   /* ftst */
+                    case 0xe5: break;                                  /* fxam: skip */
+                    case 0xe8: fp_push(c,1.0); break;                  /* fld1 */
+                    case 0xe9: fp_push(c,3.321928094887362); break;    /* fldl2t */
+                    case 0xea: fp_push(c,1.4426950408889634); break;   /* fldl2e */
+                    case 0xeb: fp_push(c,3.141592653589793); break;    /* fldpi */
+                    case 0xec: fp_push(c,0.3010299956639812); break;   /* fldlg2 */
+                    case 0xed: fp_push(c,0.6931471805599453); break;   /* fldln2 */
+                    case 0xee: fp_push(c,0.0); break;                  /* fldz */
+                    case 0xf0: fp_set(c,0,exp2(fp_get(c,0))-1.0); break; /* f2xm1 */
+                    case 0xf1: fp_set(c,1,fp_get(c,1)*log2(fp_get(c,0))); fp_pop(c); break; /* fyl2x */
+                    case 0xf2: { double t=tan(fp_get(c,0)); fp_set(c,0,t); fp_push(c,1.0); } break; /* fptan */
+                    case 0xf3: fp_set(c,1,atan2(fp_get(c,1),fp_get(c,0))); fp_pop(c); break; /* fpatan */
+                    case 0xf5: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem1 */
+                    case 0xf6: c->fptop=(c->fptop-1)&7; break;         /* fdecstp */
+                    case 0xf7: c->fptop=(c->fptop+1)&7; break;         /* fincstp */
+                    case 0xf8: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem */
+                    case 0xfa: fp_set(c,0,sqrt(fp_get(c,0))); break;   /* fsqrt */
+                    case 0xfb: { double s=sin(fp_get(c,0)),co=cos(fp_get(c,0)); fp_set(c,0,s); fp_push(c,co); } break; /* fsincos */
+                    case 0xfc: fp_set(c,0,rint(fp_get(c,0))); break;   /* frndint */
+                    case 0xfd: fp_set(c,0,ldexp(fp_get(c,0),(int)fp_get(c,1))); break; /* fscale */
+                    case 0xfe: fp_set(c,0,sin(fp_get(c,0))); break;    /* fsin */
+                    case 0xff: fp_set(c,0,cos(fp_get(c,0))); break;    /* fcos */
+                    default: break;
+                }
+            }
+            break;
+        }
+        case 0xda:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                double src = (double)(int32_t)rd32(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                uint32_t f = get_flags(c);
+                if (b == 0xe9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fucompp */
+                else { int mv=0; switch(m.reg){case 0:mv=!!(f&CF);break;case 1:mv=!!(f&ZF);break;case 2:mv=!!(f&(CF|ZF));break;case 3:mv=!!(f&PF);break;}
+                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovb/e/be/u */
+            }
+            break;
+        }
+        case 0xdb:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c,(double)(int32_t)rd32(m.ea)); break;     /* fild m32 */
+                case 2: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_get(c,0))); break; /* fist m32 */
+                case 3: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_pop(c))); break;   /* fistp m32 */
+                case 5: fp_push(c, rd80(m.ea)); break;                     /* fld m80 */
+                case 7: wr80(m.ea, fp_pop(c)); break;                      /* fstp m80 */
+                default: break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                uint32_t f = get_flags(c);
+                if (b == 0xe2) { c->fpsw &= ~0xff; }                       /* fnclex */
+                else if (b == 0xe3) { c->fpcw=0x037f; c->fpsw=0; c->fptop=0; } /* fninit */
+                else if (b >= 0xe8 && b <= 0xf7) fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); /* fucomi/fcomi */
+                else { int mv=0; switch(m.reg){case 0:mv=!(f&CF);break;case 1:mv=!(f&ZF);break;case 2:mv=!(f&(CF|ZF));break;case 3:mv=!(f&PF);break;}
+                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovnb/ne/nbe/nu */
+            }
+            break;
+        }
+        case 0xdc:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                double src = rdf64(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                double si = fp_get(c,m.rm), s0 = fp_get(c,0);  /* dest st(i); sub/div reversed */
+                switch (m.reg) {
+                case 0: fp_set(c,m.rm,si+s0); break; case 1: fp_set(c,m.rm,si*s0); break;
+                case 4: fp_set(c,m.rm,s0-si); break; case 5: fp_set(c,m.rm,si-s0); break;
+                case 6: fp_set(c,m.rm,s0/si); break; case 7: fp_set(c,m.rm,si/s0); break;
+                default: break;
+                }
+            }
+            break;
+        }
+        case 0xdd:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c, rdf64(m.ea)); break;        /* fld m64 */
+                case 2: wrf64(m.ea, fp_get(c,0)); break;       /* fst m64 */
+                case 3: wrf64(m.ea, fp_pop(c)); break;         /* fstp m64 */
+                case 7: wr16(m.ea, (uint16_t)(c->fpsw | ((c->fptop&7)<<11))); break; /* fnstsw m16 */
+                default: break;
+                }
+            } else {
+                switch (m.reg) {
+                case 0: break;                                 /* ffree: no-op */
+                case 2: fp_set(c,m.rm,fp_get(c,0)); break;      /* fst st(i) */
+                case 3: { double v=fp_get(c,0); fp_set(c,m.rm,v); fp_pop(c); } break; /* fstp st(i) */
+                case 4: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); break;       /* fucom */
+                case 5: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); break; /* fucomp */
+                default: break;
+                }
+            }
+            break;
+        }
+        case 0xde:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                double src = (double)(int16_t)rd16(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (b == 0xd9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fcompp */
+                else {
+                    double si = fp_get(c,m.rm), s0 = fp_get(c,0), r = 0;   /* st(i) op= st0; pop */
+                    switch (m.reg) {
+                    case 0: r=si+s0; break; case 1: r=si*s0; break;
+                    case 4: r=s0-si; break; case 5: r=si-s0; break;
+                    case 6: r=s0/si; break; case 7: r=si/s0; break;
+                    default: r=si; break;
+                    }
+                    fp_set(c,m.rm,r); fp_pop(c);
+                }
+            }
+            break;
+        }
+        case 0xdf:
+        {
+            m = decode_modrm(c,&d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c,(double)(int16_t)rd16(m.ea)); break;     /* fild m16 */
+                case 2: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_get(c,0))); break; /* fist m16 */
+                case 3: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_pop(c))); break;   /* fistp m16 */
+                case 5: { int64_t v=(int64_t)(rd32(m.ea)|((uint64_t)rd32(m.ea+4)<<32)); fp_push(c,(double)v); } break; /* fild m64 */
+                case 7: { int64_t v=(int64_t)llrint(fp_pop(c)); wr32(m.ea,(uint32_t)v); wr32(m.ea+4,(uint32_t)((uint64_t)v>>32)); } break; /* fistp m64 */
+                default: break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (b == 0xe0) write_reg(c,EAX,2,(uint16_t)(c->fpsw | ((c->fptop&7)<<11))); /* fnstsw ax */
+                else if (b >= 0xe8 && b <= 0xf7) { fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); } /* fucomip/fcomip */
+                else fp_pop(c);                                            /* ffreep */
+            }
+            break;
+        }
 
         case 0x0f: /* two-byte */
         {
@@ -950,6 +1209,7 @@ void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, voi
     g_cpu.lf_size = 0;
     g_cpu.fs_base = (uint32_t)(uintptr_t)teb;   /* i386 fs -> TEB linear address */
     g_cpu.gs_base = 0;
+    g_cpu.fpcw = 0x037f; g_cpu.fpsw = 0; g_cpu.fptop = 0;  /* x87 default state */
 
     if (trace())
         fprintf( stderr, "wasm_x86: signal_start_thread entry=%p thunk=%p teb=%p\n",

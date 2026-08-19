@@ -1082,6 +1082,9 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
     LARGE_INTEGER size;
     NTSTATUS status;
     HANDLE handle;
+#ifdef __wasm__
+    if (getenv("WINEWASMLOADTRACE")) fprintf( stderr, "wasm_ld: open_dll_file '%s'\n", name );
+#endif
 
     if ((status = open_unix_file( &handle, name, GENERIC_READ | SYNCHRONIZE, attr, 0,
                                   FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN,

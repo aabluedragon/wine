@@ -273,7 +273,11 @@ const char * __cdecl __wine_dbg_strdup( const char *str )
 NTSTATUS unixcall_wine_dbg_write( void *args )
 {
     struct wine_dbg_write_params *params = args;
-
+#ifdef __wasm__
+    fprintf( stderr, "%.*s", (int)params->len, (const char *)(ULONG_PTR)params->str );
+    fflush( stderr );
+    return params->len;
+#endif
     return write( 2, params->str, params->len );
 }
 
