@@ -940,6 +940,77 @@ static void run( struct x86cpu *c )
                 m=decode_modrm(c,&d);
                 { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]^=src[i]; }
                 break;
+            case 0x55: /* andnps */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
+            /* --- SSE/SSE2 float arithmetic: prefix picks ps/pd/ss/sd --- */
+            case 0x51: case 0x52: case 0x53: /* sqrt / rsqrt / rcp (unary on src) */
+            case 0x58: case 0x59: case 0x5c: case 0x5d: case 0x5e: case 0x5f: /* add mul sub min div max */
+            {
+                m=decode_modrm(c,&d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                int dbl=(d.opsize==2||d.rep==0xf2), scal=(d.rep==0xf3||d.rep==0xf2);
+                int lanes=dbl?2:4, n=scal?1:lanes, i;
+                for(i=0;i<n;i++){
+                    double x,y,r;
+                    if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
+                    else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
+                    switch(op2){
+                        case 0x51: r=sqrt(y); break; case 0x52: r=1.0/sqrt(y); break; case 0x53: r=1.0/y; break;
+                        case 0x58: r=x+y; break; case 0x59: r=x*y; break; case 0x5c: r=x-y; break;
+                        case 0x5d: r=(x<y)?x:y; break; case 0x5e: r=x/y; break; case 0x5f: r=(x>y)?x:y; break;
+                        default: r=x;
+                    }
+                    if(dbl){ uint64_t rb; memcpy(&rb,&r,8); memcpy(dst+i*8,&rb,8); }
+                    else { float rf=(float)r; memcpy(dst+i*4,&rf,4); }
+                }
+                break;
+            }
+            case 0x2a: /* cvtsi2ss/sd (int r/m32 -> scalar float in dst low) */
+                m=decode_modrm(c,&d); { int32_t v=(int32_t)read_rm(c,&m,4); uint8_t *dst=c->xmm[m.reg];
+                    if(d.rep==0xf2){ double dv=v; memcpy(dst,&dv,8); } else { float fv=(float)v; memcpy(dst,&fv,4); } } break;
+            case 0x2c: case 0x2d: /* cvt(t)ss2si / sd2si -> r32 */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double v;
+                    if(d.rep==0xf2){ uint64_t b; memcpy(&b,s,8); memcpy(&v,&b,8); } else { float f; memcpy(&f,s,4); v=f; }
+                    int32_t r=(op2==0x2c)?(int32_t)v:(int32_t)llrint(v); write_reg(c,m.reg,4,(uint32_t)r); } break;
+            case 0x2e: case 0x2f: /* ucomiss/comiss (66 -> sd) -> EFLAGS */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double x,y;
+                    if(d.opsize==2){ uint64_t xb,yb; memcpy(&xb,c->xmm[m.reg],8); memcpy(&yb,s,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
+                    else { float xf,yf; memcpy(&xf,c->xmm[m.reg],4); memcpy(&yf,s,4); x=xf; y=yf; }
+                    c->eflags &= ~(ZF|PF|CF|OF|SF|AF); c->lf_size=0;
+                    if(isnan(x)||isnan(y)) c->eflags|=ZF|PF|CF; else if(x<y) c->eflags|=CF; else if(x==y) c->eflags|=ZF; }
+                break;
+            case 0x5a: /* cvtps2pd/pd2ps/ss2sd/sd2ss */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                    if(d.rep==0xf3){ float f; memcpy(&f,s,4); double dv=f; memcpy(dst,&dv,8); }
+                    else if(d.rep==0xf2){ uint64_t b; double dv; memcpy(&b,s,8); memcpy(&dv,&b,8); float f=(float)dv; memcpy(dst,&f,4); }
+                    else if(d.opsize==2){ uint64_t b0,b1; double d0,d1; memcpy(&b0,s,8); memcpy(&b1,s+8,8); memcpy(&d0,&b0,8); memcpy(&d1,&b1,8); float f0=(float)d0,f1=(float)d1; uint8_t t[16]; memset(t,0,16); memcpy(t,&f0,4); memcpy(t+4,&f1,4); memcpy(dst,t,16); }
+                    else { float f0,f1; memcpy(&f0,s,4); memcpy(&f1,s+4,4); double d0=f0,d1=f1; memcpy(dst,&d0,8); memcpy(dst+8,&d1,8); } }
+                break;
+            case 0x5b: /* cvtdq2ps / cvtps2dq(66) / cvttps2dq(f3) */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; int i;
+                    if(d.rep==0xf3){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)f; memcpy(t+i*4,&v,4);} }
+                    else if(d.opsize==2){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)llrintf(f); memcpy(t+i*4,&v,4);} }
+                    else { for(i=0;i<4;i++){ int32_t v; memcpy(&v,s+i*4,4); float f=(float)v; memcpy(t+i*4,&f,4);} }
+                    memcpy(dst,t,16); }
+                break;
+            case 0xe6: /* cvtdq2pd(f3) / cvttpd2dq(66) / cvtpd2dq(f2) */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; memset(t,0,16); int i;
+                    if(d.rep==0xf3){ for(i=0;i<2;i++){ int32_t v; memcpy(&v,s+i*4,4); double dv=v; memcpy(t+i*8,&dv,8);} }
+                    else { int trunc=(d.opsize==2); for(i=0;i<2;i++){ uint64_t b; double dv; memcpy(&b,s+i*8,8); memcpy(&dv,&b,8); int32_t v=trunc?(int32_t)dv:(int32_t)llrint(dv); memcpy(t+i*4,&v,4);} }
+                    memcpy(dst,t,16); }
+                break;
+            case 0xc2: /* cmpps/pd/ss/sd imm8 predicate */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(&d);
+                    int dbl=(d.opsize==2||d.rep==0xf2), scal=(d.rep==0xf3||d.rep==0xf2); int lanes=dbl?2:4, n=scal?1:lanes, i;
+                    for(i=0;i<n;i++){ double x,y; if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8);} else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
+                        int un=isnan(x)||isnan(y),res; switch(im&7){ case 0:res=(x==y);break; case 1:res=(x<y);break; case 2:res=(x<=y);break; case 3:res=un;break; case 4:res=!(x==y);break; case 5:res=!(x<y);break; case 6:res=!(x<=y);break; default:res=!un; }
+                        if(dbl){ uint64_t mm=res?~0ULL:0; memcpy(dst+i*8,&mm,8);} else { uint32_t mm=res?~0U:0; memcpy(dst+i*4,&mm,4);} } }
+                break;
+            case 0xc6: /* shufps / shufpd(66) imm8 */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(&d); uint8_t t[16];
+                    if(d.opsize==2){ memcpy(&t[0],&dst[(im&1)?8:0],8); memcpy(&t[8],&s[(im&2)?8:0],8); }
+                    else { uint32_t *td=(uint32_t*)t,*dd=(uint32_t*)dst,*sd=(uint32_t*)s; td[0]=dd[(im>>0)&3]; td[1]=dd[(im>>2)&3]; td[2]=sd[(im>>4)&3]; td[3]=sd[(im>>6)&3]; }
+                    memcpy(dst,t,16); }
+                break;
             case 0xdb: /* pand */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
             case 0xdf: /* pandn */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
             case 0xeb: /* por */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
@@ -987,9 +1058,54 @@ static void run( struct x86cpu *c )
                 m=decode_modrm(c,&d); { uint32_t v=read_rm(c,&m,2); uint8_t im=f8(&d); uint16_t *w=(uint16_t*)c->xmm[m.reg]; w[im&7]=(uint16_t)v; } break;
             case 0x50: /* movmskps r32, xmm */
                 m=decode_modrm(c,&d); { uint32_t mask=0; int i; for(i=0;i<4;i++) if(c->xmm[m.rm][i*4+3]&0x80) mask|=(1u<<i); write_reg(c,m.reg,4,mask); } break;
-            case 0xd0: case 0xd1: case 0xd2: case 0xd3: case 0xd4: case 0xd5: /* psrl/pmullw/paddq by xmm — treat generically */
-            case 0xe0: case 0xe1: case 0xe2: /* pavg/psra */
-                m=decode_modrm(c,&d); break; /* rare; skip effect (approx) */
+            case 0x64: case 0x65: case 0x66: /* pcmpgtb/w/d (signed) */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0x64){ for(i=0;i<16;i++) dst[i]=((int8_t)dst[i]>(int8_t)s[i])?0xff:0; }
+                  else if(op2==0x65){ int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++) a[i]=(a[i]>b[i])?-1:0; }
+                  else { int32_t *a=(int32_t*)dst,*b=(int32_t*)s; for(i=0;i<4;i++) a[i]=(a[i]>b[i])?-1:0; } } break;
+            case 0xd1: case 0xd2: case 0xd3: /* psrlw/d/q by xmm */
+            case 0xf1: case 0xf2: case 0xf3: /* psllw/d/q by xmm */
+            case 0xe1: case 0xe2: /* psraw/psrad by xmm */
+                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                  uint64_t cnt; memcpy(&cnt,s,8);
+                  int u=(op2==0xd1||op2==0xf1||op2==0xe1)?2:(op2==0xd3||op2==0xf3)?8:4;
+                  int arith=(op2==0xe1||op2==0xe2), left=(op2==0xf1||op2==0xf2||op2==0xf3);
+                  int n=16/u,i; for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,&dst[i*u],u); int bits=u*8;
+                    if(cnt>=(uint64_t)bits){ if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=63; v=(uint64_t)sv; } else v=0; }
+                    else if(left) v<<=cnt;
+                    else if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=(64-bits); v=(uint64_t)(sv>>cnt); }
+                    else v>>=cnt;
+                    memcpy(&dst[i*u],&v,u);} } break;
+            case 0xd4: /* paddq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]+=b[0]; a[1]+=b[1]; } break;
+            case 0xfb: /* psubq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]-=b[0]; a[1]-=b[1]; } break;
+            case 0xd5: /* pmullw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(a[i]*b[i]); } break;
+            case 0xe5: /* pmulhw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i; for(i=0;i<8;i++) a[i]=(int16_t)(((int32_t)a[i]*b[i])>>16); } break;
+            case 0xe4: /* pmulhuw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(((uint32_t)a[i]*b[i])>>16); } break;
+            case 0xf4: /* pmuludq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint32_t *a=(uint32_t*)c->xmm[m.reg],*b=(uint32_t*)s; uint64_t r0=(uint64_t)a[0]*b[0], r1=(uint64_t)a[2]*b[2]; uint64_t *o=(uint64_t*)c->xmm[m.reg]; o[0]=r0; o[1]=r1; } break;
+            case 0xf5: /* pmaddwd */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int32_t r[4]; int i; for(i=0;i<4;i++) r[i]=(int32_t)a[i*2]*b[i*2]+(int32_t)a[i*2+1]*b[i*2+1]; memcpy(c->xmm[m.reg],r,16); } break;
+            case 0xf6: /* psadbw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint32_t s0=0,s1=0; int i; for(i=0;i<8;i++){ int dd=dst[i]-s[i]; s0+=dd<0?-dd:dd; } for(i=8;i<16;i++){ int dd=dst[i]-s[i]; s1+=dd<0?-dd:dd; } uint64_t *o=(uint64_t*)dst; o[0]=s0; o[1]=s1; } break;
+            case 0xd8: case 0xd9: /* psubusb/psubusw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xd8){ for(i=0;i<16;i++){ int r=dst[i]-s[i]; dst[i]=r<0?0:r; } }
+                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=r<0?0:(uint16_t)r; } } } break;
+            case 0xdc: case 0xdd: /* paddusb/paddusw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xdc){ for(i=0;i<16;i++){ int r=dst[i]+s[i]; dst[i]=r>255?255:r; } }
+                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=r>65535?65535:(uint16_t)r; } } } break;
+            case 0xe8: case 0xe9: /* psubsb/psubsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xe8){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]-(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
+                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
+            case 0xec: case 0xed: /* paddsb/paddsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xec){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]+(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
+                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
+            case 0xda: case 0xde: /* pminub/pmaxub */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xda){ for(i=0;i<16;i++) if(s[i]<dst[i]) dst[i]=s[i]; } else { for(i=0;i<16;i++) if(s[i]>dst[i]) dst[i]=s[i]; } } break;
+            case 0xea: case 0xee: /* pminsw/pmaxsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i;
+                  if(op2==0xea){ for(i=0;i<8;i++) if(b[i]<a[i]) a[i]=b[i]; } else { for(i=0;i<8;i++) if(b[i]>a[i]) a[i]=b[i]; } } break;
+            case 0xe0: case 0xe3: /* pavgb/pavgw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xe0){ for(i=0;i<16;i++) dst[i]=(uint8_t)((dst[i]+s[i]+1)>>1); } else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]=(uint16_t)((a[i]+b[i]+1)>>1); } } break;
+            case 0xf8: case 0xf9: case 0xfa: /* psubb/w/d */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xf8){ for(i=0;i<16;i++) dst[i]-=s[i]; }
+                  else if(op2==0xf9){ uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]-=b[i]; }
+                  else { uint32_t *a=(uint32_t*)dst,*b=(uint32_t*)s; for(i=0;i<4;i++) a[i]-=b[i]; } } break;
             case 0x54: /* andps */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
             case 0x56: /* orps */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
             case 0x14: case 0x15: /* unpcklps/unpckhps — 4-byte lane interleave */
@@ -1097,7 +1213,16 @@ typedef uint32_t (*fn9)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,ui
 typedef uint32_t (*fn10)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
 typedef uint32_t (*fn11)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
 typedef uint32_t (*fn12)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
-typedef uint32_t (*fn16)(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
+#define WU uint32_t
+typedef WU (*fn13)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn14)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn15)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn16)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn17)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn18)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn19)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+typedef WU (*fn20)(WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU,WU);
+#undef WU
 
 static uint32_t call_handler( void *fn, int nargs, uint32_t *a )
 {
@@ -1116,9 +1241,40 @@ static uint32_t call_handler( void *fn, int nargs, uint32_t *a )
     case 10: return ((fn10)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9]);
     case 11: return ((fn11)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10]);
     case 12: return ((fn12)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
-    default: return ((fn16)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],
-                               nargs>12?a[12]:0, nargs>13?a[13]:0, nargs>14?a[14]:0, nargs>15?a[15]:0);
+    case 13: return ((fn13)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12]);
+    case 14: return ((fn14)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13]);
+    case 15: return ((fn15)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14]);
+    case 16: return ((fn16)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15]);
+    case 17: return ((fn17)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16]);
+    case 18: return ((fn18)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16],a[17]);
+    case 19: return ((fn19)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16],a[17],a[18]);
+    case 20: return ((fn20)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16],a[17],a[18],a[19]);
+    default:
+        fprintf( stderr, "wasm_x86: call_handler unsupported nargs=%d\n", nargs );
+        return ((fn20)fn)(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16],a[17],a[18],a[19]);
     }
+}
+
+/* A handful of win32u syscalls return void, so their wasm signature is
+ * (N i32)->() rather than (N i32)->i32; calling them through call_handler's
+ * i32-returning function pointer traps with "function signature mismatch".
+ * Dispatch those through void-typed pointers (the guest ignores EAX). */
+typedef void (*fv2)(uint32_t,uint32_t);
+typedef void (*fv4)(uint32_t,uint32_t,uint32_t,uint32_t);
+static void call_handler_void( void *fn, int nargs, uint32_t *a )
+{
+    switch (nargs)
+    {
+    case 2: ((fv2)fn)(a[0],a[1]); break;
+    default: ((fv4)fn)(a[0],a[1],a[2],a[3]); break;  /* the void syscalls take 2 or 4 dwords */
+    }
+}
+/* win32u syscall ids whose handler returns void (see win32syscalls.h) */
+static int syscall_returns_void( uint32_t num )
+{
+    return num == 0x14be   /* NtUserNotifyIMEStatus */
+        || num == 0x14c1   /* NtUserNotifyWinEvent */
+        || num == 0x1564;  /* NtUserSetInternalWindowPos */
 }
 
 static uint32_t addr_syscall, addr_unixcall, addr_apc, addr_exc, addr_cb;
@@ -1200,7 +1356,8 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
                                   c->eip, c->regs[ESP], c->regs[EAX], c->regs[EBX] );
             return 1;
         }
-        c->regs[EAX] = call_handler( fn, nargs, args );
+        if (syscall_returns_void( num )) { call_handler_void( fn, nargs, args ); c->regs[EAX] = 0; }
+        else c->regs[EAX] = call_handler( fn, nargs, args );
         if (table == 1) { extern void wasm_vm_sync_shared(void); wasm_vm_sync_shared(); } /* win32u wrote shared session mem */
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x returned eax=%08x ret_eip=%08x\n", num, c->regs[EAX], ret_eip );
         c->eip = ret_eip;
