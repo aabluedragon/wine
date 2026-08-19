@@ -1105,6 +1105,50 @@ static uint32_t call_handler( void *fn, int nargs, uint32_t *a )
 
 static uint32_t addr_syscall, addr_unixcall, addr_apc, addr_exc, addr_cb;
 
+/* ---- user-mode callbacks (win32u -> user32 window procs etc.) ---- */
+static void *g_cb_ret_ptr;
+static uint32_t g_cb_ret_len;
+static int g_cb_status;
+
+/* KeUserModeCallback: enter pKiUserCallbackDispatcher on the guest stack with a
+ * callback_stack_layout (size 0x1c), run the interpreter re-entrantly until the
+ * guest calls NtCallbackReturn, then restore and return the result. */
+NTSTATUS wasm_x86_user_callback( uint32_t id, const void *args, uint32_t len, void **ret_ptr, uint32_t *ret_len )
+{
+    struct x86cpu *c = &g_cpu;
+    struct x86cpu saved = *c;
+    uint32_t old_esp = c->regs[ESP];
+    uint32_t esp = (old_esp - (0x1c + len)) & ~3u;
+
+    wr32( esp + 0x00, c->eip );          /* eip (resume marker) */
+    wr32( esp + 0x04, id );
+    wr32( esp + 0x08, esp + 0x1c );      /* args -> args_data */
+    wr32( esp + 0x0c, len );
+    wr32( esp + 0x10, 0 ); wr32( esp + 0x14, 0 );
+    wr32( esp + 0x18, old_esp );         /* saved esp */
+    if (len) memcpy( (void *)(uintptr_t)(esp + 0x1c), args, len );
+
+    c->regs[ESP] = esp;
+    c->regs[EBP] = 0;
+    c->eip = addr_cb;                    /* pKiUserCallbackDispatcher */
+    g_cb_status = STATUS_NO_CALLBACK_ACTIVE;
+    g_cb_ret_ptr = NULL; g_cb_ret_len = 0;
+
+    run( c );                            /* re-entrant; NtCallbackReturn stops it */
+
+    if (ret_ptr) *ret_ptr = g_cb_ret_ptr;
+    if (ret_len) *ret_len = g_cb_ret_len;
+    { NTSTATUS st = (NTSTATUS)g_cb_status; *c = saved; return st; }
+}
+
+/* NtCallbackReturn body: capture the result and unwind the re-entrant run(). */
+NTSTATUS wasm_x86_callback_return( void *ret_ptr, uint32_t ret_len, int status )
+{
+    g_cb_ret_ptr = ret_ptr; g_cb_ret_len = ret_len; g_cb_status = status;
+    g_cpu.running = 0;
+    return (NTSTATUS)status;
+}
+
 int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
 {
     if (target == 0xdeadbabe || target == 0)

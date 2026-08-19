@@ -977,6 +977,21 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     if ((builtin = get_builtin_module( module )))
     {
+#ifdef __wasm__
+        /* Static wasm module: unix companions can't be dlopen'd. The ones we
+         * link in expose __wine_unix_lib_init (which registers their syscall
+         * table, e.g. win32u -> KeServiceDescriptorTable[1]); call it directly.
+         * The returned handle is unused for syscall-based dispatch (NtUser/NtGdi
+         * go through __wine_syscall_dispatcher), so hand back a non-null token. */
+        if (builtin->unix_path && strstr( builtin->unix_path, "win32u.so" ))
+        {
+            extern NTSTATUS __wine_unix_lib_init(void);
+            entry = __wine_unix_lib_init;
+            *funcs = (const void *)(ULONG_PTR)1;
+            status = STATUS_SUCCESS;
+        }
+        else
+#endif
         if (builtin->unix_path && !builtin->unix_handle)
         {
             builtin->unix_handle = dlopen( builtin->unix_path, RTLD_NOW );

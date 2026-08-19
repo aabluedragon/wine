@@ -38,6 +38,14 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/* User-mode callback (win32u -> user32 window procs etc.). Normally in
+ * signal_i386.c; implemented in wasm_x86.c as a nested interpreter call. */
+NTSTATUS wasm_x86_user_callback( ULONG id, const void *args, ULONG len, void **ret_ptr, ULONG *ret_len );
+NTSTATUS KeUserModeCallback( ULONG id, const void *args, ULONG len, void **ret_ptr, ULONG *ret_len )
+{
+    return wasm_x86_user_callback( id, args, len, ret_ptr, ret_len );
+}
+
 NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
                                    ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status )
 {
@@ -95,7 +103,11 @@ void *get_wow_context( CONTEXT *context ) { return NULL; }
 
 NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context ) { return STATUS_NOT_IMPLEMENTED; }
 NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context ) { return STATUS_NOT_IMPLEMENTED; }
-NTSTATUS WINAPI NtCallbackReturn( PVOID ret_ptr, ULONG ret_len, NTSTATUS status ) { return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS wasm_x86_callback_return( void *ret_ptr, unsigned int ret_len, int status );
+NTSTATUS WINAPI NtCallbackReturn( PVOID ret_ptr, ULONG ret_len, NTSTATUS status )
+{
+    return wasm_x86_callback_return( ret_ptr, ret_len, status );
+}
 
 /* ---- identity: report the host's real uid/gid under NODERAWFS ---- */
 #include <emscripten.h>
