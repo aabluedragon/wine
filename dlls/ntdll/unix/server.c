@@ -448,6 +448,17 @@ static int wait_select_reply( int wait_fd[2], void *cookie )
         }
         if (ret >= 0) server_protocol_error( "partial wakeup read %d\n", ret );
         if (errno == EINTR) continue;
+#ifdef __wasm__
+        /* Cooperative in-process server: the wakeup pipe is a real (non-blocking)
+         * pipe, so an empty read yields EAGAIN rather than blocking.  Drive the
+         * server so it can fire expired timers / process pending work (which may
+         * signal this wait and write the wakeup), then retry. */
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            if (inproc_drive) inproc_drive();
+            continue;
+        }
+#endif
         server_protocol_perror("wakeup read");
     }
 }

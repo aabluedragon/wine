@@ -941,6 +941,12 @@ void wineserver_inproc_drive(void)
     set_current_time();
     for (passes = 0; passes < 64 && active_users; passes++)
     {
+        /* fire any expired timers (WM_TIMER, wait timeouts, etc.); their
+         * callbacks may signal waits and write to client wakeup pipes, which
+         * the poll below then delivers.  Without this a blocking client wait
+         * (e.g. GetMessage) would never be woken in the cooperative server. */
+        set_current_time();
+        get_next_timeout( NULL );
         ret = poll( pollfd, nb_users, 0 );
         if (drv_trace && passes < 6)
             fprintf( stderr, "wasm_ipc: drive poll pass=%d nb_users=%d ret=%d\n", passes, nb_users, ret );
