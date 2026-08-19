@@ -1,5 +1,91 @@
 # Current browser checkpoint
 
+## 2026-08-19 (evening): DYNAMIC-CODE AMNESTY — ~132 → 205 fps mean, peaks at the 250 cap
+
+The interpreted-renderer ceiling is broken. The mechanism ("dynamic-code
+amnesty", all in the sibling BoxedWine tree, ST WASM-JIT builds only):
+
+- **Root cause recap, now exact:** just **2 poisoned bytes** (write counts
+  hitting `MAX_DYNAMIC_COUNT`=255 at guest `0x631DB4`/`0x63246F`) marked the
+  Build-engine renderer's inner-loop ops `OP_FLAG_NO_JIT`, fragmenting the loop
+  into compiled islands around permanently-interpreted ops — 78.7% of hot block
+  exits landed on non-compiled targets (BWDIAG3 attribution: 99.6% of those were
+  NO_JIT; pending/warming/Done were noise).
+- **The amnesty** (`codePageData collectStaleDynamicPages` + registry sweep in
+  `kmemory.cpp` + a ~2s tick in the emscripten mainloop): un-poison poisoned
+  pages on a cooldown — invalidate their decoded ops (they re-decode
+  JIT-eligible) and clear the write counts. Correctness is untouched: every
+  code write still invalidates overlapping blocks; only the "never compile
+  again" verdict is reversed. The 255-writes-per-byte threshold itself brakes
+  churn — a page must absorb 255 writes to a byte between amnesties, so even
+  per-frame SMC costs at most one page invalidation + recompile per tick.
+  Re-poisoned pages are fast-tracked to the next tick (≤2s interpreted window).
+- **Gotchas that cost hours:** (1) `KThread::currentThread()` at the mainloop
+  tick usually is NOT the game process — the sweep must iterate a registry of
+  live `KMemory` instances (ctor/dtor registered); (2) a process's KMemory can
+  outlive its `data` (exit path nulls it) — null-guard or the sweep traps.
+- **Measured (clean 220 s run, `up3m250s`):** last-120s **mean 205.6 fps, min
+  148, max 250** (the game's own `r_maxfps 250` is now the binding cap; guest
+  MIPS peaks ~505). Frame pacing flawless: p50 4.1 ms / p95 6.0 / p99 7.5 /
+  max 19 ms, **zero frames >50 ms**. Screenshot-verified correct rendering.
+- Also in this round: `NormalCPU::run()`'s per-dispatch decoded-op refetch is
+  now epoch-guarded (`g_bwDecodedOpCacheEpoch`, bumped on any op removal) —
+  removals are <200/s while dispatches are millions/s, so the per-block cache
+  lookup disappears at steady state.
+
+**Uncommitted-work incident (cautionary):** a `git checkout --` during
+diagnostics destroyed uncommitted BoxedWine deltas. Forensics (binary name/type
+diffs vs the shipped wasm) showed the losses were the `EM_TIMING_SETIMMEDIATE`
+mainloop fix and the paced-flush scheme (both restored from their documented
+specs: `queueRuntimeFlushes` compiles at most one batch per call +
+`wasmJitDrainSealedRequests()` drains one per browser tick), plus a
+`loadAllGPRegsForExit` helper of unknown provenance (not restored; the
+committed tree is self-consistent without it). The reg-param-ABI/TLB-caching
+declarations in the dirty `jitWasmCodeGen.h` are unimplemented WIP, not lost
+features. **The BoxedWine tree should be committed** to prevent a repeat.
+
+The old 132-fps binaries are kept as `build-jitgl/boxedwine.{wasm,js}.prev-132fps`.
+
+## 2026-08-19 (later): fps-ceiling root cause + gzip transfer win
+
+**Why netduke32 tops out at ~132 fps — definitively diagnosed.** Fully-warm V8
+CPU profile (t≈190–220 s) is ~**67% interpreter-related** (ops + `normalDispatch`
++ `NormalCPU::run` + `getOp`) and only ~**18% compiled** JIT code. Using
+BoxedWine's built-in fetch-next transition recorder (`jit-record=true` →
+`[WASM JIT transitions]` klog) plus custom instrumentation, the cause is exact:
+**72% of hot-block exits go to a non-JIT-compiled target, and 99% of those are
+`OP_FLAG_NO_JIT` (dynamic-marked).** One page dominates — guest `0x631000`
+(module "Unknown" = anonymous, i.e. the Build-engine software renderer) at
+**312.7 M of 315.9 M noFlag hits (99%)**. That page is marked dynamic (a byte hit
+`MAX_DYNAMIC_COUNT`=255 writes) so `firstDynamicOp` never compiles it; it runs
+interpreted forever. The JIT itself is healthy: it converges to ~**49 000 blocks**
+(a finite working set, 240 MB of modules) and fps plateaus by ~**t=85 s** — the
+blocks compiled after that are cold and don't move fps. So the ceiling is the
+interpreted renderer, not warmup, not churn (invalidations <167/s), not poisoning
+volume (<100 bytes ever hit 255 — but a few in the renderer page are enough).
+
+**Tried and rejected: a "dynamic-code amnesty"** (periodically re-decode
+dynamic-marked pages not written recently, so a renderer patched once at
+video-mode setup could become JIT-eligible; one-shot per page to avoid churn).
+Built and A/B'd (`build-jitgl` vs the amnesty build). In clean windows it ran
+**on par with production (~127 vs ~132), no reliable win** — the renderer is
+evidently *genuinely* self-modified (per-frame patching), so it is correctly
+`NO_JIT` and cannot be compiled without a JIT that reads the patched immediates
+from memory instead of baking them (a large project). Reverted; the sibling
+BoxedWine tree is clean. Measurement was hampered throughout by the user's native
+`vibebuild32` intermittently taking a core — trust only same-load A/B, per the
+long-standing discipline note.
+
+**Shipped: HTTP gzip on the dev servers** (`serve.mjs` + `serve-https.mjs`).
+The big compressible assets now transfer far smaller — **boxedwine.wasm
+5.7 MB→1.2 MB (4.8×)** and **netduke32-up3m250s.zip 66 MB→29 MB (2.3×)** — while
+the already-packed root zip (195 MB, ~2% gain) is streamed raw (each file's
+worth-it decision is cached; skip if it doesn't shrink to <90%). gzip is
+transparent to the browser and to BoxedWine's fetch, and the stored (deflate-0)
+zips still avoid runtime re-inflate, so this is a pure load-time win — most
+valuable for the phone-on-LAN https flow. Verified end-to-end: the game boots and
+renders in-level through the gzip server.
+
 ## 2026-08-19: mobile performance envelope + factor-4 variant
 
 Added CPU-throttle emulation (`--throttle N`) and frame-interval/jitter metrics
