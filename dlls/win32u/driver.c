@@ -1039,6 +1039,16 @@ static void load_display_driver(void)
     USEROBJECTFLAGS flags;
     HWINSTA winstation;
 
+#ifdef __wasm__
+    /* Headless native-wasm: there is no external graphics driver .so and no
+     * explorer process to own the desktop.  Install the null driver directly
+     * so window creation succeeds as a headless window, skipping the
+     * load_desktop_driver() handshake (which sends a message to the
+     * explorer-owned desktop window that does not exist here). */
+    __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );
+    return;
+#endif
+
     if (is_service_process() || !load_desktop_driver( get_desktop_window() ) || user_driver == &lazy_load_driver)
     {
         winstation = NtUserGetProcessWindowStation();
