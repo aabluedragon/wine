@@ -2215,7 +2215,7 @@ static int bind_to_iface_name( int fd, in_addr_t bind_addr, const char *name )
     return setsockopt( fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable) );
 }
 
-#elif defined(IP_UNICAST_IF) && defined(SO_ATTACH_FILTER) && defined(SO_BINDTODEVICE)
+#elif defined(IP_UNICAST_IF) && defined(SO_ATTACH_FILTER) && defined(SO_BINDTODEVICE) && defined(HAVE_LINUX_FILTER_H)
 
 struct interface_filter
 {

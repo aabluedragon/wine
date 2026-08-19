@@ -1869,6 +1869,9 @@ static void init_supported_machines(void)
         if (supports_aarch32()) supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;
         supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
     }
+#elif defined(__wasm32__)
+    /* The WebAssembly host presents the 32-bit Windows guest ABI. */
+    supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
 #else
 #error Unsupported machine
 #endif

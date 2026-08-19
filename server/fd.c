@@ -116,7 +116,7 @@
 #include "ddk/ntifs.h"
 #include "ddk/wdm.h"
 
-#if defined(HAVE_SYS_EPOLL_H) && defined(HAVE_EPOLL_CREATE)
+#if defined(HAVE_SYS_EPOLL_H) && defined(HAVE_EPOLL_CREATE) && !defined(WINE_INPROC_POLL)
 # include <sys/epoll.h>
 # define USE_EPOLL
 #endif /* HAVE_SYS_EPOLL_H && HAVE_EPOLL_CREATE */

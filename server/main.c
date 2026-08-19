@@ -243,11 +243,24 @@ static void init_limits(void)
 #endif
 }
 
+#if defined(__wasm32__)
+/* In the single-module wasm build the wineserver runs in-process alongside the
+ * wine client; the client owns main(), so the server entry is renamed and the
+ * combined harness calls it once for init (returns immediately in COOP mode). */
+int wineserver_main( int argc, char *argv[] );
+int wineserver_main( int argc, char *argv[] )
+#else
 int main( int argc, char *argv[] )
+#endif
 {
     setvbuf( stderr, NULL, _IOLBF, 0 );
     server_argv0 = argv[0];
     parse_options( argc, argv, "d::fhk::p::vw", long_options, option_callback );
+#if defined(__wasm32__)
+    /* single-module wasm: cannot fork; the in-process server runs in the
+     * foreground and is driven cooperatively (WINE_INPROC_COOP). */
+    foreground = 1;
+#endif
 
     /* setup temporary handlers before the real signal initialization is done */
     signal( SIGPIPE, SIG_IGN );

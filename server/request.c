@@ -792,6 +792,13 @@ static void acquire_lock(void)
         close( fd );
     }
 
+#if defined(__wasm32__)
+    /* Single-module in-process build: there is no OS AF_UNIX socket and no
+     * accept loop — the wine client is injected directly (WINE_INPROC_CLIENT_FD)
+     * and drives the server cooperatively.  Skip the master socket entirely. */
+    (void)addr; (void)slen; (void)got_lock;
+    atexit( socket_cleanup );
+#else
     if ((fd = socket( AF_UNIX, SOCK_STREAM, 0 )) == -1) fatal_error( "socket: %s\n", strerror( errno ));
     addr.sun_family = AF_UNIX;
     strcpy( addr.sun_path, server_socket_name );
@@ -818,6 +825,7 @@ static void acquire_lock(void)
         fatal_error( "out of memory\n" );
     set_fd_events( master_socket->fd, POLLIN );
     make_object_permanent( &master_socket->obj );
+#endif
 }
 
 /* open the master server socket and start waiting for new clients */
