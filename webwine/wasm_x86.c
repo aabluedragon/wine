@@ -78,18 +78,13 @@ static int trace(void)
 }
 
 /* ---- flat memory (identity map) ---- */
-uint32_t g_insn_eip;   /* address of the instruction currently executing (debug) */
-static inline void wguard( uint32_t a )
-{
-    if (a < 0x10000 && trace())
-        fprintf( stderr, "wasm_x86: LOW WRITE addr=%08x from insn @ %08x\n", a, g_insn_eip );
-}
+uint64_t g_total_insns; /* total guest instructions executed (perf measurement) */
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
 static inline uint32_t rd32( uint32_t a ){ return *(uint32_t *)(uintptr_t)a; }
-static inline void wr8 ( uint32_t a, uint8_t  v ){ wguard(a); *(uint8_t  *)(uintptr_t)a = v; }
-static inline void wr16( uint32_t a, uint16_t v ){ wguard(a); *(uint16_t *)(uintptr_t)a = v; }
-static inline void wr32( uint32_t a, uint32_t v ){ wguard(a); *(uint32_t *)(uintptr_t)a = v; }
+static inline void wr8 ( uint32_t a, uint8_t  v ){ *(uint8_t  *)(uintptr_t)a = v; }
+static inline void wr16( uint32_t a, uint16_t v ){ *(uint16_t *)(uintptr_t)a = v; }
+static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v; }
 
 /* ---- flags ---- */
 static uint32_t parity( uint8_t v ){ v ^= v>>4; v ^= v>>2; v ^= v>>1; return (~v)&1; }
@@ -276,14 +271,11 @@ static void unimplemented( struct x86cpu *c, uint32_t eip, uint8_t op )
  * left in c->eip) or stops. */
 static void run( struct x86cpu *c )
 {
-    uint64_t count = 0;
     uint32_t last_eip = c->eip;
     c->running = 1;
     while (c->running)
     {
-        if ((++count & 0xfffff) == 0)
-            fprintf( stderr, "wasm_x86: heartbeat %lluK eip=%08x esp=%08x eax=%08x\n",
-                     (unsigned long long)(count >> 10), c->eip, c->regs[ESP], c->regs[EAX] );
+        g_total_insns++;
         /* a native trampoline address (small wasm table index) -> back to C */
         if (c->eip < 0x10000)
         {
@@ -297,11 +289,8 @@ static void run( struct x86cpu *c )
         }
         uint32_t start = c->eip;
         last_eip = start;
-        g_insn_eip = start;
         struct decode d = { 4, 4, 0, 0, c->eip };
         uint8_t op;
-        if (trace() && count < 200)
-            fprintf( stderr, "wasm_x86: %08x: %02x %02x %02x\n", start, rd8(start), rd8(start+1), rd8(start+2) );
 
         /* prefixes */
         for (;;)
@@ -877,8 +866,8 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         uint32_t *args = (uint32_t *)(uintptr_t)(c->regs[ESP] + 4); /* first arg (see i386 dispatcher) */
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x (%d args) -> handler %p\n", num, nargs, fn );
         if (num == 0x2c) /* NtTerminateProcess(handle, exit_status) */
-            fprintf( stderr, "wasm_x86: *** NtTerminateProcess handle=%08x exit_status=%08x (%u) ***\n",
-                     args[0], args[1], args[1] );
+            fprintf( stderr, "wasm_x86: *** NtTerminateProcess handle=%08x exit_status=%08x (%u) *** [%llu guest insns]\n",
+                     args[0], args[1], args[1], (unsigned long long)g_total_insns );
         if (num == 0x43) /* NtContinue(context, alert): restore CPU state and jump */
         {
             uint32_t ctxp = args[0];
