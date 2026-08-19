@@ -46,6 +46,19 @@ features. **The BoxedWine tree should be committed** to prevent a repeat.
 
 The old 132-fps binaries are kept as `build-jitgl/boxedwine.{wasm,js}.prev-132fps`.
 
+**Shipped + soak-validated:** the deployed build adds erase-on-collect (an
+amnestied page that never re-poisons is never touched again), a null-thread
+guard on the sweep, and full `disableWasmJitForWrittenCode` opt-out. A
+10.5-minute soak under external CPU contention: fps steady (no degradation,
+145 mean contended ≈ 2x the old build under equal load), **module memory flat
+at 171 MB** across 294k cumulative block compiles (the ~2s amnesty/re-poison
+cycle recompiles ~380 blocks per round and the freed ones genuinely release —
+no leak), 308 amnesty cycles without incident. BoxedWine work is committed
+locally (`dd4e243`, `f87f5c0` on its master). Mobile (4x-throttle) validation
+is pending a quiet machine — the native `vibebuild32` test ran all evening;
+expectation is a large win since the interpreted renderer was exactly what a
+throttled device could not afford.
+
 ## 2026-08-19 (later): fps-ceiling root cause + gzip transfer win
 
 **Why netduke32 tops out at ~132 fps — definitively diagnosed.** Fully-warm V8
