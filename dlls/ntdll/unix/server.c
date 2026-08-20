@@ -1116,21 +1116,13 @@ int wine_server_receive_fd( obj_handle_t *handle )
              * channel table (wasm_ipc_is_magic), not an fd-value threshold, is
              * the authority. Getting this wrong left real fds >= 0x300 un-dup'd,
              * so the server closed them and the client's later read()s hit EBADF. */
-            {
-                extern int wasm_ipc_is_magic( int fd ) __attribute__((weak));
-                /* Do NOT dup the std streams (0/1/2): they are the process's real
-                 * stdio, shared with the in-process server, and close() already
-                 * protects them from NtClose.  Crucially, node's stderr/stdout are
-                 * WriteStreams, not plain fds, so a dup of them is not usable by
-                 * fs.writeSync -> the guest's console/log writes (which map to its
-                 * StandardOutput handle == fd 2) would hit EBADF.  Use them as-is;
-                 * dup only real fds (>2) that are not magic transport channels. */
-                if (fd > 2 && (!&wasm_ipc_is_magic || !wasm_ipc_is_magic( fd )))
-                {
-                    int d = dup( fd );
-                    if (d != -1) fd = d;
-                }
-            }
+            /* Do NOT dup the received fd.  It is the server's own fd (identity
+             * transfer in the shared table); node's dup() returns an emscripten
+             * VFS-stream fd that fstat()s OK but fails fs.readSync (EBADF), which
+             * is why guest file reads on the duplicate broke.  The client uses
+             * the server's readable fd directly; the transport's borrow refcount
+             * (recvmsg bumps it, close() drops it) keeps either end from closing
+             * it out from under the other.  See fd_borrow in wasm_ipc.c. */
             { static int t=-1; if(t<0){const char*e=getenv("WINEWASMLOADTRACE");t=e&&*e&&*e!='0';}
               if(t){ struct stat st; int r=fstat(fd,&st); fprintf(stderr,"wasm_cli: receive_fd handle=%x fd=%d ino=%llu (fstat=%d)\n",(unsigned)(ULONG_PTR)*handle,fd,r==0?(unsigned long long)st.st_ino:0,r);} }
 #endif

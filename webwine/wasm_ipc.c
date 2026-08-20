@@ -55,21 +55,59 @@ struct chan
 
 static struct chan chans[MAGIC_COUNT];
 
+/* Borrow refcount for REAL (node) fds passed between the in-process client and
+ * server.  Both ends share one fd table, so an fd received over the transport
+ * (identity-passed) is the SAME fd the server owns.  We must NOT dup it (node's
+ * dup gives an unreadable VFS-stream fd) and must NOT let either end's close()
+ * pull it out from under the other.  Instead, each transfer bumps the borrow
+ * count; a close() while borrows are outstanding just drops one reference, and
+ * only the close that finds the count at zero actually closes the fd.  This is
+ * order-independent: the fd is closed exactly once, by whichever party issues
+ * the (borrows+1)-th close. */
+#define FD_BORROW_MAX 65536
+static unsigned short fd_borrow[FD_BORROW_MAX];
+static void fd_borrow_inc( int fd ) { if (fd >= 0 && fd < FD_BORROW_MAX && fd_borrow[fd] < 0xffff) fd_borrow[fd]++; }
+
 extern void wineserver_inproc_drive(void) __attribute__((weak));
 extern void wasm_vm_sync_shared(void);  /* refresh MAP_SHARED client mirrors */
 
-/* real libc entry points, reached for non-magic fds (linker --wrap) */
-/* Delegate non-magic fds to node's fs (NODERAWFS uses real OS fds). */
+/* Delegate non-magic fds to node's fs.  NODERAWFS gives open()ed files real
+ * node fds, but a dup()'d fd — created both client-side and, more importantly,
+ * server-side (dup_fd_object shares one fd across handles to the same inode) —
+ * is an emscripten VFS *stream* whose number is not a node fd, so a direct
+ * fs.readSync/writeSync on it returns EBADF (the mmap/pread path works because
+ * it goes through emscripten's fd translation).  Try the raw fd first, then on
+ * failure fall back to the stream's underlying node fd (FS.streams[fd].nfd).
+ * With the fd-borrow refcount keeping fd numbers stable, this is deterministic. */
 extern long __syscall_poll( long fds, long nfds, long timeout );
+/* When readSync/writeSync on a stream fd fails, retry on the underlying node fd
+ * (FS.streams[fd].nfd) AT THE STREAM'S OWN OFFSET — the guest seeks via lseek on
+ * the stream fd, which advances the stream's .position, not the node fd's, so
+ * reading the node fd at its own position would return data from the wrong
+ * offset.  Read at s.position and advance it to mirror a sequential read. */
 EM_JS(long, host_read, (int fd, void *buf, size_t n), {
-  try { var b = Buffer.from(HEAPU8.buffer, buf, n);
-        return require('fs').readSync(fd, b, 0, n, null); }
-  catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
+  var fs = require('fs'); var b = Buffer.from(HEAPU8.buffer, buf, n);
+  try { return fs.readSync(fd, b, 0, n, null); }
+  catch(e) {
+    try { var s = (typeof FS !== 'undefined' && FS.streams) ? FS.streams[fd] : null;
+          if (s && s.nfd != null && s.nfd !== fd) {
+            var pos = (s.position != null) ? s.position : null;
+            var r = fs.readSync(s.nfd, b, 0, n, pos);
+            if (s.position != null) s.position += r;
+            return r; } } catch(e2) {}
+    return -(e.errno ? Math.abs(e.errno) : 9); }
 });
 EM_JS(long, host_write, (int fd, const void *buf, size_t n), {
-  try { var b = Buffer.from(HEAPU8.buffer, buf, n);
-        return require('fs').writeSync(fd, b, 0, n, null); }
-  catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
+  var fs = require('fs'); var b = Buffer.from(HEAPU8.buffer, buf, n);
+  try { return fs.writeSync(fd, b, 0, n, null); }
+  catch(e) {
+    try { var s = (typeof FS !== 'undefined' && FS.streams) ? FS.streams[fd] : null;
+          if (s && s.nfd != null && s.nfd !== fd) {
+            var pos = (s.position != null) ? s.position : null;
+            var r = fs.writeSync(s.nfd, b, 0, n, pos);
+            if (s.position != null) s.position += r;
+            return r; } } catch(e2) {}
+    return -(e.errno ? Math.abs(e.errno) : 9); }
 });
 EM_JS(long, host_close, (int fd), {
   try { require('fs').closeSync(fd); return 0; }
@@ -209,7 +247,12 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
              * recvmsg; delivering more here would starve later receive_fd calls
              * of their fd (they would read the data but get no descriptor). */
             if (n < maxfds && (self->fdq_tail - self->fdq_head))
-                out[n++] = self->fdq[self->fdq_head++ % FDQ_SIZE];
+            {
+                int rfd = self->fdq[self->fdq_head++ % FDQ_SIZE];
+                out[n++] = rfd;
+                /* real fd: the receiver now co-owns the server's fd (see above) */
+                if (!is_magic( rfd )) fd_borrow_inc( rfd );
+            }
             cmsg->cmsg_level = SOL_SOCKET;
             cmsg->cmsg_type  = SCM_RIGHTS;
             cmsg->cmsg_len   = CMSG_LEN( n * sizeof(int) );
@@ -329,6 +372,9 @@ int close( int fd )
      * so closing the std streams (0/1/2) would close node's real stdio and kill
      * the process. The guest's std handles alias these fds; keep them open. */
     if (fd >= 0 && fd <= 2) return 0;
+    /* Outstanding borrow of a server-owned fd: drop one reference, don't close
+     * yet — the other end still uses this exact fd (see fd_borrow above). */
+    if (fd >= 0 && fd < FD_BORROW_MAX && fd_borrow[fd]) { fd_borrow[fd]--; return 0; }
     {
         if (getenv("WINEWASMLOADTRACE")) { struct stat st; int rr=fstat(fd,&st);
             fprintf(stderr,"wasm_ipc: close real fd=%d ino=%llu\n", fd, rr==0?(unsigned long long)st.st_ino:0); }
