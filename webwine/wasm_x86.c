@@ -426,6 +426,14 @@ static void unimplemented( struct x86cpu *c, uint32_t eip, uint8_t op )
     c->exit_code = 0xE0000001;
 }
 
+/* Instruction-prefix classifier: nonzero for the legacy prefix bytes so the
+ * decode loop's common no-prefix path is a single table lookup.
+ * 1=66 2=67 3=f2/f3 4=64 5=65 6=26/2e/36/3e 7=f0. */
+static const uint8_t prefix_class[256] = {
+    [0x66]=1, [0x67]=2, [0xf2]=3, [0xf3]=3, [0x64]=4, [0x65]=5,
+    [0x26]=6, [0x2e]=6, [0x36]=6, [0x3e]=6, [0xf0]=7,
+};
+
 /* Execute until the guest transfers to a native dispatcher (returns 1, target
  * left in c->eip) or stops. */
 static void run( struct x86cpu *c )
@@ -522,17 +530,23 @@ static void run( struct x86cpu *c )
         uint8_t op;
 
         /* prefixes */
+        /* Classify the byte via a table (0 = not a prefix) so the common
+         * no-prefix case costs one lookup + branch instead of ~11 compares. */
         for (;;)
         {
             op = f8( &d );
-            if (op == 0x66) { d.opsize = 2; continue; }
-            if (op == 0x67) { d.addrsize = 2; continue; }
-            if (op == 0xf2 || op == 0xf3) { d.rep = op; continue; }
-            if (op == 0x64) { d.seg = (int)c->fs_base; continue; }  /* fs -> TEB */
-            if (op == 0x65) { d.seg = (int)c->gs_base; continue; }  /* gs */
-            if (op == 0x26 || op == 0x2e || op == 0x36 || op == 0x3e) { d.seg = 0; continue; } /* flat */
-            if (op == 0xf0) continue; /* lock */
-            break;
+            uint8_t pc = prefix_class[op];
+            if (!pc) break;
+            switch (pc)
+            {
+            case 1: d.opsize = 2; break;                 /* 66 */
+            case 2: d.addrsize = 2; break;               /* 67 */
+            case 3: d.rep = op; break;                   /* f2/f3 */
+            case 4: d.seg = (int)c->fs_base; break;      /* 64 fs -> TEB */
+            case 5: d.seg = (int)c->gs_base; break;      /* 65 gs */
+            case 6: d.seg = 0; break;                    /* 26/2e/36/3e flat */
+            default: break;                              /* 7 = f0 lock (no-op) */
+            }
         }
 
         int os = d.opsize;
