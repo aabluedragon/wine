@@ -77,6 +77,11 @@ EM_JS(long, host_close, (int fd), {
 });
 
 static int is_magic( int fd ) { return fd >= MAGIC_BASE && fd < MAGIC_BASE + MAGIC_COUNT && chans[fd - MAGIC_BASE].used; }
+/* Exported so the client's fd-receive path (dlls/ntdll/unix/server.c) can tell a
+ * real (dup-able, must-dup) fd from a magic transport channel passed by identity.
+ * Real file fds can be numerically >= MAGIC_BASE, so an fd-value threshold is
+ * wrong; only the channel table is authoritative. */
+int wasm_ipc_is_magic( int fd ) { return is_magic( fd ); }
 static struct chan *chan_of( int fd ) { return &chans[fd - MAGIC_BASE]; }
 
 static int ipc_trace = -1;

@@ -1110,12 +1110,19 @@ int wine_server_receive_fd( obj_handle_t *handle )
             /* In-process transport passes the fd by identity (no SCM_RIGHTS dup),
              * so the received number IS the server's own fd. The client caches
              * and later close()s it (NtClose), which would close the SERVER's fd
-             * out from under its object. dup() a private copy for real fds (magic
-             * transport fds >= MAGIC_BASE are not real and must not be dup'd). */
-            if (fd >= 0 && fd < 0x300)
+             * out from under its object. dup() a private copy for every REAL fd.
+             * Only magic transport channels (passed by identity) must not be
+             * dup'd -- and real file fds can be numerically >= MAGIC_BASE, so the
+             * channel table (wasm_ipc_is_magic), not an fd-value threshold, is
+             * the authority. Getting this wrong left real fds >= 0x300 un-dup'd,
+             * so the server closed them and the client's later read()s hit EBADF. */
             {
-                int d = dup( fd );
-                if (d != -1) fd = d;
+                extern int wasm_ipc_is_magic( int fd ) __attribute__((weak));
+                if (fd >= 0 && (!&wasm_ipc_is_magic || !wasm_ipc_is_magic( fd )))
+                {
+                    int d = dup( fd );
+                    if (d != -1) fd = d;
+                }
             }
             { static int t=-1; if(t<0){const char*e=getenv("WINEWASMLOADTRACE");t=e&&*e&&*e!='0';}
               if(t){ struct stat st; int r=fstat(fd,&st); fprintf(stderr,"wasm_cli: receive_fd handle=%x fd=%d ino=%llu (fstat=%d)\n",(unsigned)(ULONG_PTR)*handle,fd,r==0?(unsigned long long)st.st_ino:0,r);} }
