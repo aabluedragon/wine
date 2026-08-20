@@ -53,10 +53,18 @@ NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULO
     return STATUS_NOT_IMPLEMENTED;
 }
 
+extern void wasm_x86_setup_exception( EXCEPTION_RECORD *rec, CONTEXT *context );
 NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_RECORD *rec, CONTEXT *context )
 {
-    bridge_unimplemented( "call_user_exception_dispatcher" );
-    return STATUS_NOT_IMPLEMENTED;
+    /* EXCEPTION_WINE_STUB (0x80000100): a stubbed API was called; the two
+     * params point to the module + function name strings.  Log them. */
+    if (rec && rec->ExceptionCode == 0x80000100 && rec->NumberParameters >= 2)
+        fprintf( stderr, "wine-wasm: STUB called: %s.%s\n",
+                 (const char *)(uintptr_t)rec->ExceptionInformation[0],
+                 (const char *)(uintptr_t)rec->ExceptionInformation[1] );
+    /* Deliver the exception to the guest's SEH chain via the i386 interpreter. */
+    wasm_x86_setup_exception( rec, context );
+    return STATUS_SUCCESS;
 }
 
 void call_raise_user_exception_dispatcher( struct thread_data *data )

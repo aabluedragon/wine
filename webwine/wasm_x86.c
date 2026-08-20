@@ -140,6 +140,13 @@ static void wasm_dump_frame( struct x86cpu *c )
             rgb[o++] = rd8( pe + 1 );
             rgb[o++] = rd8( pe + 2 );
         }
+#ifdef WEBWINE_BROWSER
+    /* Live display: hand the frame to the page (posts to the main thread). */
+    extern void webwine_present( const void *rgb, int w, int h );
+    webwine_present( rgb, w, h );
+    free( rgb );
+    return;
+#endif
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t enclen = (nrgb + 2) / 3 * 4;
     char *enc = malloc( enclen + 1 );
@@ -424,16 +431,22 @@ static void run( struct x86cpu *c )
         last_eip = start;
         {
             static int cap_on = -1, slide_ok = 0, cap_done = 0, valid_seen = 0, cap_need = 0;
-            static uint64_t next_probe = 0;
+            static uint64_t next_probe = 0, probe_step = 500000;
             if (cap_on == -1)   /* read env once */
             {
+#ifdef WEBWINE_BROWSER
+                cap_on = 1;               /* live display: always present */
+                probe_step = 120000;      /* poll ~every 120k insns for a smooth feed */
+                cap_need = 1;
+#else
                 cap_on = getenv( "WASM_DUMP_FRAME" ) ? 1 : 0;
                 const char *e = getenv( "WASM_DUMP_FRAME_N" );
                 cap_need = (e && *e) ? atoi( e ) : 1;   /* # of valid probes before dump */
+#endif
             }
             if (cap_on && !cap_done && g_total_insns >= next_probe)
             {
-                next_probe = g_total_insns + 500000;
+                next_probe = g_total_insns + probe_step;
                 if (!slide_ok)   /* derive ASLR slide once PEB is ready */
                 {
                     uint32_t teb = c->fs_base;
@@ -446,10 +459,13 @@ static void run( struct x86cpu *c )
                 {
                     uint32_t fp = rd32( ND_FRAMEPLACE + nd_slide );
                     int w = (int)rd32( ND_XDIM + nd_slide ), h = (int)rd32( ND_YDIM + nd_slide );
-                    fprintf( stderr, "wasm_x86: probe insns=%llu frameplace=%08x xdim=%d ydim=%d\n",
-                             (unsigned long long)g_total_insns, fp, w, h );
                     if (fp && w > 0 && h > 0 && ++valid_seen >= cap_need)
                     {
+#ifdef WEBWINE_BROWSER
+                        wasm_dump_frame( c );   /* -> webwine_present -> canvas, every poll */
+#else
+                        fprintf( stderr, "wasm_x86: probe insns=%llu frameplace=%08x xdim=%d ydim=%d\n",
+                                 (unsigned long long)g_total_insns, fp, w, h );
                         static int nframes = 0;
                         /* emit up to 8 frames, one every 6 valid probes (~3M insns) */
                         if ((valid_seen - cap_need) % 6 == 0)
@@ -457,6 +473,7 @@ static void run( struct x86cpu *c )
                             wasm_dump_frame( c );
                             if (++nframes >= 8) cap_done = 1;
                         }
+#endif
                     }
                 }
             }
@@ -489,6 +506,19 @@ static void run( struct x86cpu *c )
         case 0x8a: m = decode_modrm(c,&d); write_reg(c,m.reg,1, read_rm(c,&m,1)); break;
         case 0x8b: m = decode_modrm(c,&d); write_reg(c,m.reg,os, read_rm(c,&m,os)); break;
         case 0x8d: m = decode_modrm(c,&d); write_reg(c,m.reg,os, m.ea); break; /* lea */
+        /* MOV r/m16, Sreg — store the segment selector.  We run a flat model
+         * (bases in fs_base/gs_base), but code reads/stores the selector values;
+         * hand back Wine's standard i386 user selectors.  reg field: 0=ES 1=CS
+         * 2=SS 3=DS 4=FS 5=GS. */
+        case 0x8c: m = decode_modrm(c,&d);
+        {
+            static const uint16_t sel[6] = { 0x2b, 0x23, 0x2b, 0x2b, 0x3b, 0x63 };
+            uint16_t s = (m.reg < 6) ? sel[m.reg] : 0;
+            write_rm( c, &m, m.is_reg ? os : 2, s );
+        } break;
+        /* MOV Sreg, r/m16 — accept the load; the flat bases are fixed (TEB is
+         * pinned), so changing a selector is a no-op here. */
+        case 0x8e: m = decode_modrm(c,&d); (void)read_rm(c,&m,2); break;
         case 0xc6: m = decode_modrm(c,&d); { uint8_t im=f8(&d); write_rm(c,&m,1,im); } break;
         case 0xc7: m = decode_modrm(c,&d); { uint32_t im = os==2?f16(&d):f32(&d); write_rm(c,&m,os,im); } break;
         case 0xb0: case 0xb1: case 0xb2: case 0xb3: case 0xb4: case 0xb5: case 0xb6: case 0xb7:
@@ -1476,6 +1506,35 @@ NTSTATUS wasm_x86_callback_return( void *ret_ptr, uint32_t ret_len, int status )
     return (NTSTATUS)status;
 }
 
+/* ---- exception delivery to the guest (SEH) ----------------------------------
+ * The unix side (via NtRaiseException / a fault) hands us an EXCEPTION_RECORD +
+ * CONTEXT to deliver to user mode.  Mirror i386 call_user_exception_dispatcher:
+ * build { rec_ptr; ctx_ptr; rec; ctx } on the guest stack and enter
+ * pKiUserExceptionDispatcher (which reads rec_ptr at [esp], ctx_ptr at [esp+4]).
+ * A handler resumes via NtContinue (already handled below).  Set a flag so the
+ * syscall dispatcher doesn't overwrite the new eip with the syscall return. */
+int g_wasm_exc_pending;
+void wasm_x86_setup_exception( EXCEPTION_RECORD *rec, CONTEXT *ctx )
+{
+    struct x86cpu *c = &g_cpu;
+    uint32_t sr = (uint32_t)sizeof(EXCEPTION_RECORD);
+    uint32_t sc = (uint32_t)sizeof(CONTEXT);
+    uint32_t stack = (c->regs[ESP] - (8 + sr + sc)) & ~15u;
+    uint32_t rec_ptr = stack + 8;
+    uint32_t ctx_ptr = stack + 8 + sr;
+    wr32( stack + 0, rec_ptr );
+    wr32( stack + 4, ctx_ptr );
+    memcpy( (void *)(uintptr_t)rec_ptr, rec, sr );
+    memcpy( (void *)(uintptr_t)ctx_ptr, ctx, sc );
+    if (rec->ExceptionCode == 0x80000003 /* EXCEPTION_BREAKPOINT */)
+        wr32( ctx_ptr + 0xb8, rd32( ctx_ptr + 0xb8 ) - 1 );   /* context->Eip-- */
+    c->regs[ESP] = stack;
+    c->eip = addr_exc;
+    g_wasm_exc_pending = 1;
+    if (trace()) fprintf( stderr, "wasm_x86: deliver exception code=%08x -> KiUserExceptionDispatcher esp=%08x\n",
+                          (unsigned)rec->ExceptionCode, stack );
+}
+
 int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
 {
     if (target == 0xdeadbabe || target == 0)
@@ -1512,6 +1571,9 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         if (syscall_returns_void( num )) { call_handler_void( fn, nargs, args ); c->regs[EAX] = 0; }
         else c->regs[EAX] = call_handler( fn, nargs, args );
         if (table == 1) { extern void wasm_vm_sync_shared(void); wasm_vm_sync_shared(); } /* win32u wrote shared session mem */
+        /* The handler (e.g. NtRaiseException) may have set up an exception frame
+         * and redirected eip to KiUserExceptionDispatcher; don't clobber it. */
+        if (g_wasm_exc_pending) { g_wasm_exc_pending = 0; return 1; }
         if (trace()) fprintf( stderr, "wasm_x86: syscall %04x returned eax=%08x ret_eip=%08x\n", num, c->regs[EAX], ret_eip );
         c->eip = ret_eip;
         return 1;

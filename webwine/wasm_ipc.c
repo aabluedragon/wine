@@ -93,6 +93,31 @@ extern long __syscall_poll( long fds, long nfds, long timeout );
  * fds, dup'd stream fds).  Mirror its logic but guard every step; a real fd we
  * cannot classify is reported ready for the events it asked for. POLL* are the
  * Linux values emscripten uses: IN=1 OUT=4 ERR=8 HUP=16 NVAL=32. */
+#ifdef WEBWINE_MEMFS
+/* Browser build: files live in emscripten MEMFS (no NODERAWFS / node fds).
+ * A non-magic fd is a MEMFS stream fd; do I/O through the FS API, which both
+ * advances the stream position and works with the guest's lseek()s. */
+EM_JS(int, host_poll_fd, (int fd, int events), {
+  try { var s = FS.getStream(fd);
+        if (s && s.stream_ops && s.stream_ops.poll) return s.stream_ops.poll(s,-1) & (events|8|16);
+        return events & (1 | 4); }
+  catch(e){ return events & (1 | 4); }
+});
+EM_JS(long, host_read, (int fd, void *buf, size_t n), {
+  try { var s = FS.getStream(fd); if (!s) return -9;
+        return FS.read(s, HEAPU8, buf, n); }   /* uses s.position, advances it */
+  catch(e){ return -(e.errno ? Math.abs(e.errno) : 9); }
+});
+EM_JS(long, host_write, (int fd, const void *buf, size_t n), {
+  try { var s = FS.getStream(fd); if (!s) return -9;
+        return FS.write(s, HEAPU8, buf, n); }
+  catch(e){ return -(e.errno ? Math.abs(e.errno) : 9); }
+});
+EM_JS(long, host_close, (int fd), {
+  try { var s = FS.getStream(fd); if (!s) return -9; FS.close(s); return 0; }
+  catch(e){ return -(e.errno ? Math.abs(e.errno) : 9); }
+});
+#else
 EM_JS(int, host_poll_fd, (int fd, int events), {
   try {
     var stream = (typeof FS !== 'undefined' && FS.getStream) ? FS.getStream(fd) : null;
@@ -137,6 +162,24 @@ EM_JS(long, host_close, (int fd), {
   try { require('fs').closeSync(fd); return 0; }
   catch(e) { return -(e.errno ? Math.abs(e.errno) : 9); }
 });
+#endif  /* WEBWINE_MEMFS */
+
+/* ---- browser display: hand a de-palettised RGB frame to the page ----------
+ * Called by the interpreter's frame poller (wasm_x86.c).  In the browser the
+ * module runs inside a Web Worker; post the frame to the main thread which
+ * blits it to a <canvas>.  A no-op stub is provided for the node build so the
+ * same wasm_x86.c present path links either way. */
+#ifdef WEBWINE_MEMFS
+EM_JS(void, webwine_present, (const void *rgb, int w, int h), {
+  var n = w * h * 3;
+  /* copy out of the wasm heap (postMessage transfer needs an owned buffer) */
+  var out = new Uint8Array(n);
+  out.set(HEAPU8.subarray(rgb, rgb + n));
+  postMessage({ type: 'frame', w: w, h: h, rgb: out.buffer }, [out.buffer]);
+});
+#else
+void webwine_present( const void *rgb, int w, int h ) { (void)rgb; (void)w; (void)h; }
+#endif
 
 static int is_magic( int fd ) { return fd >= MAGIC_BASE && fd < MAGIC_BASE + MAGIC_COUNT && chans[fd - MAGIC_BASE].used; }
 /* Exported so the client's fd-receive path (dlls/ntdll/unix/server.c) can tell a

@@ -600,8 +600,13 @@ static void create_dir( const char *name, struct stat *st )
             fatal_error( "lstat %s: %s\n", name, strerror( errno ));
     }
     if (!S_ISDIR(st->st_mode)) fatal_error( "%s is not a directory\n", name );
+#ifndef __wasm__
+    /* MEMFS (browser) has no real uid/permission model — getuid() is 0 and
+     * nodes are world-accessible; the ownership check is meaningless in the
+     * single-user wasm sandbox. */
     if (st->st_uid != getuid()) fatal_error( "%s is not owned by you\n", name );
     if (st->st_mode & 077) fatal_error( "%s must not be accessible by other users\n", name );
+#endif
 }
 
 /* create the server directory and chdir to it */
@@ -646,8 +651,10 @@ static char *create_server_dir( int force )
         fatal_error( "open %s: %s\n", config_dir, strerror( errno ));
     if (fstat( config_dir_fd, &st ) == -1)
         fatal_error( "stat %s: %s\n", config_dir, strerror( errno ));
+#ifndef __wasm__
     if (st.st_uid != getuid())
         fatal_error( "%s is not owned by you\n", config_dir );
+#endif
 
     /* create the base directory if needed */
 
