@@ -831,6 +831,73 @@ static __attribute__((noinline)) int run_sse( struct x86cpu *c, struct decode *d
     return 1;
 }
 
+/* grp3 (F6/F7: test/not/neg/mul/imul/div/idiv) and the string instructions.
+ * Split out of run() for the same reason as run_x87/run_sse: none of these
+ * reach the top-16 opcode histogram, but the 64-bit divides and the rep loops
+ * compile to a lot of code, and run() is register-pressure bound - every byte
+ * of cold code in that one function costs the hot dispatch path.  Pure code
+ * motion. */
+static __attribute__((noinline)) void run_cold( struct x86cpu *c, struct decode *d, uint8_t op )
+{
+    struct modrm m;
+    uint32_t a, b, r;
+    int os = d->opsize;
+    (void)r;
+    switch (op)
+    {
+        /* grp3: F6/F7 test/not/neg/mul/imul/div/idiv */
+        case 0xf6: case 0xf7:
+        {
+            int sz=(op&1)?os:1;
+            m=decode_modrm(c,d);
+            a=read_rm(c,&m,sz);
+            switch (m.reg)
+            {
+            case 0: case 1: b=(sz==1)?f8(d):(os==2?f16(d):f32(d)); set_lazy(c,K_LOGIC,a,b,a&b,sz); break; /* test */
+            case 2: write_rm(c,&m,sz,~a); break; /* not */
+            case 3: r=(uint32_t)(-(int32_t)a); write_rm(c,&m,sz,r); set_lazy(c,K_SUB,0,a,r,sz); break; /* neg */
+            case 4: /* mul */ { uint64_t p=(uint64_t)(a&sizemask(sz))*(sz==1?(c->regs[EAX]&0xff):sz==2?(c->regs[EAX]&0xffff):c->regs[EAX]);
+                                if(sz==1) c->regs[EAX]=(c->regs[EAX]&0xffff0000)|(uint16_t)p;
+                                else if(sz==2){write_reg(c,EAX,2,(uint16_t)p); write_reg(c,EDX,2,(uint16_t)(p>>16));}
+                                else {c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} } break;
+            case 5: /* imul */ { int64_t p=(int64_t)(int32_t)a*(int32_t)c->regs[EAX];
+                                 if(sz==4){c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} else write_reg(c,EAX,sz,(uint32_t)p);} break;
+            case 6: /* div */ if(sz==4){ uint64_t dividend=((uint64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/a); c->regs[EDX]=(uint32_t)(dividend%a);} }
+                              else if(sz==2){ uint32_t dividend=((c->regs[EDX]&0xffff)<<16)|(c->regs[EAX]&0xffff); if(a){write_reg(c,EAX,2,dividend/a); write_reg(c,EDX,2,dividend%a);} }
+                              else { uint32_t dividend=c->regs[EAX]&0xffff; if(a){c->regs[EAX]=(c->regs[EAX]&0xffff0000)|((dividend/a)&0xff)|(((dividend%a)&0xff)<<8);} } break;
+            case 7: /* idiv */ if(sz==4){ int64_t dividend=((int64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/(int32_t)a); c->regs[EDX]=(uint32_t)(dividend%(int32_t)a);} } break;
+            }
+            break;
+        }
+
+        /* string ops (addr32) with optional rep */
+        case 0xa4: case 0xa5: /* movs */
+        {
+            int sz=(op&1)?os:1; uint32_t cnt=(d->rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz;
+            while (cnt--) { uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
+                            if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v);
+                            c->regs[ESI]+=delta; c->regs[EDI]+=delta; }
+            if (d->rep) c->regs[ECX]=0;
+            break;
+        }
+        case 0xaa: case 0xab: /* stos */
+        {
+            int sz=(op&1)?os:1; uint32_t cnt=(d->rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz; uint32_t v=c->regs[EAX];
+            while (cnt--) { if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v); c->regs[EDI]+=delta; }
+            if (d->rep) c->regs[ECX]=0;
+            break;
+        }
+        case 0xac: case 0xad: /* lods */
+        {
+            int sz=(op&1)?os:1; int delta=(c->eflags&DF)?-sz:sz;
+            uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
+            write_reg(c,EAX,sz,v); c->regs[ESI]+=delta;
+            break;
+        }
+    default: break;
+    }
+}
+
 /* x87 FPU (0xd8-0xdf).  Split out of run() so the interpreter's hot integer
  * path stays a small function: run() compiled to ~76KB of wasm in ONE body,
  * which is 90% of the module and well past the point where the engine's
@@ -1051,16 +1118,24 @@ static __attribute__((noinline)) void run_x87( struct x86cpu *c, struct decode *
 static void run( struct x86cpu *c )
 {
     uint32_t last_eip = c->eip;
+    /* Instruction count lives in a local and is folded into the global only at
+     * the housekeeping tick and on the way out (see the RUN_RETURN sites).
+     * Incrementing the 64-bit global directly cost an i64 load + i64 store to
+     * linear memory on EVERY guest instruction, purely for diagnostics.  A local
+     * is a wasm register, and accumulating a delta (rather than mirroring the
+     * total) stays correct when run() re-enters itself for user callbacks. */
+    uint32_t idelta = 0;
     c->running = 1;
     while (c->running)
     {
-        g_total_insns++;
         /* Periodic housekeeping (~every 64K insns): derive the ASLR slide once
          * the PEB is ready (which arms frame-boundary presenting), and — under
          * WASM_TPUT — sample throughput/fps.  Kept off the per-instruction path
          * so the hot loop stays tight. */
-        if ((g_total_insns & 0xffff) == 0)
+        if (++idelta == 0x10000)
         {
+            g_total_insns += idelta;
+            idelta = 0;
             extern double emscripten_get_now( void );
             if (!g_slide_ok)
             {
@@ -1116,7 +1191,7 @@ static void run( struct x86cpu *c )
                          "(esp=%08x [esp]=%08x [esp+4]=%08x eax=%08x ebx=%08x ecx=%08x edx=%08x)\n",
                          last_eip, c->regs[ESP], rd32(c->regs[ESP]), rd32(c->regs[ESP]+4),
                          c->regs[EAX], c->regs[EBX], c->regs[ECX], c->regs[EDX] );
-            if (!wasm_x86_dispatch( c, c->eip )) return;
+            if (!wasm_x86_dispatch( c, c->eip )) { g_total_insns += idelta; return; }   /* RUN_RETURN */
             continue;
         }
         uint32_t start = c->eip;
@@ -1208,7 +1283,7 @@ static void run( struct x86cpu *c )
             case 2: a = read_rm(c,&m,os); push32(c, d.eip); c->eip = a; goto next; /* call r/m */
             case 4: a = read_rm(c,&m,os); c->eip = a; goto next; /* jmp r/m */
             case 6: push32(c, read_rm(c,&m,os)); break; /* push r/m */
-            default: unimplemented(c,start,op); return;
+            default: unimplemented(c,start,op); g_total_insns += idelta; return;   /* RUN_RETURN */
             }
             break;
         case 0x8f: m = decode_modrm(c,&d); write_rm(c,&m,os, pop32(c)); break;
@@ -1218,7 +1293,7 @@ static void run( struct x86cpu *c )
             switch (m.reg) {
             case 0: a = read_rm(c,&m,1); r = (a+1)&0xff; write_rm(c,&m,1,r); set_lazy(c,K_INC,a,1,r,1); break; /* inc */
             case 1: a = read_rm(c,&m,1); r = (a-1)&0xff; write_rm(c,&m,1,r); set_lazy(c,K_DEC,a,1,r,1); break; /* dec */
-            default: unimplemented(c,start,op); return;
+            default: unimplemented(c,start,op); g_total_insns += idelta; return;   /* RUN_RETURN */
             }
             break;
 
@@ -1402,55 +1477,13 @@ static void run( struct x86cpu *c )
             break;
         }
 
-        /* grp3: F6/F7 test/not/neg/mul/imul/div/idiv */
+        /* grp3 + string ops: cold, see run_cold */
         case 0xf6: case 0xf7:
-        {
-            int sz=(op&1)?os:1;
-            m=decode_modrm(c,&d);
-            a=read_rm(c,&m,sz);
-            switch (m.reg)
-            {
-            case 0: case 1: b=(sz==1)?f8(&d):(os==2?f16(&d):f32(&d)); set_lazy(c,K_LOGIC,a,b,a&b,sz); break; /* test */
-            case 2: write_rm(c,&m,sz,~a); break; /* not */
-            case 3: r=(uint32_t)(-(int32_t)a); write_rm(c,&m,sz,r); set_lazy(c,K_SUB,0,a,r,sz); break; /* neg */
-            case 4: /* mul */ { uint64_t p=(uint64_t)(a&sizemask(sz))*(sz==1?(c->regs[EAX]&0xff):sz==2?(c->regs[EAX]&0xffff):c->regs[EAX]);
-                                if(sz==1) c->regs[EAX]=(c->regs[EAX]&0xffff0000)|(uint16_t)p;
-                                else if(sz==2){write_reg(c,EAX,2,(uint16_t)p); write_reg(c,EDX,2,(uint16_t)(p>>16));}
-                                else {c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} } break;
-            case 5: /* imul */ { int64_t p=(int64_t)(int32_t)a*(int32_t)c->regs[EAX];
-                                 if(sz==4){c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} else write_reg(c,EAX,sz,(uint32_t)p);} break;
-            case 6: /* div */ if(sz==4){ uint64_t dividend=((uint64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/a); c->regs[EDX]=(uint32_t)(dividend%a);} }
-                              else if(sz==2){ uint32_t dividend=((c->regs[EDX]&0xffff)<<16)|(c->regs[EAX]&0xffff); if(a){write_reg(c,EAX,2,dividend/a); write_reg(c,EDX,2,dividend%a);} }
-                              else { uint32_t dividend=c->regs[EAX]&0xffff; if(a){c->regs[EAX]=(c->regs[EAX]&0xffff0000)|((dividend/a)&0xff)|(((dividend%a)&0xff)<<8);} } break;
-            case 7: /* idiv */ if(sz==4){ int64_t dividend=((int64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/(int32_t)a); c->regs[EDX]=(uint32_t)(dividend%(int32_t)a);} } break;
-            }
+        case 0xa4: case 0xa5:
+        case 0xaa: case 0xab:
+        case 0xac: case 0xad:
+            run_cold( c, &d, op );
             break;
-        }
-
-        /* string ops (addr32) with optional rep */
-        case 0xa4: case 0xa5: /* movs */
-        {
-            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz;
-            while (cnt--) { uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
-                            if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v);
-                            c->regs[ESI]+=delta; c->regs[EDI]+=delta; }
-            if (d.rep) c->regs[ECX]=0;
-            break;
-        }
-        case 0xaa: case 0xab: /* stos */
-        {
-            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz; uint32_t v=c->regs[EAX];
-            while (cnt--) { if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v); c->regs[EDI]+=delta; }
-            if (d.rep) c->regs[ECX]=0;
-            break;
-        }
-        case 0xac: case 0xad: /* lods */
-        {
-            int sz=(op&1)?os:1; int delta=(c->eflags&DF)?-sz:sz;
-            uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
-            write_reg(c,EAX,sz,v); c->regs[ESI]+=delta;
-            break;
-        }
         case 0xf5: c->eflags ^= CF; break;  /* cmc */
         case 0xf8: c->eflags &= ~CF; break;  /* clc */
         case 0xf9: c->eflags |= CF; break;   /* stc */
@@ -1513,7 +1546,7 @@ static void run( struct x86cpu *c )
 
             /* ---- SSE/SSE2 (enough for memset/memcpy/strlen in ntdll) ---- */
             default:   /* SSE/MMX/bit-ops live in run_sse (cold, see there) */
-                if (!run_sse( c, &d, op2 )) { unimplemented(c,start,0x0f); return; }
+                if (!run_sse( c, &d, op2 )) { unimplemented(c,start,0x0f); g_total_insns += idelta; return; }   /* RUN_RETURN */
                 break;
             }
             break;
@@ -1521,6 +1554,7 @@ static void run( struct x86cpu *c )
 
         default:
             unimplemented( c, start, op );
+            g_total_insns += idelta;   /* RUN_RETURN */
             return;
         }
         c->eip = d.eip;
