@@ -22,6 +22,39 @@ frames on stderr.
 
 ## Performance notes (measured this session)
 
+### The two biggest levers (~20 → ~66 fps)
+
+- **Run at the resolution the renderer is meant for.**  The classic renderer is
+  pixel-bound, and the default 1024×768 window costs ~2.5× the pixels for no
+  visible benefit.  `autoexec.cfg` (preloaded at `/game`) sets
+  `vidmode 640 400 8 0` + `r_upscalefactor 3`, which lands on the engine's
+  **320×200 floor**: **~20 → ~52 fps**.  Notes: the engine *refuses* a 320×200
+  window and falls back to 640×400 at full res (30 fps), so keeping the upscale
+  pass is worth it; `r_upscalefactor` past the floor does nothing; and
+  `r_maxfps 0`/`r_vsync 0` confirmed we are render-bound, not capped.
+- **Run Wine's own CRT block moves natively — `52 → 66 fps`.**  The guest
+  profiler found **69% of ALL guest instructions inside `msvcrt.dll!memmove`'s
+  inner copy loop**: the engine blits its framebuffer every frame and we were
+  interpreting that byte shuffling one x86 instruction at a time.  msvcrt is
+  *our builtin*, not the application, so `memmove`/`memcpy`/`memset` entry points
+  are resolved once from the PEB loader list and executed natively
+  (`nat_*` in `../wasm_x86.c`).  Dispatch is a direct-mapped table — **one
+  indexed load + compare**, the same cost as the frame-flip check it replaced, so
+  `run()`'s register pressure does not grow.  It declines (and lets the guest
+  code run) if the buffers are not wholly inside the guest address space.
+  msvcrt vanished from the profile completely.
+
+### Profiling the guest
+
+`WASM_PROF=1` turns on an eip sampler that piggybacks on the existing
+~64K-instruction housekeeping tick, so **the hot path pays nothing**.  It prints
+`PROF <addr> <count> [module!export+off]`, resolving non-exe addresses by walking
+the PE headers in guest memory.  Map exe addresses to names with the shipped
+symbols (`VA = symbol value + 0x401000`).  This is what found the memmove
+result; guessing would not have.  Current top cost is `_videoNextPage` (~37%) — a
+64-byte-stride per-frame bookkeeping walk *inside the engine*, which is why
+dropping resolution stopped scaling fps linearly.
+
 - **THE governing constraint: `run()` is register-pressure bound.**  It was a
   **76KB single wasm function — 90% of the whole module** — far past the size
   where the engine's optimizer allocates registers well.  Everything follows from
