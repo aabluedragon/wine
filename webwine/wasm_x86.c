@@ -111,12 +111,15 @@ static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v
 #define ND_YDIM          0x930048u  /* screen height                           */
 #define ND_CURPALETTE    0xa61220u  /* palette_t[256], 4 bytes/entry           */
 static int32_t nd_slide = 0;   /* actual_exe_base - 0x400000 (ASLR relocation) */
+static int g_present_count = 0;
 
 static void wasm_dump_frame( struct x86cpu *c )
 {
     (void)c;
+#ifndef WEBWINE_BROWSER
     const char *path = getenv( "WASM_DUMP_FRAME" );
     if (!path || !*path) return;
+#endif
     uint32_t fp  = rd32( ND_FRAMEPLACE + nd_slide );
     int w   = (int)rd32( ND_XDIM + nd_slide );
     int h   = (int)rd32( ND_YDIM + nd_slide );
@@ -144,9 +147,10 @@ static void wasm_dump_frame( struct x86cpu *c )
     /* Live display: hand the frame to the page (posts to the main thread). */
     extern void webwine_present( const void *rgb, int w, int h );
     webwine_present( rgb, w, h );
+    g_present_count++;
     free( rgb );
     return;
-#endif
+#else
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t enclen = (nrgb + 2) / 3 * 4;
     char *enc = malloc( enclen + 1 );
@@ -170,6 +174,7 @@ static void wasm_dump_frame( struct x86cpu *c )
     fflush( stderr );
     free( enc ); free( rgb );
     fprintf( stderr, "wasm_x86: emitted frame %dx%d (%zu b64 bytes)\n", w, h, e );
+#endif  /* !WEBWINE_BROWSER */
 }
 
 /* ---- flags ---- */
@@ -444,6 +449,22 @@ static void run( struct x86cpu *c )
                 cap_need = (e && *e) ? atoi( e ) : 1;   /* # of valid probes before dump */
 #endif
             }
+#ifdef WEBWINE_BROWSER
+            /* Heartbeat: surface where the interpreter is when no frame is
+             * appearing, so a browser-side hang/spin is diagnosable. */
+            {
+                static uint64_t next_hb = 0;
+                if (g_total_insns >= next_hb)
+                {
+                    next_hb = g_total_insns + 30000000;
+                    uint32_t fp = slide_ok ? rd32( ND_FRAMEPLACE + nd_slide ) : 0;
+                    int w = slide_ok ? (int)rd32( ND_XDIM + nd_slide ) : 0;
+                    int h = slide_ok ? (int)rd32( ND_YDIM + nd_slide ) : 0;
+                    fprintf( stderr, "wasm_x86: hb insns=%llu eip=%08x fp=%08x %dx%d presents=%d\n",
+                             (unsigned long long)g_total_insns, start, fp, w, h, g_present_count );
+                }
+            }
+#endif
             if (cap_on && !cap_done && g_total_insns >= next_probe)
             {
                 next_probe = g_total_insns + probe_step;
