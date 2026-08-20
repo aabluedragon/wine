@@ -22,13 +22,25 @@ frames on stderr.
 
 ## Performance notes (measured this session)
 
-- **`run()` was a 76KB single wasm function — 90% of the whole module.**  That is
-  far past the size where the engine's optimizer allocates registers well, and it
-  was the *cause* of the old "-O1 beats -O2/-O3" result: higher opt levels inline
-  more into an already oversized body.  Splitting the cold blocks out
-  (`run_x87()`, `run_sse()` — x87, SSE/MMX, and the bt/cmpxchg/xadd tail, none of
-  which appear in the top-16 opcode histogram) cut `run()` to 55KB and **flipped
-  the optimum**.
+- **THE governing constraint: `run()` is register-pressure bound.**  It was a
+  **76KB single wasm function — 90% of the whole module** — far past the size
+  where the engine's optimizer allocates registers well.  Everything follows from
+  this:
+  - It *caused* the old "-O1 beats -O2/-O3" result (higher opt inlines more into
+    an already oversized body).
+  - **What works is making `run()` smaller.**  Splitting cold blocks out —
+    `run_x87()` (x87), `run_sse()` (SSE/MMX + the bt/cmpxchg/xadd tail),
+    `run_cold()` (grp3 mul/div + string ops); none appear in the top-16 opcode
+    histogram — took `run()` **76.5KB → 45.7KB** and flipped the opt optimum.
+  - **What does NOT work is anything that adds live values**, even when it removes
+    real memory traffic.  Measured and rejected: pointer-out `decode_modrm`
+    (**−7%**), a packed-u64 modrm return that made both decode structs pure wasm
+    locals and halved the loads/stores (**−5%**, verified correct by a 4M-case
+    differential test), mirroring `g_flip_addr`/`g_histo_on` into locals
+    (**−2.8%**), branchless `sizemask`/`signmask` (**−1.3%**), `always_inline` on
+    the tiny fetch helpers (no gain).
+  Shadow-stack accesses here are constant-address L1 hits with store-to-load
+  forwarding — effectively free — so trading them for register pressure loses.
 - **Interpreter opt: `-O2`** (`XOPT` in the build scripts).  After the split,
   measured back-to-back both orders: **-O2 ~+11% over -O1**, with -O3 between the
   two.  Before the split -O1 won.  Re-measure this if `run()`'s size changes much.
@@ -61,12 +73,20 @@ frames on stderr.
   decoded-block JIT (self-modifying code is sparse — ~0.1% of writes land in the
   code region — so a generation-flushed decode cache is viable but is a large,
   correctness-critical refactor).
+- **Diagnostic counter off the hot path:** the guest instruction count was a 64-bit
+  *global* bumped every instruction (i64 load + i64 store to linear memory).  It
+  now lives in a local and is folded into the global at the tick and at the
+  `RUN_RETURN` sites; accumulating a *delta* rather than mirroring the total keeps
+  it correct when `run()` re-enters itself for user callbacks.
+- **`rep` string ops are NOT worth bulk-memcpy'ing** (checked by disassembling the
+  exe): 596 `rep` sites, but every per-frame one has a small compile-time-constant
+  `ECX` — these are inlined struct copies, not framebuffer blits.
 - **Measurement discipline:** run-to-run noise is ±10% (the attract demo is
-  wall-clock locked, so a window lands on different scenes).  Only trust
-  back-to-back A/B in one session — `git stash`, rebuild, measure the same
-  `[A,B]` window — and prefer `mips` over `fps`.  Things measured and *rejected*:
-  pointer-out `decode_modrm` (7% slower — taking `&m` forces the struct to memory),
-  `always_inline` on the tiny fetch helpers (no gain at -O1).
+  wall-clock locked, so a window lands on different scenes), and background CPU
+  load shifts absolute numbers a lot.  Only trust back-to-back A/B in one session
+  — `git stash`, rebuild, measure the same `[A,B]` window, ideally in both orders
+  — and prefer `mips` over `fps`.  `relink_x86.sh`-style rebuilds of only
+  `wasm_x86.o` isolate the interpreter and are much faster than a full rebuild.
 
 ## Files
 
