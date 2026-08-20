@@ -878,13 +878,18 @@ static void run( struct x86cpu *c )
             /* ---- SSE/SSE2 (enough for memset/memcpy/strlen in ntdll) ---- */
             case 0x10: case 0x28: /* movups/movaps/movss/movsd xmm, xmm/m */
                 m=decode_modrm(c,&d);
-                if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], 16);
-                else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, (d.rep==0xf3)?4:(d.rep==0xf2)?8:16);
+                { int scalar=(op2==0x10)&&(d.rep==0xf3||d.rep==0xf2);
+                  int sz=(op2==0x10&&d.rep==0xf3)?4:(op2==0x10&&d.rep==0xf2)?8:16;
+                  if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], scalar?sz:16); /* reg movss/sd preserves upper */
+                  else { if(scalar) memset(c->xmm[m.reg],0,16); /* mem movss/sd ZERO the upper lanes */
+                         memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, sz); } }
                 break;
             case 0x11: case 0x29: /* store */
                 m=decode_modrm(c,&d);
-                if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], 16);
-                else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], (d.rep==0xf3)?4:(d.rep==0xf2)?8:16);
+                { int scalar=(op2==0x11)&&(d.rep==0xf3||d.rep==0xf2);
+                  int sz=(op2==0x11&&d.rep==0xf3)?4:(op2==0x11&&d.rep==0xf2)?8:16;
+                  if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], scalar?sz:16); /* reg movss/sd preserves upper */
+                  else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], sz); }
                 break;
             case 0x6f: /* movdqa/movdqu load */
                 m=decode_modrm(c,&d);
@@ -931,10 +936,18 @@ static void run( struct x86cpu *c )
                   else if(op2==0xfd){ uint16_t *a16=(uint16_t*)c->xmm[m.reg],*s16=(uint16_t*)src; for(i=0;i<8;i++) a16[i]+=s16[i]; }
                   else { uint32_t *a32=(uint32_t*)c->xmm[m.reg],*s32=(uint32_t*)src; for(i=0;i<4;i++) a32[i]+=s32[i]; } }
                 break;
-            case 0x12: case 0x13: case 0x16: case 0x17: /* movlps/movhps: treat as 8-byte move */
+            case 0x12: case 0x13: case 0x16: case 0x17: /* movlps/movhps (mem) + movhlps/movlhps (reg) */
                 m=decode_modrm(c,&d);
-                if (op2==0x12||op2==0x16){ if(!m.is_reg) memcpy(c->xmm[m.reg]+((op2==0x16)?8:0),(void*)(uintptr_t)m.ea,8); }
-                else { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea,c->xmm[m.reg]+((op2==0x17)?8:0),8); }
+                if (op2==0x12) { /* movlps m64->lo  OR  movhlps: dst.lo = src.hi */
+                    if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm]+8, 8);
+                    else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, 8);
+                }
+                else if (op2==0x16) { /* movhps m64->hi  OR  movlhps: dst.hi = src.lo */
+                    if (m.is_reg) memcpy(c->xmm[m.reg]+8, c->xmm[m.rm], 8);
+                    else memcpy(c->xmm[m.reg]+8, (void*)(uintptr_t)m.ea, 8);
+                }
+                else if (op2==0x13) { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 8); }      /* movlps store */
+                else { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg]+8, 8); }                    /* movhps store */
                 break;
             case 0x57: /* xorps */
                 m=decode_modrm(c,&d);
@@ -1120,6 +1133,12 @@ static void run( struct x86cpu *c )
             case 0xab: /* bts */
                 m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
                 c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a|(1u<<b)); break;
+            case 0xb3: /* btr r/m, r */
+                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a&~(1u<<b)); break;
+            case 0xbb: /* btc r/m, r */
+                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a^(1u<<b)); break;
             case 0xba: /* grp8 bt/bts/btr/btc r/m, imm8 */
                 m=decode_modrm(c,&d); a=read_rm(c,&m,os); { uint32_t bit=f8(&d)&(os*8-1);
                   c->eflags=(c->eflags&~CF)|(((a>>bit)&1)?CF:0); c->lf_size=0;
@@ -1375,6 +1394,15 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         const unixlib_entry_t *funcs = (const unixlib_entry_t *)(uintptr_t)handle;
         if (trace()) fprintf( stderr, "wasm_x86: unix_call handle=%llx code=%u args=%p\n",
                               (unsigned long long)handle, code, args );
+        if (!handle) {
+            /* A PE DLL whose unix companion was never loaded (handle stayed 0).
+             * Calling funcs[code] off a NULL table traps; return an error status
+             * so the caller can fall back instead of crashing the process. */
+            static int warned; if (!warned++) fprintf( stderr, "wasm_x86: unix_call with NULL handle (ret_eip=%08x code=%u) -> STATUS_NOT_IMPLEMENTED\n", ret_eip, code );
+            c->regs[EAX] = 0xC0000002 /* STATUS_NOT_IMPLEMENTED */;
+            c->eip = ret_eip;
+            return 1;
+        }
         c->regs[EAX] = funcs[code]( args );
         c->eip = ret_eip;
         return 1;
