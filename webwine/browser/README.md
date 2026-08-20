@@ -81,6 +81,15 @@ frames on stderr.
 - **`rep` string ops are NOT worth bulk-memcpy'ing** (checked by disassembling the
   exe): 596 `rep` sites, but every per-frame one has a small compile-time-constant
   `ECX` — these are inlined struct copies, not framebuffer blits.
+- **OffscreenCanvas does NOT work here** — don't retry it.  Transferring the canvas
+  to the worker so `webwine_present()` can `putImageData` directly (saving a
+  full-framebuffer alloc + copy + transfer per frame) *runs* — fps and the guest
+  log look perfectly normal — but **the canvas stays black**: an OffscreenCanvas
+  only composites when its task yields, and this worker never returns to its event
+  loop (it is blocked inside the interpreter's `run()` for the whole session).  The
+  main thread has to do the drawing, so the postMessage path is required.  Note the
+  verification trap: `canvas.toDataURL()` returns blank for a transferred canvas,
+  so use CDP `Page.captureScreenshot` (see `cdp-shot.js`) to check real output.
 - **Measurement discipline:** run-to-run noise is ±10% (the attract demo is
   wall-clock locked, so a window lands on different scenes), and background CPU
   load shifts absolute numbers a lot.  Only trust back-to-back A/B in one session
