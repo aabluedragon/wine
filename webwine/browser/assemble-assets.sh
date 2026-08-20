@@ -26,8 +26,18 @@ done
 echo "copied $n PE dlls"
 
 for f in netduke32.exe DUKE3D.GRP eduke32.dat; do cp "$GAME/$f" "$AT/game/"; done
-# Render the classic view at half resolution and upscale — ~2x FPS in the browser.
-printf 'r_upscalefactor 2\n' > "$AT/game/autoexec.cfg"
+# FPS config, executed by the game at startup (see README perf notes):
+#   vidmode 640x400 - the window the engine presents; the default 1024x768 costs
+#     ~2.5x the pixels for no visible benefit at this scale.
+#   r_upscalefactor - render the classic view at 1/N and upscale.  The engine
+#     clamps the result to its 320x200 floor, so 3 lands on 320x200 here.
+#   r_maxfps/r_vsync - make sure nothing caps the frame rate.
+cat > "$AT/game/autoexec.cfg" <<'CFG'
+vidmode 640 400 8 0
+r_upscalefactor 3
+r_maxfps 0
+r_vsync 0
+CFG
 
 touch "$AT/root/lib/wine/i386-unix/ntdll.so"          # loader path-math marker
 cp -R "$WINEMAC/share/wine/nls" "$AT/root/share/wine/nls"

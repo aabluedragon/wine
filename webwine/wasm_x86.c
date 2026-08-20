@@ -124,6 +124,201 @@ static int g_last_w = 0, g_last_h = 0;
 static uint64_t g_histo[512];       /* opcode histogram (env WASM_HISTO): [op], [256+op2] */
 static int g_histo_on = 0;
 
+/* Guest eip sampling profiler (env WASM_PROF).  Samples are taken on the
+ * existing ~64K-instruction housekeeping tick, so the hot path pays NOTHING and
+ * the sample is uniform over instructions executed.  Addresses are dumped raw;
+ * map them to function names offline with the exe's symbol table
+ * (VA = symbol value + 0x401000).  This is how you find out which guest code
+ * actually costs the frame - e.g. whether the engine's present/blit chain is
+ * burning instructions we do not need, since we read frameplace directly. */
+#define PROF_SLOTS 4096
+static uint32_t g_prof_eip[PROF_SLOTS];
+static uint32_t g_prof_cnt[PROF_SLOTS];
+static int g_prof_on = 0;
+static void prof_sample( uint32_t eip )
+{
+    uint32_t h = (eip * 2654435761u) >> 20;      /* fibonacci hash -> 12 bits */
+    for (int i = 0; i < 8; i++)                  /* short linear probe */
+    {
+        uint32_t s = (h + i) & (PROF_SLOTS - 1);
+        if (g_prof_cnt[s] == 0) { g_prof_eip[s] = eip; g_prof_cnt[s] = 1; return; }
+        if (g_prof_eip[s] == eip) { g_prof_cnt[s]++; return; }
+    }
+    /* table pressure: drop the sample rather than evict (keeps counts honest) */
+}
+/* Identify which PE module an address belongs to: scan down for the MZ/PE
+ * header (modules are 64K-aligned) and read the export directory's name.  Used
+ * only by the profiler dump, so cost does not matter. */
+static const char *prof_module( uint32_t va )
+{
+    for (uint32_t base = va & ~0xffffu; base >= 0x10000u; base -= 0x10000u)
+    {
+        if (rd16( base ) != 0x5a4d) continue;                  /* 'MZ' */
+        uint32_t pe = base + rd32( base + 0x3c );
+        if (pe < base || pe > base + 0x1000 || rd32( pe ) != 0x00004550) continue;  /* 'PE\0\0' */
+        uint32_t exp = rd32( pe + 0x78 );                      /* export dir RVA */
+        if (!exp) return "(module)";
+        static char buf[128];
+        unsigned i = 0;
+        uint32_t nm = rd32( base + exp + 0x0c );
+        if (nm) { uint32_t p = base + nm;
+                  while (i < 40) { uint8_t ch = rd8( p + i ); if (!ch) break; buf[i++] = (char)ch; } }
+        buf[i] = 0;
+        /* nearest preceding export, so the hot address gets a function name */
+        uint32_t nfun = rd32( base + exp + 0x14 ), nnam = rd32( base + exp + 0x18 );
+        uint32_t afun = rd32( base + exp + 0x1c ), anam = rd32( base + exp + 0x20 ), aord = rd32( base + exp + 0x24 );
+        uint32_t rva = va - base, bestrva = 0, bestname = 0;
+        if (nfun && nnam && afun && anam && aord)
+            for (uint32_t k = 0; k < nnam && k < 4000; k++)
+            {
+                uint16_t ord = rd16( base + aord + k * 2 );
+                if (ord >= nfun) continue;
+                uint32_t f = rd32( base + afun + ord * 4 );
+                if (f <= rva && f > bestrva) { bestrva = f; bestname = rd32( base + anam + k * 4 ); }
+            }
+        if (bestname)
+        {
+            unsigned j = i;
+            if (j < sizeof(buf) - 2) buf[j++] = '!';
+            uint32_t p = base + bestname;
+            while (j < sizeof(buf) - 12) { uint8_t ch = rd8( p + j - i - 1 ); if (!ch) break; buf[j++] = (char)ch; }
+            snprintf( buf + j, sizeof(buf) - j, "+0x%x", (unsigned)(rva - bestrva) );
+        }
+        return buf;
+    }
+    return "(unknown)";
+}
+
+/* ---- native acceleration of Wine's own CRT block moves ----
+ *
+ * Profiling netduke32 showed ~69% of all guest instructions inside
+ * msvcrt.dll!memmove's inner copy loop: the engine blits its framebuffer every
+ * frame, and we were interpreting that byte-shuffling one x86 instruction at a
+ * time.  msvcrt is OUR builtin, not the application, so running its block moves
+ * natively is the same kind of shortcut Wine takes when it uses the host's
+ * optimized memcpy - the guest-visible semantics are identical.
+ *
+ * Entry points are found once from the PEB loader list and registered in a
+ * direct-mapped table, so the hot path costs one indexed load + compare, the
+ * same as the frame-flip check it replaces (run() is register-pressure bound,
+ * so it must not get more expensive than that). */
+enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET };
+#define NAT_SLOTS 256
+static uint32_t g_nat_addr[NAT_SLOTS];
+static uint8_t  g_nat_kind[NAT_SLOTS];
+static int g_nat_ready = 0;
+#define NAT_SLOT(a) (((a) >> 4) & (NAT_SLOTS - 1))
+
+static void nat_register( uint32_t addr, int kind, const char *what )
+{
+    if (!addr) return;
+    unsigned s = NAT_SLOT( addr );
+    if (g_nat_addr[s]) { fprintf( stderr, "wasm_x86: native %s: slot busy, skipped\n", what ); return; }
+    g_nat_addr[s] = addr; g_nat_kind[s] = (uint8_t)kind;
+    fprintf( stderr, "wasm_x86: native %s @ %08x\n", what, addr );
+}
+
+/* Resolve one export by name from a loaded PE image. */
+static uint32_t pe_export( uint32_t base, const char *want )
+{
+    if (rd16( base ) != 0x5a4d) return 0;
+    uint32_t pe = base + rd32( base + 0x3c );
+    if (rd32( pe ) != 0x00004550) return 0;
+    uint32_t exp = rd32( pe + 0x78 );
+    if (!exp) return 0;
+    uint32_t nnam = rd32( base + exp + 0x18 ), afun = rd32( base + exp + 0x1c );
+    uint32_t anam = rd32( base + exp + 0x20 ), aord = rd32( base + exp + 0x24 );
+    if (!nnam || !afun || !anam || !aord) return 0;
+    for (uint32_t k = 0; k < nnam; k++)
+    {
+        uint32_t p = base + rd32( base + anam + k * 4 );
+        unsigned i = 0;
+        while (want[i] && rd8( p + i ) == (uint8_t)want[i]) i++;
+        if (want[i] || rd8( p + i )) continue;          /* full match only */
+        return base + rd32( base + afun + rd16( base + aord + k * 2 ) * 4 );
+    }
+    return 0;
+}
+
+/* Walk PEB->Ldr->InMemoryOrderModuleList for a module by (lowercased) name. */
+static uint32_t find_module( struct x86cpu *c, const char *want )
+{
+    uint32_t teb = c->fs_base;
+    uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
+    uint32_t ldr = peb ? rd32( peb + 0x0c ) : 0;
+    if (!ldr) return 0;
+    uint32_t head = ldr + 0x14, cur = rd32( head );
+    for (int n = 0; n < 256 && cur && cur != head; n++, cur = rd32( cur ))
+    {
+        uint32_t ent = cur - 0x08;                       /* InMemoryOrderLinks */
+        uint32_t dllbase = rd32( ent + 0x18 );
+        uint16_t len = rd16( ent + 0x2c );
+        uint32_t buf = rd32( ent + 0x30 );
+        if (!dllbase || !buf || !len) continue;
+        unsigned i = 0;
+        for (; want[i] && i < len / 2; i++)
+        {
+            uint16_t wc = rd16( buf + i * 2 );
+            if (wc >= 'A' && wc <= 'Z') wc += 32;
+            if (wc != (uint16_t)want[i]) break;
+        }
+        if (!want[i] && i == len / 2) return dllbase;
+    }
+    return 0;
+}
+
+static void nat_init( struct x86cpu *c )
+{
+    /* msvcrt is loaded well after the exe base is known, so keep retrying on
+     * later ticks rather than giving up on the first look. */
+    uint32_t base = find_module( c, "msvcrt.dll" );
+    if (!base) return;
+    g_nat_ready = 1;
+    nat_register( pe_export( base, "memmove" ), NAT_MEMMOVE, "memmove" );
+    nat_register( pe_export( base, "memcpy" ),  NAT_MEMMOVE, "memcpy" );
+    nat_register( pe_export( base, "memset" ),  NAT_MEMSET,  "memset" );
+}
+
+/* Run an intercepted CRT call natively.  cdecl: [esp]=return, args follow, the
+ * caller cleans the stack, and the return value is the destination pointer.
+ * Declines (returns 0, so the guest code runs as usual) if the buffers are not
+ * wholly inside the guest address space. */
+static int nat_call( struct x86cpu *c, int kind )
+{
+    uint32_t esp = c->regs[ESP];
+    uint32_t dst = rd32( esp + 4 ), a1 = rd32( esp + 8 ), n = rd32( esp + 12 );
+    const uint32_t GUEST_END = 0x70000000u;              /* native wine lives above this */
+    if (n > GUEST_END || dst >= GUEST_END || dst + n > GUEST_END) return 0;
+    if (kind == NAT_MEMMOVE)
+    {
+        if (a1 >= GUEST_END || a1 + n > GUEST_END) return 0;
+        memmove( (void *)(uintptr_t)dst, (const void *)(uintptr_t)a1, n );
+    }
+    else memset( (void *)(uintptr_t)dst, (int)(a1 & 0xff), n );
+    c->regs[EAX] = dst;
+    c->regs[ESP] = esp + 4;                              /* pop the return address */
+    c->eip = rd32( esp );
+    return 1;
+}
+
+static void prof_dump( void )
+{
+    for (int top = 0; top < 30; top++)
+    {
+        uint32_t best = 0, bi = 0;
+        for (int i = 0; i < PROF_SLOTS; i++)
+            if (g_prof_cnt[i] > best) { best = g_prof_cnt[i]; bi = i; }
+        if (!best) break;
+        if (g_prof_eip[bi] >= 0x401000 && g_prof_eip[bi] < 0x900000)
+            fprintf( stderr, "PROF %08x %u\n", g_prof_eip[bi], best );
+        else
+            fprintf( stderr, "PROF %08x %u %s\n", g_prof_eip[bi], best, prof_module( g_prof_eip[bi] ) );
+        g_prof_cnt[bi] = 0;   /* consumed */
+    }
+    fprintf( stderr, "PROF ---\n" );
+    memset( g_prof_cnt, 0, sizeof(g_prof_cnt) );
+}
+
 static void wasm_dump_frame( struct x86cpu *c )
 {
     (void)c;
@@ -1247,8 +1442,13 @@ static void run( struct x86cpu *c )
                 uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
                 if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
                           g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
+                          nat_register( g_flip_addr, NAT_FLIP, "frame flip" );
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
+            /* Look for msvcrt every ~256 ticks until found: walking the loader
+             * list on every tick measurably slowed boot. */
+            { static uint32_t nat_tries;
+              if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
             /* Cache the live frameplace pointer while it is valid, so the flip
              * handler can present the finished frame after it is cleared to 0. */
             if (g_slide_ok)
@@ -1260,7 +1460,9 @@ static void run( struct x86cpu *c )
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
             static uint64_t tp_last_insns = 0, tp_last_flip = 0;
-            if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0; }
+            if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
+                               g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
+            if (g_prof_on) prof_sample( c->eip );
             if (tp_on)
             {
                 double now = emscripten_get_now();
@@ -1273,6 +1475,7 @@ static void run( struct x86cpu *c )
                     fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips );
                     tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count;
+                    if (g_prof_on && (int)((now - tp_start) / 1000.0) % 15 == 0) prof_dump();
                     if (g_histo_on && (int)((now - tp_start) / 1000.0) % 10 == 0)
                     {
                         int idx[512]; for (int i=0;i<512;i++) idx[i]=i;
@@ -1303,8 +1506,14 @@ static void run( struct x86cpu *c )
          * per rendered frame with frameplace holding the COMPLETE frame.  Present
          * here (not on an insn-count timer) so the canvas shows whole, untorn
          * frames and the present rate equals the real render rate. */
-        if (start == g_flip_addr)
+        if (g_nat_addr[NAT_SLOT(start)] == start)
         {
+            int kind = g_nat_kind[NAT_SLOT(start)];
+            if (kind != NAT_FLIP)
+            {
+                if (nat_call( c, kind )) continue;   /* eip set by the native call */
+            }
+            else {
             g_flip_count++;
 #ifdef WEBWINE_BROWSER
             wasm_dump_frame( c );
@@ -1315,6 +1524,7 @@ static void run( struct x86cpu *c )
                 if (dmp && (g_flip_count % 20) == 0 && nframes < 16) { wasm_dump_frame( c ); nframes++; }
             }
 #endif
+            }
         }
         struct decode d = { 4, 4, 0, 0, c->eip };
         uint8_t op;
