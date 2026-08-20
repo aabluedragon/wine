@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern int wineserver_main( int argc, char *argv[] );   /* renamed server main() */
 extern void wineserver_inproc_drive( void );
@@ -37,6 +38,16 @@ int main( int argc, char *argv[] )
     {
         char *sargv[2] = { (char *)"wineserver", NULL };
         wineserver_main( 1, sargv );   /* returns immediately in COOP mode */
+    }
+
+    /* The in-process wineserver chdir()s to its own socket directory during
+     * boot, so the client's get_initial_directory() (getcwd) would make the
+     * guest CWD that server dir.  Restore the intended start directory (the
+     * app's own folder) so the app finds its config/data relative to CWD. */
+    {
+        const char *scwd = getenv( "WINE_START_CWD" );
+        if (scwd && *scwd && chdir( scwd ) != 0)
+            fprintf( stderr, "webwine: WINE_START_CWD chdir(%s) failed\n", scwd );
     }
 
     fprintf( stderr, "webwine: entering wine client __wine_main argc=%d argv0=%s argv1=%s\n",
