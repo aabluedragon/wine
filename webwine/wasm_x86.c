@@ -826,6 +826,37 @@ static __attribute__((noinline)) int run_sse( struct x86cpu *c, struct decode *d
             }
             case 0xc8: case 0xc9: case 0xca: case 0xcb: case 0xcc: case 0xcd: case 0xce: case 0xcf: /* bswap */
                 { int rr=op2&7; uint32_t v=c->regs[rr]; c->regs[rr]=((v>>24)&0xff)|((v>>8)&0xff00)|((v<<8)&0xff0000)|((v<<24)&0xff000000); } break;
+            case 0xbc: /* bsf */ m=decode_modrm(c,d); a=read_rm(c,&m,os); if(a){ int i=0; while(!((a>>i)&1))i++; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
+            case 0xbd: /* bsr */ m=decode_modrm(c,d); a=read_rm(c,&m,os); if(a){ int i=os*8-1; while(!((a>>i)&1))i--; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
+            case 0xa4: case 0xa5: /* SHLD r/m, r, imm8/cl */
+            case 0xac: case 0xad: /* SHRD r/m, r, imm8/cl */
+            {
+                int left = (op2==0xa4||op2==0xa5);
+                m=decode_modrm(c,d);
+                uint32_t dst=read_rm(c,&m,os), src=read_reg(c,m.reg,os);
+                uint32_t cnt = (op2==0xa4||op2==0xac) ? f8(d) : (c->regs[ECX]&0xff);
+                cnt &= 31;
+                int W = os*8;
+                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
+                if (cnt >= (uint32_t)W) cnt %= (uint32_t)W;       /* 16-bit UB guard */
+                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
+                uint32_t mask=sizemask(os), sm=signmask(os), res, cf;
+                dst &= mask; src &= mask;
+                if (left) { res = ((dst<<cnt) | (src>>(W-cnt))) & mask; cf = (dst >> (W-cnt)) & 1; }
+                else      { res = ((dst>>cnt) | (src<<(W-cnt))) & mask; cf = (dst >> (cnt-1)) & 1; }
+                write_rm(c,&m,os,res);
+                { uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+                  if (cf) f|=CF;
+                  if (!(res & mask)) f|=ZF;
+                  if (res & sm) f|=SF;
+                  if (parity((uint8_t)res)) f|=PF;
+                  if (cnt==1 && ((res ^ dst) & sm)) f|=OF;
+                  c->eflags = f; c->lf_size = 0; }
+                break;
+            }
+            case 0x1f: decode_modrm(c,d); break; /* nop r/m */
+            case 0x31: /* rdtsc */ c->regs[EAX]=0; c->regs[EDX]=0; break;
+            case 0xa2: /* cpuid */ c->regs[EAX]=0; c->regs[EBX]=0; c->regs[ECX]=0; c->regs[EDX]=0; break;
     default: return 0;
     }
     return 1;
@@ -894,6 +925,78 @@ static __attribute__((noinline)) void run_cold( struct x86cpu *c, struct decode 
             write_reg(c,EAX,sz,v); c->regs[ESI]+=delta;
             break;
         }
+        case 0xc0: case 0xc1: case 0xd0: case 0xd1: case 0xd2: case 0xd3:
+        {
+            int sz = (op&1)?os:1;
+            m=decode_modrm(c,d);
+            uint32_t cnt;
+            if (op==0xc0||op==0xc1) cnt=f8(d);
+            else if (op==0xd0||op==0xd1) cnt=1;
+            else cnt=c->regs[ECX]&0xff;
+            cnt &= 31;
+            a=read_rm(c,&m,sz);
+            uint32_t sm=signmask(sz), mask=sizemask(sz);
+            a &= mask;
+            if (cnt == 0) { write_rm(c,&m,sz,a); break; }  /* x86: count 0 leaves flags */
+            { int W = sz*8; uint32_t cf=0, of=0; int rotate=0;
+              switch (m.reg)
+              {
+              case 4: case 6: /* shl/sal */
+                  cf = (cnt <= (uint32_t)W) ? ((a >> (W-cnt)) & 1) : 0;
+                  r = (a << cnt) & mask;
+                  of = ((r & sm)?1:0) ^ cf;
+                  break;
+              case 5: /* shr */
+                  cf = (a >> (cnt-1)) & 1;
+                  r = a >> cnt;
+                  of = (a & sm)?1:0;
+                  break;
+              case 7: /* sar */
+                  { int32_t sa=(int32_t)(a<<(32-W)); sa>>=(32-W);
+                    cf = (a >> (cnt-1)) & 1;
+                    r = ((uint32_t)(sa >> cnt)) & mask; of = 0; }
+                  break;
+              case 0: /* rol */
+                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a<<n)|(a>>(W-n)))&mask) : a;
+                    cf = r & 1; of = ((r & sm)?1:0) ^ cf; rotate=1; }
+                  break;
+              case 1: /* ror */
+                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a>>n)|(a<<(W-n)))&mask) : a;
+                    cf = (r >> (W-1)) & 1; of = ((r & sm)?1:0) ^ (((r>>(W-2))&1)); rotate=1; }
+                  break;
+              default: r = (a<<cnt)&mask; write_rm(c,&m,sz,r); c->lf_size=0; break;
+              }
+              if (m.reg <= 1 || (m.reg >= 4 && m.reg <= 7))
+              {
+                  write_rm(c,&m,sz,r);
+                  if (rotate) { /* rotates affect only CF/OF; preserve SF/ZF/PF */
+                      c->eflags = get_flags(c);
+                      c->eflags = (c->eflags & ~(CF|OF)) | (cf?CF:0) | (of?OF:0);
+                  } else {
+                      uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+                      if (cf) f|=CF; if (of) f|=OF;
+                      if (!(r & mask)) f|=ZF;
+                      if (r & sm) f|=SF;
+                      if (parity((uint8_t)r)) f|=PF;
+                      c->eflags = f;
+                  }
+                  c->lf_size = 0;
+              }
+            }
+            break;
+        }
+        case 0x10: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a+b+ci; write_rm(c,&m,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break;
+        case 0x11: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a+b+ci; write_rm(c,&m,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x13: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a+b+ci; write_reg(c,m.reg,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x18: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a-b-ci; write_rm(c,&m,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break;
+        case 0x19: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a-b-ci; write_rm(c,&m,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x1b: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a-b-ci; write_reg(c,m.reg,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x12: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a+b+ci; write_reg(c,m.reg,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc r8,r/m8 */
+        case 0x14: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(d); r=a+b+ci; write_reg(c,EAX,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc al,imm8 */
+        case 0x15: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(d):f32(d); r=a+b+ci; write_reg(c,EAX,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break; /* adc eax,imm */
+        case 0x1a: { int ci=lf_cf(c); m=decode_modrm(c,d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a-b-ci; write_reg(c,m.reg,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb r8,r/m8 */
+        case 0x1c: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(d); r=a-b-ci; write_reg(c,EAX,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb al,imm8 */
+        case 0x1d: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(d):f32(d); r=a-b-ci; write_reg(c,EAX,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break; /* sbb eax,imm */
     default: break;
     }
 }
@@ -1394,18 +1497,11 @@ static void run( struct x86cpu *c )
         case 0xa3: { uint32_t off=f32(&d)+(uint32_t)d.seg; if(os==2) wr16(off,c->regs[EAX]); else wr32(off,c->regs[EAX]); } break;
 
         /* adc / sbb (reg forms) */
-        case 0x10: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a+b+ci; write_rm(c,&m,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break;
-        case 0x11: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a+b+ci; write_rm(c,&m,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x13: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a+b+ci; write_reg(c,m.reg,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x18: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a-b-ci; write_rm(c,&m,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break;
-        case 0x19: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a-b-ci; write_rm(c,&m,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x1b: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a-b-ci; write_reg(c,m.reg,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x12: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a+b+ci; write_reg(c,m.reg,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc r8,r/m8 */
-        case 0x14: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(&d); r=a+b+ci; write_reg(c,EAX,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc al,imm8 */
-        case 0x15: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a+b+ci; write_reg(c,EAX,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break; /* adc eax,imm */
-        case 0x1a: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a-b-ci; write_reg(c,m.reg,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb r8,r/m8 */
-        case 0x1c: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(&d); r=a-b-ci; write_reg(c,EAX,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb al,imm8 */
-        case 0x1d: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a-b-ci; write_reg(c,EAX,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break; /* sbb eax,imm */
+        /* adc/sbb: cold, see run_cold */
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:
+        case 0x18: case 0x19: case 0x1a: case 0x1b: case 0x1c: case 0x1d:
+            run_cold( c, &d, op );
+            break;
 
         /* pushad / popad */
         case 0x60: { uint32_t sp=c->regs[ESP]; push32(c,c->regs[EAX]); push32(c,c->regs[ECX]); push32(c,c->regs[EDX]); push32(c,c->regs[EBX]); push32(c,sp); push32(c,c->regs[EBP]); push32(c,c->regs[ESI]); push32(c,c->regs[EDI]); } break;
@@ -1416,66 +1512,10 @@ static void run( struct x86cpu *c )
         case 0x6b: m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=(int32_t)(int8_t)f8(&d); write_reg(c,m.reg,os,(int32_t)a*(int32_t)b); break;
 
         /* shift/rotate group: C0/C1 (imm8), D0/D1 (by 1), D2/D3 (by cl) */
+        /* shifts/rotates: cold, see run_cold */
         case 0xc0: case 0xc1: case 0xd0: case 0xd1: case 0xd2: case 0xd3:
-        {
-            int sz = (op&1)?os:1;
-            m=decode_modrm(c,&d);
-            uint32_t cnt;
-            if (op==0xc0||op==0xc1) cnt=f8(&d);
-            else if (op==0xd0||op==0xd1) cnt=1;
-            else cnt=c->regs[ECX]&0xff;
-            cnt &= 31;
-            a=read_rm(c,&m,sz);
-            uint32_t sm=signmask(sz), mask=sizemask(sz);
-            a &= mask;
-            if (cnt == 0) { write_rm(c,&m,sz,a); break; }  /* x86: count 0 leaves flags */
-            { int W = sz*8; uint32_t cf=0, of=0; int rotate=0;
-              switch (m.reg)
-              {
-              case 4: case 6: /* shl/sal */
-                  cf = (cnt <= (uint32_t)W) ? ((a >> (W-cnt)) & 1) : 0;
-                  r = (a << cnt) & mask;
-                  of = ((r & sm)?1:0) ^ cf;
-                  break;
-              case 5: /* shr */
-                  cf = (a >> (cnt-1)) & 1;
-                  r = a >> cnt;
-                  of = (a & sm)?1:0;
-                  break;
-              case 7: /* sar */
-                  { int32_t sa=(int32_t)(a<<(32-W)); sa>>=(32-W);
-                    cf = (a >> (cnt-1)) & 1;
-                    r = ((uint32_t)(sa >> cnt)) & mask; of = 0; }
-                  break;
-              case 0: /* rol */
-                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a<<n)|(a>>(W-n)))&mask) : a;
-                    cf = r & 1; of = ((r & sm)?1:0) ^ cf; rotate=1; }
-                  break;
-              case 1: /* ror */
-                  { uint32_t n = cnt % (uint32_t)W; r = n ? (((a>>n)|(a<<(W-n)))&mask) : a;
-                    cf = (r >> (W-1)) & 1; of = ((r & sm)?1:0) ^ (((r>>(W-2))&1)); rotate=1; }
-                  break;
-              default: r = (a<<cnt)&mask; write_rm(c,&m,sz,r); c->lf_size=0; break;
-              }
-              if (m.reg <= 1 || (m.reg >= 4 && m.reg <= 7))
-              {
-                  write_rm(c,&m,sz,r);
-                  if (rotate) { /* rotates affect only CF/OF; preserve SF/ZF/PF */
-                      c->eflags = get_flags(c);
-                      c->eflags = (c->eflags & ~(CF|OF)) | (cf?CF:0) | (of?OF:0);
-                  } else {
-                      uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
-                      if (cf) f|=CF; if (of) f|=OF;
-                      if (!(r & mask)) f|=ZF;
-                      if (r & sm) f|=SF;
-                      if (parity((uint8_t)r)) f|=PF;
-                      c->eflags = f;
-                  }
-                  c->lf_size = 0;
-              }
-            }
+            run_cold( c, &d, op );
             break;
-        }
 
         /* grp3 + string ops: cold, see run_cold */
         case 0xf6: case 0xf7:
@@ -1512,37 +1552,6 @@ static void run( struct x86cpu *c )
             case 0xbe: m=decode_modrm(c,&d); write_reg(c,m.reg,os, (int32_t)(int8_t)read_rm(c,&m,1)); break;
             case 0xbf: m=decode_modrm(c,&d); write_reg(c,m.reg,os, (int32_t)(int16_t)read_rm(c,&m,2)); break;
             case 0xaf: m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); write_reg(c,m.reg,os,a*b); break; /* imul */
-            case 0xbc: /* bsf */ m=decode_modrm(c,&d); a=read_rm(c,&m,os); if(a){ int i=0; while(!((a>>i)&1))i++; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
-            case 0xbd: /* bsr */ m=decode_modrm(c,&d); a=read_rm(c,&m,os); if(a){ int i=os*8-1; while(!((a>>i)&1))i--; write_reg(c,m.reg,os,i); c->eflags&=~ZF;} else c->eflags|=ZF; c->lf_size=0; break;
-            case 0xa4: case 0xa5: /* SHLD r/m, r, imm8/cl */
-            case 0xac: case 0xad: /* SHRD r/m, r, imm8/cl */
-            {
-                int left = (op2==0xa4||op2==0xa5);
-                m=decode_modrm(c,&d);
-                uint32_t dst=read_rm(c,&m,os), src=read_reg(c,m.reg,os);
-                uint32_t cnt = (op2==0xa4||op2==0xac) ? f8(&d) : (c->regs[ECX]&0xff);
-                cnt &= 31;
-                int W = os*8;
-                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
-                if (cnt >= (uint32_t)W) cnt %= (uint32_t)W;       /* 16-bit UB guard */
-                if (cnt == 0) { write_rm(c,&m,os,dst & sizemask(os)); break; }
-                uint32_t mask=sizemask(os), sm=signmask(os), res, cf;
-                dst &= mask; src &= mask;
-                if (left) { res = ((dst<<cnt) | (src>>(W-cnt))) & mask; cf = (dst >> (W-cnt)) & 1; }
-                else      { res = ((dst>>cnt) | (src<<(W-cnt))) & mask; cf = (dst >> (cnt-1)) & 1; }
-                write_rm(c,&m,os,res);
-                { uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
-                  if (cf) f|=CF;
-                  if (!(res & mask)) f|=ZF;
-                  if (res & sm) f|=SF;
-                  if (parity((uint8_t)res)) f|=PF;
-                  if (cnt==1 && ((res ^ dst) & sm)) f|=OF;
-                  c->eflags = f; c->lf_size = 0; }
-                break;
-            }
-            case 0x1f: decode_modrm(c,&d); break; /* nop r/m */
-            case 0x31: /* rdtsc */ c->regs[EAX]=0; c->regs[EDX]=0; break;
-            case 0xa2: /* cpuid */ c->regs[EAX]=0; c->regs[EBX]=0; c->regs[ECX]=0; c->regs[EDX]=0; break;
 
             /* ---- SSE/SSE2 (enough for memset/memcpy/strlen in ntdll) ---- */
             default:   /* SSE/MMX/bit-ops live in run_sse (cold, see there) */
