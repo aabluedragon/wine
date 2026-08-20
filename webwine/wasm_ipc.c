@@ -170,12 +170,14 @@ EM_JS(long, host_close, (int fd), {
  * blits it to a <canvas>.  A no-op stub is provided for the node build so the
  * same wasm_x86.c present path links either way. */
 #ifdef WEBWINE_MEMFS
-EM_JS(void, webwine_present, (const void *rgb, int w, int h), {
-  var n = w * h * 3;
-  /* copy out of the wasm heap (postMessage transfer needs an owned buffer) */
+EM_JS(void, webwine_present, (const void *rgba, int w, int h), {
+  var n = w * h * 4;
+  /* copy out of the wasm heap (postMessage transfer needs an owned buffer).
+     The pixels are already RGBA, so the page can wrap this buffer in an
+     ImageData directly - no per-pixel conversion on the main thread. */
   var out = new Uint8Array(n);
-  out.set(HEAPU8.subarray(rgb, rgb + n));
-  postMessage({ type: 'frame', w: w, h: h, rgb: out.buffer }, [out.buffer]);
+  out.set(HEAPU8.subarray(rgba, rgba + n));
+  postMessage({ type: 'frame', w: w, h: h, rgba: out.buffer }, [out.buffer]);
 });
 #else
 void webwine_present( const void *rgb, int w, int h ) { (void)rgb; (void)w; (void)h; }

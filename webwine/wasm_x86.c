@@ -141,30 +141,59 @@ static void wasm_dump_frame( struct x86cpu *c )
     else    { fp = g_last_fp; w = g_last_w; h = g_last_h; bpl = g_last_bpl; }
     uint32_t pal = ND_CURPALETTE + nd_slide;
     if (!fp || w < 1 || h < 1 || w > 8192 || h > 8192 || bpl < w) return;
-    /* host fopen() is broken in this build (wine overrides open -> EDOM), so
-     * emit the RGB frame as base64 over stderr, which works.  Host side
-     * extracts between the markers and rebuilds a PPM.                      */
-    size_t npix = (size_t)w * h, nrgb = npix * 3;
-    unsigned char *rgb = malloc( nrgb );
-    if (!rgb) { fprintf( stderr, "wasm_x86: frame malloc failed\n" ); return; }
-    size_t o = 0;
+    size_t npix = (size_t)w * h;
+
+    /* De-palettise into 32-bit pixels.  Two things matter here because this runs
+     * inside the interpreter loop, once per rendered frame, so its cost comes
+     * straight off the frame rate:
+     *   - build a 256-entry palette LUT once per frame, so the per-pixel work is
+     *     one indexed load + one store instead of four guest loads + three stores;
+     *   - keep one grow-only buffer instead of malloc/free-ing several megabytes
+     *     every single frame.
+     * The pixels are RGBA (not RGB) so the browser can hand the bytes straight to
+     * ImageData without a per-pixel conversion pass in JavaScript. */
+    static uint32_t lut[256];
+    for (int i = 0; i < 256; i++)
+    {
+        uint32_t pe = pal + (uint32_t)i * 4;
+        lut[i] = (uint32_t)rd8( pe ) | ((uint32_t)rd8( pe+1 ) << 8) |
+                 ((uint32_t)rd8( pe+2 ) << 16) | 0xff000000u;
+    }
+    static uint32_t *fb;
+    static size_t fb_px;
+    if (npix > fb_px)
+    {
+        free( fb );
+        fb = malloc( npix * 4 );
+        fb_px = fb ? npix : 0;
+        if (!fb) { fprintf( stderr, "wasm_x86: frame buffer alloc failed\n" ); return; }
+    }
     for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++)
-        {
-            uint8_t idx = rd8( fp + (uint32_t)y * bpl + x );
-            uint32_t pe = pal + (uint32_t)idx * 4;
-            rgb[o++] = rd8( pe + 0 );
-            rgb[o++] = rd8( pe + 1 );
-            rgb[o++] = rd8( pe + 2 );
-        }
+    {
+        uint32_t row = fp + (uint32_t)y * (uint32_t)bpl;
+        uint32_t *dst = fb + (size_t)y * (size_t)w;
+        for (int x = 0; x < w; x++) dst[x] = lut[ rd8( row + x ) ];
+    }
 #ifdef WEBWINE_BROWSER
     /* Live display: hand the frame to the page (posts to the main thread). */
-    extern void webwine_present( const void *rgb, int w, int h );
-    webwine_present( rgb, w, h );
+    extern void webwine_present( const void *rgba, int w, int h );
+    webwine_present( fb, w, h );
     g_present_count++;
-    free( rgb );
     return;
 #else
+    /* host fopen() is broken in this build (wine overrides open -> EDOM), so
+     * emit the frame as base64 over stderr, which works.  Host side extracts
+     * between the markers and rebuilds a PPM (P6 = 3 bytes/pixel). */
+    size_t nrgb = npix * 3;
+    unsigned char *rgb = malloc( nrgb );
+    if (!rgb) { fprintf( stderr, "wasm_x86: frame malloc failed\n" ); return; }
+    for (size_t i = 0; i < npix; i++)
+    {
+        uint32_t v = fb[i];
+        rgb[i*3+0] = (unsigned char)(v);
+        rgb[i*3+1] = (unsigned char)(v >> 8);
+        rgb[i*3+2] = (unsigned char)(v >> 16);
+    }
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t enclen = (nrgb + 2) / 3 * 4;
     char *enc = malloc( enclen + 1 );
@@ -251,20 +280,69 @@ static uint32_t get_flags( struct x86cpu *c )
     return f;
 }
 
+/* Single-flag accessors.  get_flags() materializes ALL six arithmetic flags
+ * (including the parity fold and the kind switch), but a condition code needs
+ * only one or two of them — and cmp+jcc is the most common pair in the guest
+ * (39/3b/81/83 feeding 74/75/0f84/0f8d, hundreds of millions per run).  Each
+ * of these mirrors the corresponding branch of get_flags() exactly; they all
+ * return 0/1 so the composite conditions below can compare them directly. */
+static int lf_zf( struct x86cpu *c )
+{
+    if (!c->lf_size) return !!(c->eflags & ZF);
+    return c->lf_res == 0;
+}
+static int lf_sf( struct x86cpu *c )
+{
+    if (!c->lf_size) return !!(c->eflags & SF);
+    return !!(c->lf_res & signmask( c->lf_size ));
+}
+static int lf_pf( struct x86cpu *c )
+{
+    if (!c->lf_size) return !!(c->eflags & PF);
+    return (int)parity( (uint8_t)c->lf_res );
+}
+static int lf_cf( struct x86cpu *c )
+{
+    if (!c->lf_size) return !!(c->eflags & CF);
+    uint32_t res = c->lf_res, op1 = c->lf_op1, op2 = c->lf_op2;
+    switch (c->lf_kind)
+    {
+    case K_ADD: return res < op1;
+    case K_SUB: return op1 < op2;
+    case K_ADC: return res < op1 || (res == op1 && c->lf_cin);
+    case K_SBB: return op1 < op2 || (op1 == op2 && c->lf_cin);
+    /* inc/dec preserve CF; logic clears it; K_NONE contributes nothing */
+    case K_INCDEC: case K_INC: case K_DEC: return !!(c->eflags & CF);
+    default: return 0;
+    }
+}
+static int lf_of( struct x86cpu *c )
+{
+    if (!c->lf_size) return !!(c->eflags & OF);
+    uint32_t res = c->lf_res, op1 = c->lf_op1, op2 = c->lf_op2, sm = signmask( c->lf_size );
+    switch (c->lf_kind)
+    {
+    case K_ADD: case K_ADC: case K_INC:
+        return !!(((op1 ^ res) & (op2 ^ res)) & sm);
+    case K_SUB: case K_SBB: case K_INCDEC: case K_DEC:
+        return !!(((op1 ^ op2) & (op1 ^ res)) & sm);
+    default: return 0;
+    }
+}
+
 static int cond( struct x86cpu *c, int cc )
 {
-    uint32_t f = get_flags( c );
     int res;
     switch (cc >> 1)
     {
-    case 0: res = f & OF; break;                          /* O */
-    case 1: res = f & CF; break;                          /* B/C */
-    case 2: res = f & ZF; break;                          /* Z/E */
-    case 3: res = (f & CF) || (f & ZF); break;            /* BE */
-    case 4: res = f & SF; break;                          /* S */
-    case 5: res = f & PF; break;                          /* P */
-    case 6: res = !!(f & SF) != !!(f & OF); break;        /* L */
-    case 7: res = (!!(f & SF) != !!(f & OF)) || (f & ZF); break; /* LE */
+    case 0: res = lf_of(c); break;                        /* O */
+    case 1: res = lf_cf(c); break;                        /* B/C */
+    case 2: res = lf_zf(c); break;                        /* Z/E */
+    case 3: res = lf_cf(c) || lf_zf(c); break;            /* BE */
+    case 4: res = lf_sf(c); break;                        /* S */
+    case 5: res = lf_pf(c); break;                        /* P */
+    case 6: res = lf_sf(c) != lf_of(c); break;            /* L */
+    case 7: res = (lf_sf(c) != lf_of(c)) || lf_zf(c); break; /* LE */
     default: res = 0;
     }
     return (cc & 1) ? !res : res;
@@ -433,6 +511,540 @@ static const uint8_t prefix_class[256] = {
     [0x66]=1, [0x67]=2, [0xf2]=3, [0xf3]=3, [0x64]=4, [0x65]=5,
     [0x26]=6, [0x2e]=6, [0x36]=6, [0x3e]=6, [0xf0]=7,
 };
+
+/* SSE/SSE2/MMX plus the bit-test and cmpxchg/xadd tail of the 0x0f map.
+ * Split out of run() for the same reason as run_x87: this is ~300 lines of
+ * wide-vector code (8- and 16-lane loops) that netduke32's integer software
+ * renderer almost never executes, yet its bulk sat inside the one function
+ * every guest instruction dispatches through.  Returns 1 if handled, 0 if the
+ * opcode is unknown (caller reports it).  Pure code motion. */
+static __attribute__((noinline)) int run_sse( struct x86cpu *c, struct decode *d, uint8_t op2 )
+{
+    struct modrm m;
+    uint32_t a, b, r;
+    int os = d->opsize;
+    (void)r;
+    switch (op2)
+    {
+            case 0x10: case 0x28: /* movups/movaps/movss/movsd xmm, xmm/m */
+                m=decode_modrm(c,d);
+                { int scalar=(op2==0x10)&&(d->rep==0xf3||d->rep==0xf2);
+                  int sz=(op2==0x10&&d->rep==0xf3)?4:(op2==0x10&&d->rep==0xf2)?8:16;
+                  if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], scalar?sz:16); /* reg movss/sd preserves upper */
+                  else { if(scalar) memset(c->xmm[m.reg],0,16); /* mem movss/sd ZERO the upper lanes */
+                         memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, sz); } }
+                break;
+            case 0x11: case 0x29: /* store */
+                m=decode_modrm(c,d);
+                { int scalar=(op2==0x11)&&(d->rep==0xf3||d->rep==0xf2);
+                  int sz=(op2==0x11&&d->rep==0xf3)?4:(op2==0x11&&d->rep==0xf2)?8:16;
+                  if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], scalar?sz:16); /* reg movss/sd preserves upper */
+                  else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], sz); }
+                break;
+            case 0x6f: /* movdqa/movdqu load */
+                m=decode_modrm(c,d);
+                if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], 16);
+                else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, 16);
+                break;
+            case 0x7f: /* movdqa/movdqu store */
+                m=decode_modrm(c,d);
+                if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], 16);
+                else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 16);
+                break;
+            case 0x6e: /* movd xmm, r/m32 */
+                m=decode_modrm(c,d); memset(c->xmm[m.reg],0,16);
+                { uint32_t v=read_rm(c,&m,4); memcpy(c->xmm[m.reg],&v,4); } break;
+            case 0x7e: /* f3: movq xmm,xmm/m64 ; else movd r/m32,xmm */
+                m=decode_modrm(c,d);
+                if (d->rep==0xf3) { memset(c->xmm[m.reg],0,16);
+                    if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], 8); else memcpy(c->xmm[m.reg],(void*)(uintptr_t)m.ea,8); }
+                else { uint32_t v; memcpy(&v,c->xmm[m.reg],4); write_rm(c,&m,4,v); }
+                break;
+            case 0xd6: /* movq store */
+                m=decode_modrm(c,d);
+                if (m.is_reg) { memset(c->xmm[m.rm],0,16); memcpy(c->xmm[m.rm], c->xmm[m.reg], 8); }
+                else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 8);
+                break;
+            case 0xef: /* pxor */
+                m=decode_modrm(c,d);
+                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]^=src[i]; }
+                break;
+            case 0x74: case 0x75: case 0x76: /* pcmpeqb/w/d */
+                m=decode_modrm(c,d);
+                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i;
+                  int step=(op2==0x74)?1:(op2==0x75)?2:4;
+                  for(i=0;i<16;i+=step){ int eq=!memcmp(&c->xmm[m.reg][i],&src[i],step); memset(&c->xmm[m.reg][i],eq?0xff:0,step);} }
+                break;
+            case 0xd7: /* pmovmskb r32, xmm */
+                m=decode_modrm(c,d);
+                { uint32_t mask=0; int i; for(i=0;i<16;i++) if(c->xmm[m.rm][i]&0x80) mask|=(1u<<i); write_reg(c,m.reg,4,mask); }
+                break;
+            case 0xfc: case 0xfd: case 0xfe: /* paddb/w/d */
+                m=decode_modrm(c,d);
+                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i;
+                  if(op2==0xfc) for(i=0;i<16;i++) c->xmm[m.reg][i]+=src[i];
+                  else if(op2==0xfd){ uint16_t *a16=(uint16_t*)c->xmm[m.reg],*s16=(uint16_t*)src; for(i=0;i<8;i++) a16[i]+=s16[i]; }
+                  else { uint32_t *a32=(uint32_t*)c->xmm[m.reg],*s32=(uint32_t*)src; for(i=0;i<4;i++) a32[i]+=s32[i]; } }
+                break;
+            case 0x12: case 0x13: case 0x16: case 0x17: /* movlps/movhps (mem) + movhlps/movlhps (reg) */
+                m=decode_modrm(c,d);
+                if (op2==0x12) { /* movlps m64->lo  OR  movhlps: dst.lo = src.hi */
+                    if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm]+8, 8);
+                    else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, 8);
+                }
+                else if (op2==0x16) { /* movhps m64->hi  OR  movlhps: dst.hi = src.lo */
+                    if (m.is_reg) memcpy(c->xmm[m.reg]+8, c->xmm[m.rm], 8);
+                    else memcpy(c->xmm[m.reg]+8, (void*)(uintptr_t)m.ea, 8);
+                }
+                else if (op2==0x13) { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 8); }      /* movlps store */
+                else { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg]+8, 8); }                    /* movhps store */
+                break;
+            case 0x57: /* xorps */
+                m=decode_modrm(c,d);
+                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]^=src[i]; }
+                break;
+            case 0x55: /* andnps */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
+            /* --- SSE/SSE2 float arithmetic: prefix picks ps/pd/ss/sd --- */
+            case 0x51: case 0x52: case 0x53: /* sqrt / rsqrt / rcp (unary on src) */
+            case 0x58: case 0x59: case 0x5c: case 0x5d: case 0x5e: case 0x5f: /* add mul sub min div max */
+            {
+                m=decode_modrm(c,d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                int dbl=(d->opsize==2||d->rep==0xf2), scal=(d->rep==0xf3||d->rep==0xf2);
+                int lanes=dbl?2:4, n=scal?1:lanes, i;
+                for(i=0;i<n;i++){
+                    double x,y,r;
+                    if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
+                    else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
+                    switch(op2){
+                        case 0x51: r=sqrt(y); break; case 0x52: r=1.0/sqrt(y); break; case 0x53: r=1.0/y; break;
+                        case 0x58: r=x+y; break; case 0x59: r=x*y; break; case 0x5c: r=x-y; break;
+                        case 0x5d: r=(x<y)?x:y; break; case 0x5e: r=x/y; break; case 0x5f: r=(x>y)?x:y; break;
+                        default: r=x;
+                    }
+                    if(dbl){ uint64_t rb; memcpy(&rb,&r,8); memcpy(dst+i*8,&rb,8); }
+                    else { float rf=(float)r; memcpy(dst+i*4,&rf,4); }
+                }
+                break;
+            }
+            case 0x2a: /* cvtsi2ss/sd (int r/m32 -> scalar float in dst low) */
+                m=decode_modrm(c,d); { int32_t v=(int32_t)read_rm(c,&m,4); uint8_t *dst=c->xmm[m.reg];
+                    if(d->rep==0xf2){ double dv=v; memcpy(dst,&dv,8); } else { float fv=(float)v; memcpy(dst,&fv,4); } } break;
+            case 0x2c: case 0x2d: /* cvt(t)ss2si / sd2si -> r32 */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double v;
+                    if(d->rep==0xf2){ uint64_t b; memcpy(&b,s,8); memcpy(&v,&b,8); } else { float f; memcpy(&f,s,4); v=f; }
+                    int32_t r=(op2==0x2c)?(int32_t)v:(int32_t)llrint(v); write_reg(c,m.reg,4,(uint32_t)r); } break;
+            case 0x2e: case 0x2f: /* ucomiss/comiss (66 -> sd) -> EFLAGS */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double x,y;
+                    if(d->opsize==2){ uint64_t xb,yb; memcpy(&xb,c->xmm[m.reg],8); memcpy(&yb,s,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
+                    else { float xf,yf; memcpy(&xf,c->xmm[m.reg],4); memcpy(&yf,s,4); x=xf; y=yf; }
+                    c->eflags &= ~(ZF|PF|CF|OF|SF|AF); c->lf_size=0;
+                    if(isnan(x)||isnan(y)) c->eflags|=ZF|PF|CF; else if(x<y) c->eflags|=CF; else if(x==y) c->eflags|=ZF; }
+                break;
+            case 0x5a: /* cvtps2pd/pd2ps/ss2sd/sd2ss */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                    if(d->rep==0xf3){ float f; memcpy(&f,s,4); double dv=f; memcpy(dst,&dv,8); }
+                    else if(d->rep==0xf2){ uint64_t b; double dv; memcpy(&b,s,8); memcpy(&dv,&b,8); float f=(float)dv; memcpy(dst,&f,4); }
+                    else if(d->opsize==2){ uint64_t b0,b1; double d0,d1; memcpy(&b0,s,8); memcpy(&b1,s+8,8); memcpy(&d0,&b0,8); memcpy(&d1,&b1,8); float f0=(float)d0,f1=(float)d1; uint8_t t[16]; memset(t,0,16); memcpy(t,&f0,4); memcpy(t+4,&f1,4); memcpy(dst,t,16); }
+                    else { float f0,f1; memcpy(&f0,s,4); memcpy(&f1,s+4,4); double d0=f0,d1=f1; memcpy(dst,&d0,8); memcpy(dst+8,&d1,8); } }
+                break;
+            case 0x5b: /* cvtdq2ps / cvtps2dq(66) / cvttps2dq(f3) */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; int i;
+                    if(d->rep==0xf3){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)f; memcpy(t+i*4,&v,4);} }
+                    else if(d->opsize==2){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)llrintf(f); memcpy(t+i*4,&v,4);} }
+                    else { for(i=0;i<4;i++){ int32_t v; memcpy(&v,s+i*4,4); float f=(float)v; memcpy(t+i*4,&f,4);} }
+                    memcpy(dst,t,16); }
+                break;
+            case 0xe6: /* cvtdq2pd(f3) / cvttpd2dq(66) / cvtpd2dq(f2) */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; memset(t,0,16); int i;
+                    if(d->rep==0xf3){ for(i=0;i<2;i++){ int32_t v; memcpy(&v,s+i*4,4); double dv=v; memcpy(t+i*8,&dv,8);} }
+                    else { int trunc=(d->opsize==2); for(i=0;i<2;i++){ uint64_t b; double dv; memcpy(&b,s+i*8,8); memcpy(&dv,&b,8); int32_t v=trunc?(int32_t)dv:(int32_t)llrint(dv); memcpy(t+i*4,&v,4);} }
+                    memcpy(dst,t,16); }
+                break;
+            case 0xc2: /* cmpps/pd/ss/sd imm8 predicate */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(d);
+                    int dbl=(d->opsize==2||d->rep==0xf2), scal=(d->rep==0xf3||d->rep==0xf2); int lanes=dbl?2:4, n=scal?1:lanes, i;
+                    for(i=0;i<n;i++){ double x,y; if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8);} else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
+                        int un=isnan(x)||isnan(y),res; switch(im&7){ case 0:res=(x==y);break; case 1:res=(x<y);break; case 2:res=(x<=y);break; case 3:res=un;break; case 4:res=!(x==y);break; case 5:res=!(x<y);break; case 6:res=!(x<=y);break; default:res=!un; }
+                        if(dbl){ uint64_t mm=res?~0ULL:0; memcpy(dst+i*8,&mm,8);} else { uint32_t mm=res?~0U:0; memcpy(dst+i*4,&mm,4);} } }
+                break;
+            case 0xc6: /* shufps / shufpd(66) imm8 */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(d); uint8_t t[16];
+                    if(d->opsize==2){ memcpy(&t[0],&dst[(im&1)?8:0],8); memcpy(&t[8],&s[(im&2)?8:0],8); }
+                    else { uint32_t *td=(uint32_t*)t,*dd=(uint32_t*)dst,*sd=(uint32_t*)s; td[0]=dd[(im>>0)&3]; td[1]=dd[(im>>2)&3]; td[2]=sd[(im>>4)&3]; td[3]=sd[(im>>6)&3]; }
+                    memcpy(dst,t,16); }
+                break;
+            case 0xdb: /* pand */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
+            case 0xdf: /* pandn */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
+            case 0xeb: /* por */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
+            case 0x60: case 0x61: case 0x62: case 0x6c: /* punpckl bw/wd/dq/qdq */
+            {
+                m=decode_modrm(c,d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t tmp[16]; uint8_t *dst=c->xmm[m.reg];
+                int u = op2==0x60?1:op2==0x61?2:op2==0x62?4:8; int i,o=0;
+                for (i=0;i<8/ (u? u:1) + (u==8?1:0); i++) {} /* interleave low half */
+                { int k; o=0; for(k=0;k<8;k+=u){ memcpy(&tmp[o],&dst[k],u); o+=u; memcpy(&tmp[o],&s[k],u); o+=u; if(o>=16)break;} }
+                memcpy(dst,tmp,16); break;
+            }
+            case 0x68: case 0x69: case 0x6a: case 0x6d: /* punpckh */
+            {
+                m=decode_modrm(c,d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t tmp[16]; uint8_t *dst=c->xmm[m.reg];
+                int u = op2==0x68?1:op2==0x69?2:op2==0x6a?4:8; int k,o=0;
+                for(k=8;k<16;k+=u){ memcpy(&tmp[o],&dst[k],u); o+=u; memcpy(&tmp[o],&s[k],u); o+=u; if(o>=16)break;}
+                memcpy(dst,tmp,16); break;
+            }
+            case 0x70: /* pshufd(66)/pshuflw(f2)/pshufhw(f3) */
+            {
+                m=decode_modrm(c,d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t im=f8(d); uint8_t tmp[16];
+                if (d->opsize==2) { uint32_t *sd=(uint32_t*)s,*td=(uint32_t*)tmp; int i; for(i=0;i<4;i++) td[i]=sd[(im>>(i*2))&3]; }
+                else if (d->rep==0xf2) { memcpy(tmp,s,16); uint16_t *sw=(uint16_t*)s,*tw=(uint16_t*)tmp; int i; for(i=0;i<4;i++) tw[i]=sw[(im>>(i*2))&3]; }
+                else { memcpy(tmp,s,16); uint16_t *sw=(uint16_t*)s,*tw=(uint16_t*)tmp; int i; for(i=0;i<4;i++) tw[4+i]=sw[4+((im>>(i*2))&3)]; }
+                memcpy(c->xmm[m.reg],tmp,16); break;
+            }
+            case 0x71: case 0x72: case 0x73: /* psll/psrl/psra by imm8 (reg field selects op) */
+            {
+                m=decode_modrm(c,d); uint8_t im=f8(d); uint8_t *dst=c->xmm[m.rm];
+                if (op2==0x73 && (m.reg==7||m.reg==3)) { /* pslldq/psrldq (byte shift) */
+                    uint8_t tmp[16]; memset(tmp,0,16);
+                    if(m.reg==7){ int sh=im; if(sh<16) memcpy(tmp+sh,dst,16-sh); } /* pslldq */
+                    else { int sh=im; if(sh<16) memcpy(tmp,dst+sh,16-sh); } /* psrldq */
+                    memcpy(dst,tmp,16); break;
+                }
+                int u = op2==0x71?2:4; if(op2==0x73&&m.reg!=2&&m.reg!=6) u=8;
+                int n=16/u,i;
+                for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,&dst[i*u],u);
+                    if(m.reg==6) v<<=im; else if(m.reg==2) v>>=im; else { /* psra */ int64_t sv=(int64_t)(v<<(64-u*8)); sv>>=(64-u*8); v=(uint64_t)(sv>>im);}
+                    memcpy(&dst[i*u],&v,u);} break;
+            }
+            case 0xc5: /* pextrw r32, xmm, imm8 */
+                m=decode_modrm(c,d); { uint8_t im=f8(d); uint16_t *w=(uint16_t*)c->xmm[m.rm]; write_reg(c,m.reg,4,w[im&7]); } break;
+            case 0xc4: /* pinsrw xmm, r/m16, imm8 */
+                m=decode_modrm(c,d); { uint32_t v=read_rm(c,&m,2); uint8_t im=f8(d); uint16_t *w=(uint16_t*)c->xmm[m.reg]; w[im&7]=(uint16_t)v; } break;
+            case 0x50: /* movmskps r32, xmm */
+                m=decode_modrm(c,d); { uint32_t mask=0; int i; for(i=0;i<4;i++) if(c->xmm[m.rm][i*4+3]&0x80) mask|=(1u<<i); write_reg(c,m.reg,4,mask); } break;
+            case 0x64: case 0x65: case 0x66: /* pcmpgtb/w/d (signed) */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0x64){ for(i=0;i<16;i++) dst[i]=((int8_t)dst[i]>(int8_t)s[i])?0xff:0; }
+                  else if(op2==0x65){ int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++) a[i]=(a[i]>b[i])?-1:0; }
+                  else { int32_t *a=(int32_t*)dst,*b=(int32_t*)s; for(i=0;i<4;i++) a[i]=(a[i]>b[i])?-1:0; } } break;
+            case 0xd1: case 0xd2: case 0xd3: /* psrlw/d/q by xmm */
+            case 0xf1: case 0xf2: case 0xf3: /* psllw/d/q by xmm */
+            case 0xe1: case 0xe2: /* psraw/psrad by xmm */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
+                  uint64_t cnt; memcpy(&cnt,s,8);
+                  int u=(op2==0xd1||op2==0xf1||op2==0xe1)?2:(op2==0xd3||op2==0xf3)?8:4;
+                  int arith=(op2==0xe1||op2==0xe2), left=(op2==0xf1||op2==0xf2||op2==0xf3);
+                  int n=16/u,i; for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,&dst[i*u],u); int bits=u*8;
+                    if(cnt>=(uint64_t)bits){ if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=63; v=(uint64_t)sv; } else v=0; }
+                    else if(left) v<<=cnt;
+                    else if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=(64-bits); v=(uint64_t)(sv>>cnt); }
+                    else v>>=cnt;
+                    memcpy(&dst[i*u],&v,u);} } break;
+            case 0xd4: /* paddq */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]+=b[0]; a[1]+=b[1]; } break;
+            case 0xfb: /* psubq */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]-=b[0]; a[1]-=b[1]; } break;
+            case 0xd5: /* pmullw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(a[i]*b[i]); } break;
+            case 0xe5: /* pmulhw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i; for(i=0;i<8;i++) a[i]=(int16_t)(((int32_t)a[i]*b[i])>>16); } break;
+            case 0xe4: /* pmulhuw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(((uint32_t)a[i]*b[i])>>16); } break;
+            case 0xf4: /* pmuludq */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint32_t *a=(uint32_t*)c->xmm[m.reg],*b=(uint32_t*)s; uint64_t r0=(uint64_t)a[0]*b[0], r1=(uint64_t)a[2]*b[2]; uint64_t *o=(uint64_t*)c->xmm[m.reg]; o[0]=r0; o[1]=r1; } break;
+            case 0xf5: /* pmaddwd */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int32_t r[4]; int i; for(i=0;i<4;i++) r[i]=(int32_t)a[i*2]*b[i*2]+(int32_t)a[i*2+1]*b[i*2+1]; memcpy(c->xmm[m.reg],r,16); } break;
+            case 0xf6: /* psadbw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint32_t s0=0,s1=0; int i; for(i=0;i<8;i++){ int dd=dst[i]-s[i]; s0+=dd<0?-dd:dd; } for(i=8;i<16;i++){ int dd=dst[i]-s[i]; s1+=dd<0?-dd:dd; } uint64_t *o=(uint64_t*)dst; o[0]=s0; o[1]=s1; } break;
+            case 0xd8: case 0xd9: /* psubusb/psubusw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xd8){ for(i=0;i<16;i++){ int r=dst[i]-s[i]; dst[i]=r<0?0:r; } }
+                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=r<0?0:(uint16_t)r; } } } break;
+            case 0xdc: case 0xdd: /* paddusb/paddusw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xdc){ for(i=0;i<16;i++){ int r=dst[i]+s[i]; dst[i]=r>255?255:r; } }
+                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=r>65535?65535:(uint16_t)r; } } } break;
+            case 0xe8: case 0xe9: /* psubsb/psubsw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xe8){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]-(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
+                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
+            case 0xec: case 0xed: /* paddsb/paddsw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xec){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]+(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
+                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
+            case 0xda: case 0xde: /* pminub/pmaxub */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xda){ for(i=0;i<16;i++) if(s[i]<dst[i]) dst[i]=s[i]; } else { for(i=0;i<16;i++) if(s[i]>dst[i]) dst[i]=s[i]; } } break;
+            case 0xea: case 0xee: /* pminsw/pmaxsw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i;
+                  if(op2==0xea){ for(i=0;i<8;i++) if(b[i]<a[i]) a[i]=b[i]; } else { for(i=0;i<8;i++) if(b[i]>a[i]) a[i]=b[i]; } } break;
+            case 0xe0: case 0xe3: /* pavgb/pavgw */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xe0){ for(i=0;i<16;i++) dst[i]=(uint8_t)((dst[i]+s[i]+1)>>1); } else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]=(uint16_t)((a[i]+b[i]+1)>>1); } } break;
+            case 0xf8: case 0xf9: case 0xfa: /* psubb/w/d */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
+                  if(op2==0xf8){ for(i=0;i<16;i++) dst[i]-=s[i]; }
+                  else if(op2==0xf9){ uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]-=b[i]; }
+                  else { uint32_t *a=(uint32_t*)dst,*b=(uint32_t*)s; for(i=0;i<4;i++) a[i]-=b[i]; } } break;
+            case 0x54: /* andps */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
+            case 0x56: /* orps */ m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
+            case 0x14: case 0x15: /* unpcklps/unpckhps — 4-byte lane interleave */
+                m=decode_modrm(c,d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint32_t *dd=(uint32_t*)c->xmm[m.reg],*ss=(uint32_t*)s; uint32_t t[4]; int base=(op2==0x15)?2:0; t[0]=dd[base];t[1]=ss[base];t[2]=dd[base+1];t[3]=ss[base+1]; memcpy(dd,t,16);} break;
+            case 0x77: break; /* emms */
+            case 0xae: decode_modrm(c,d); break; /* fxsave/lfence/sfence/mfence group: ignore */
+            case 0x18: case 0x19: case 0x1a: case 0x1b: case 0x1c: case 0x1d: case 0x1e:
+                decode_modrm(c,d); break; /* prefetch/nop hints */
+            case 0xa3: /* bt r/m, r */
+                m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; break;
+            case 0xab: /* bts */
+                m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a|(1u<<b)); break;
+            case 0xb3: /* btr r/m, r */
+                m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a&~(1u<<b)); break;
+            case 0xbb: /* btc r/m, r */
+                m=decode_modrm(c,d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
+                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a^(1u<<b)); break;
+            case 0xba: /* grp8 bt/bts/btr/btc r/m, imm8 */
+                m=decode_modrm(c,d); a=read_rm(c,&m,os); { uint32_t bit=f8(d)&(os*8-1);
+                  c->eflags=(c->eflags&~CF)|(((a>>bit)&1)?CF:0); c->lf_size=0;
+                  if(m.reg==5) write_rm(c,&m,os,a|(1u<<bit)); else if(m.reg==6) write_rm(c,&m,os,a&~(1u<<bit)); else if(m.reg==7) write_rm(c,&m,os,a^(1u<<bit)); }
+                break;
+            case 0xb0: case 0xb1: /* cmpxchg */
+            {
+                int sz=(op2&1)?os:1; m=decode_modrm(c,d); a=read_rm(c,&m,sz); uint32_t acc=read_reg(c,EAX,sz);
+                if (acc==a) { write_rm(c,&m,sz,read_reg(c,m.reg,sz)); set_lazy(c,K_SUB,acc,a,0,sz); }
+                else { write_reg(c,EAX,sz,a); set_lazy(c,K_SUB,acc,a,acc-a,sz); }
+                break;
+            }
+            case 0xc0: case 0xc1: /* xadd */
+            {
+                int sz=(op2&1)?os:1; m=decode_modrm(c,d); a=read_rm(c,&m,sz); b=read_reg(c,m.reg,sz);
+                write_rm(c,&m,sz,a+b); write_reg(c,m.reg,sz,a); set_lazy(c,K_ADD,a,b,a+b,sz); break;
+            }
+            case 0xc7: /* cmpxchg8b m64 (reg field 1) */
+            {
+                m = decode_modrm(c,d);
+                if (m.reg == 1) {
+                    uint64_t mem = rd32(m.ea) | ((uint64_t)rd32(m.ea+4) << 32);
+                    uint64_t edxeax = c->regs[EAX] | ((uint64_t)c->regs[EDX] << 32);
+                    c->eflags = get_flags(c);           /* materialize; only ZF changes */
+                    if (mem == edxeax) {
+                        wr32(m.ea, c->regs[EBX]); wr32(m.ea+4, c->regs[ECX]);
+                        c->eflags |= ZF;
+                    } else {
+                        c->regs[EAX] = (uint32_t)mem; c->regs[EDX] = (uint32_t)(mem >> 32);
+                        c->eflags &= ~ZF;
+                    }
+                    c->lf_size = 0;
+                }
+                break;
+            }
+            case 0xc8: case 0xc9: case 0xca: case 0xcb: case 0xcc: case 0xcd: case 0xce: case 0xcf: /* bswap */
+                { int rr=op2&7; uint32_t v=c->regs[rr]; c->regs[rr]=((v>>24)&0xff)|((v>>8)&0xff00)|((v<<8)&0xff0000)|((v<<24)&0xff000000); } break;
+    default: return 0;
+    }
+    return 1;
+}
+
+/* x87 FPU (0xd8-0xdf).  Split out of run() so the interpreter's hot integer
+ * path stays a small function: run() compiled to ~76KB of wasm in ONE body,
+ * which is 90% of the module and well past the point where the engine's
+ * optimizer allocates registers well.  This code is cold (x87 does not appear
+ * in the top-16 opcode histogram) but its bulk penalised every instruction.
+ * Pure code motion - semantics are unchanged. */
+static __attribute__((noinline)) void run_x87( struct x86cpu *c, struct decode *d, uint8_t op )
+{
+    struct modrm m;
+    switch (op)
+    {
+        case 0xd8: /* arithmetic with m32real / st(i), dest st0 */
+        {
+            m = decode_modrm(c,d);
+            double src = m.is_reg ? fp_get(c,m.rm) : rdf32(m.ea);
+            double s0 = fp_get(c,0);
+            switch (m.reg) {
+            case 0: fp_set(c,0,s0+src); break;
+            case 1: fp_set(c,0,s0*src); break;
+            case 2: fp_compare(c,s0,src); break;
+            case 3: fp_compare(c,s0,src); fp_pop(c); break;
+            case 4: fp_set(c,0,s0-src); break;
+            case 5: fp_set(c,0,src-s0); break;
+            case 6: fp_set(c,0,s0/src); break;
+            case 7: fp_set(c,0,src/s0); break;
+            }
+            break;
+        }
+        case 0xd9:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c, rdf32(m.ea)); break;        /* fld m32 */
+                case 2: wrf32(m.ea, fp_get(c,0)); break;       /* fst m32 */
+                case 3: wrf32(m.ea, fp_pop(c)); break;         /* fstp m32 */
+                case 5: c->fpcw = rd16(m.ea); break;           /* fldcw */
+                case 7: wr16(m.ea, c->fpcw); break;            /* fnstcw */
+                default: break;                                /* fldenv/fnstenv: skip */
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (m.reg == 0) { double v=fp_get(c,m.rm); fp_push(c,v); }   /* fld st(i) */
+                else if (m.reg == 1) { double t=fp_get(c,0); fp_set(c,0,fp_get(c,m.rm)); fp_set(c,m.rm,t); } /* fxch */
+                else switch (b) {
+                    case 0xe0: fp_set(c,0,-fp_get(c,0)); break;        /* fchs */
+                    case 0xe1: fp_set(c,0,fabs(fp_get(c,0))); break;   /* fabs */
+                    case 0xe4: fp_compare(c,fp_get(c,0),0.0); break;   /* ftst */
+                    case 0xe5: break;                                  /* fxam: skip */
+                    case 0xe8: fp_push(c,1.0); break;                  /* fld1 */
+                    case 0xe9: fp_push(c,3.321928094887362); break;    /* fldl2t */
+                    case 0xea: fp_push(c,1.4426950408889634); break;   /* fldl2e */
+                    case 0xeb: fp_push(c,3.141592653589793); break;    /* fldpi */
+                    case 0xec: fp_push(c,0.3010299956639812); break;   /* fldlg2 */
+                    case 0xed: fp_push(c,0.6931471805599453); break;   /* fldln2 */
+                    case 0xee: fp_push(c,0.0); break;                  /* fldz */
+                    case 0xf0: fp_set(c,0,exp2(fp_get(c,0))-1.0); break; /* f2xm1 */
+                    case 0xf1: fp_set(c,1,fp_get(c,1)*log2(fp_get(c,0))); fp_pop(c); break; /* fyl2x */
+                    case 0xf2: { double t=tan(fp_get(c,0)); fp_set(c,0,t); fp_push(c,1.0); } break; /* fptan */
+                    case 0xf3: fp_set(c,1,atan2(fp_get(c,1),fp_get(c,0))); fp_pop(c); break; /* fpatan */
+                    case 0xf5: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem1 */
+                    case 0xf6: c->fptop=(c->fptop-1)&7; break;         /* fdecstp */
+                    case 0xf7: c->fptop=(c->fptop+1)&7; break;         /* fincstp */
+                    case 0xf8: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem */
+                    case 0xfa: fp_set(c,0,sqrt(fp_get(c,0))); break;   /* fsqrt */
+                    case 0xfb: { double s=sin(fp_get(c,0)),co=cos(fp_get(c,0)); fp_set(c,0,s); fp_push(c,co); } break; /* fsincos */
+                    case 0xfc: fp_set(c,0,rint(fp_get(c,0))); break;   /* frndint */
+                    case 0xfd: fp_set(c,0,ldexp(fp_get(c,0),(int)fp_get(c,1))); break; /* fscale */
+                    case 0xfe: fp_set(c,0,sin(fp_get(c,0))); break;    /* fsin */
+                    case 0xff: fp_set(c,0,cos(fp_get(c,0))); break;    /* fcos */
+                    default: break;
+                }
+            }
+            break;
+        }
+        case 0xda:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                double src = (double)(int32_t)rd32(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                uint32_t f = get_flags(c);
+                if (b == 0xe9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fucompp */
+                else { int mv=0; switch(m.reg){case 0:mv=!!(f&CF);break;case 1:mv=!!(f&ZF);break;case 2:mv=!!(f&(CF|ZF));break;case 3:mv=!!(f&PF);break;}
+                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovb/e/be/u */
+            }
+            break;
+        }
+        case 0xdb:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c,(double)(int32_t)rd32(m.ea)); break;     /* fild m32 */
+                case 2: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_get(c,0))); break; /* fist m32 */
+                case 3: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_pop(c))); break;   /* fistp m32 */
+                case 5: fp_push(c, rd80(m.ea)); break;                     /* fld m80 */
+                case 7: wr80(m.ea, fp_pop(c)); break;                      /* fstp m80 */
+                default: break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                uint32_t f = get_flags(c);
+                if (b == 0xe2) { c->fpsw &= ~0xff; }                       /* fnclex */
+                else if (b == 0xe3) { c->fpcw=0x037f; c->fpsw=0; c->fptop=0; } /* fninit */
+                else if (b >= 0xe8 && b <= 0xf7) fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); /* fucomi/fcomi */
+                else { int mv=0; switch(m.reg){case 0:mv=!(f&CF);break;case 1:mv=!(f&ZF);break;case 2:mv=!(f&(CF|ZF));break;case 3:mv=!(f&PF);break;}
+                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovnb/ne/nbe/nu */
+            }
+            break;
+        }
+        case 0xdc:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                double src = rdf64(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                double si = fp_get(c,m.rm), s0 = fp_get(c,0);  /* dest st(i); sub/div reversed */
+                switch (m.reg) {
+                case 0: fp_set(c,m.rm,si+s0); break; case 1: fp_set(c,m.rm,si*s0); break;
+                case 4: fp_set(c,m.rm,s0-si); break; case 5: fp_set(c,m.rm,si-s0); break;
+                case 6: fp_set(c,m.rm,s0/si); break; case 7: fp_set(c,m.rm,si/s0); break;
+                default: break;
+                }
+            }
+            break;
+        }
+        case 0xdd:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c, rdf64(m.ea)); break;        /* fld m64 */
+                case 2: wrf64(m.ea, fp_get(c,0)); break;       /* fst m64 */
+                case 3: wrf64(m.ea, fp_pop(c)); break;         /* fstp m64 */
+                case 7: wr16(m.ea, (uint16_t)(c->fpsw | ((c->fptop&7)<<11))); break; /* fnstsw m16 */
+                default: break;
+                }
+            } else {
+                switch (m.reg) {
+                case 0: break;                                 /* ffree: no-op */
+                case 2: fp_set(c,m.rm,fp_get(c,0)); break;      /* fst st(i) */
+                case 3: { double v=fp_get(c,0); fp_set(c,m.rm,v); fp_pop(c); } break; /* fstp st(i) */
+                case 4: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); break;       /* fucom */
+                case 5: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); break; /* fucomp */
+                default: break;
+                }
+            }
+            break;
+        }
+        case 0xde:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                double src = (double)(int16_t)rd16(m.ea), s0 = fp_get(c,0);
+                switch (m.reg) {
+                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
+                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
+                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
+                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (b == 0xd9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fcompp */
+                else {
+                    double si = fp_get(c,m.rm), s0 = fp_get(c,0), r = 0;   /* st(i) op= st0; pop */
+                    switch (m.reg) {
+                    case 0: r=si+s0; break; case 1: r=si*s0; break;
+                    case 4: r=s0-si; break; case 5: r=si-s0; break;
+                    case 6: r=s0/si; break; case 7: r=si/s0; break;
+                    default: r=si; break;
+                    }
+                    fp_set(c,m.rm,r); fp_pop(c);
+                }
+            }
+            break;
+        }
+        case 0xdf:
+        {
+            m = decode_modrm(c,d);
+            if (!m.is_reg) {
+                switch (m.reg) {
+                case 0: fp_push(c,(double)(int16_t)rd16(m.ea)); break;     /* fild m16 */
+                case 2: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_get(c,0))); break; /* fist m16 */
+                case 3: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_pop(c))); break;   /* fistp m16 */
+                case 5: { int64_t v=(int64_t)(rd32(m.ea)|((uint64_t)rd32(m.ea+4)<<32)); fp_push(c,(double)v); } break; /* fild m64 */
+                case 7: { int64_t v=(int64_t)llrint(fp_pop(c)); wr32(m.ea,(uint32_t)v); wr32(m.ea+4,(uint32_t)((uint64_t)v>>32)); } break; /* fistp m64 */
+                default: break;
+                }
+            } else {
+                int b = 0xc0 | (m.reg<<3) | m.rm;
+                if (b == 0xe0) write_reg(c,EAX,2,(uint16_t)(c->fpsw | ((c->fptop&7)<<11))); /* fnstsw ax */
+                else if (b >= 0xe8 && b <= 0xf7) { fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); } /* fucomip/fcomip */
+                else fp_pop(c);                                            /* ffreep */
+            }
+            break;
+        }
+
+    default: break;
+    }
+}
 
 /* Execute until the guest transfers to a native dispatcher (returns 1, target
  * left in c->eip) or stops. */
@@ -650,8 +1262,8 @@ static void run( struct x86cpu *c )
             case 5: r=a-b; write_rm(c,&m,sz,r); set_lazy(c,K_SUB,a,b,r,sz); break;
             case 6: r=a^b; write_rm(c,&m,sz,r); set_lazy(c,K_LOGIC,a,b,r,sz); break;
             case 7: set_lazy(c,K_SUB,a,b,a-b,sz); break; /* cmp */
-            case 2: { int ci=(get_flags(c)&CF)?1:0; r=a+b+ci; write_rm(c,&m,sz,r); set_lazy(c,K_ADC,a,b,r,sz); c->lf_cin=ci; } break; /* adc */
-            case 3: { int ci=(get_flags(c)&CF)?1:0; r=a-b-ci; write_rm(c,&m,sz,r); set_lazy(c,K_SBB,a,b,r,sz); c->lf_cin=ci; } break; /* sbb */
+            case 2: { int ci=lf_cf(c); r=a+b+ci; write_rm(c,&m,sz,r); set_lazy(c,K_ADC,a,b,r,sz); c->lf_cin=ci; } break; /* adc */
+            case 3: { int ci=lf_cf(c); r=a-b-ci; write_rm(c,&m,sz,r); set_lazy(c,K_SBB,a,b,r,sz); c->lf_cin=ci; } break; /* sbb */
             }
             break;
         }
@@ -707,18 +1319,18 @@ static void run( struct x86cpu *c )
         case 0xa3: { uint32_t off=f32(&d)+(uint32_t)d.seg; if(os==2) wr16(off,c->regs[EAX]); else wr32(off,c->regs[EAX]); } break;
 
         /* adc / sbb (reg forms) */
-        case 0x10: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a+b+ci; write_rm(c,&m,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break;
-        case 0x11: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a+b+ci; write_rm(c,&m,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x13: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a+b+ci; write_reg(c,m.reg,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x18: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a-b-ci; write_rm(c,&m,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break;
-        case 0x19: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a-b-ci; write_rm(c,&m,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x1b: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a-b-ci; write_reg(c,m.reg,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
-        case 0x12: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a+b+ci; write_reg(c,m.reg,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc r8,r/m8 */
-        case 0x14: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,1); b=f8(&d); r=a+b+ci; write_reg(c,EAX,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc al,imm8 */
-        case 0x15: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a+b+ci; write_reg(c,EAX,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break; /* adc eax,imm */
-        case 0x1a: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a-b-ci; write_reg(c,m.reg,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb r8,r/m8 */
-        case 0x1c: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,1); b=f8(&d); r=a-b-ci; write_reg(c,EAX,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb al,imm8 */
-        case 0x1d: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a-b-ci; write_reg(c,EAX,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break; /* sbb eax,imm */
+        case 0x10: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a+b+ci; write_rm(c,&m,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break;
+        case 0x11: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a+b+ci; write_rm(c,&m,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x13: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a+b+ci; write_reg(c,m.reg,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x18: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a-b-ci; write_rm(c,&m,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break;
+        case 0x19: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a-b-ci; write_rm(c,&m,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x1b: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a-b-ci; write_reg(c,m.reg,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x12: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a+b+ci; write_reg(c,m.reg,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc r8,r/m8 */
+        case 0x14: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(&d); r=a+b+ci; write_reg(c,EAX,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc al,imm8 */
+        case 0x15: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a+b+ci; write_reg(c,EAX,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break; /* adc eax,imm */
+        case 0x1a: { int ci=lf_cf(c); m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a-b-ci; write_reg(c,m.reg,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb r8,r/m8 */
+        case 0x1c: { int ci=lf_cf(c); a=read_reg(c,EAX,1); b=f8(&d); r=a-b-ci; write_reg(c,EAX,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb al,imm8 */
+        case 0x1d: { int ci=lf_cf(c); a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a-b-ci; write_reg(c,EAX,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break; /* sbb eax,imm */
 
         /* pushad / popad */
         case 0x60: { uint32_t sp=c->regs[ESP]; push32(c,c->regs[EAX]); push32(c,c->regs[ECX]); push32(c,c->regs[EDX]); push32(c,c->regs[EBX]); push32(c,sp); push32(c,c->regs[EBP]); push32(c,c->regs[ESI]); push32(c,c->regs[EDI]); } break;
@@ -818,7 +1430,7 @@ static void run( struct x86cpu *c )
         /* string ops (addr32) with optional rep */
         case 0xa4: case 0xa5: /* movs */
         {
-            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(get_flags(c)&DF)?-sz:sz;
+            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz;
             while (cnt--) { uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
                             if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v);
                             c->regs[ESI]+=delta; c->regs[EDI]+=delta; }
@@ -827,14 +1439,14 @@ static void run( struct x86cpu *c )
         }
         case 0xaa: case 0xab: /* stos */
         {
-            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(get_flags(c)&DF)?-sz:sz; uint32_t v=c->regs[EAX];
+            int sz=(op&1)?os:1; uint32_t cnt=(d.rep)?c->regs[ECX]:1; int delta=(c->eflags&DF)?-sz:sz; uint32_t v=c->regs[EAX];
             while (cnt--) { if(sz==1)wr8(c->regs[EDI],v); else if(sz==2)wr16(c->regs[EDI],v); else wr32(c->regs[EDI],v); c->regs[EDI]+=delta; }
             if (d.rep) c->regs[ECX]=0;
             break;
         }
         case 0xac: case 0xad: /* lods */
         {
-            int sz=(op&1)?os:1; int delta=(get_flags(c)&DF)?-sz:sz;
+            int sz=(op&1)?os:1; int delta=(c->eflags&DF)?-sz:sz;
             uint32_t v=(sz==1)?rd8(c->regs[ESI]):sz==2?rd16(c->regs[ESI]):rd32(c->regs[ESI]);
             write_reg(c,EAX,sz,v); c->regs[ESI]+=delta;
             break;
@@ -846,206 +1458,10 @@ static void run( struct x86cpu *c )
         case 0xfd: c->eflags |= DF; break;   /* std */
 
         /* ---- x87 FPU (0xd8-0xdf) ---- */
-        case 0xd8: /* arithmetic with m32real / st(i), dest st0 */
-        {
-            m = decode_modrm(c,&d);
-            double src = m.is_reg ? fp_get(c,m.rm) : rdf32(m.ea);
-            double s0 = fp_get(c,0);
-            switch (m.reg) {
-            case 0: fp_set(c,0,s0+src); break;
-            case 1: fp_set(c,0,s0*src); break;
-            case 2: fp_compare(c,s0,src); break;
-            case 3: fp_compare(c,s0,src); fp_pop(c); break;
-            case 4: fp_set(c,0,s0-src); break;
-            case 5: fp_set(c,0,src-s0); break;
-            case 6: fp_set(c,0,s0/src); break;
-            case 7: fp_set(c,0,src/s0); break;
-            }
+        case 0xd8: case 0xd9: case 0xda: case 0xdb:
+        case 0xdc: case 0xdd: case 0xde: case 0xdf:
+            run_x87( c, &d, op );   /* cold: see run_x87 */
             break;
-        }
-        case 0xd9:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                switch (m.reg) {
-                case 0: fp_push(c, rdf32(m.ea)); break;        /* fld m32 */
-                case 2: wrf32(m.ea, fp_get(c,0)); break;       /* fst m32 */
-                case 3: wrf32(m.ea, fp_pop(c)); break;         /* fstp m32 */
-                case 5: c->fpcw = rd16(m.ea); break;           /* fldcw */
-                case 7: wr16(m.ea, c->fpcw); break;            /* fnstcw */
-                default: break;                                /* fldenv/fnstenv: skip */
-                }
-            } else {
-                int b = 0xc0 | (m.reg<<3) | m.rm;
-                if (m.reg == 0) { double v=fp_get(c,m.rm); fp_push(c,v); }   /* fld st(i) */
-                else if (m.reg == 1) { double t=fp_get(c,0); fp_set(c,0,fp_get(c,m.rm)); fp_set(c,m.rm,t); } /* fxch */
-                else switch (b) {
-                    case 0xe0: fp_set(c,0,-fp_get(c,0)); break;        /* fchs */
-                    case 0xe1: fp_set(c,0,fabs(fp_get(c,0))); break;   /* fabs */
-                    case 0xe4: fp_compare(c,fp_get(c,0),0.0); break;   /* ftst */
-                    case 0xe5: break;                                  /* fxam: skip */
-                    case 0xe8: fp_push(c,1.0); break;                  /* fld1 */
-                    case 0xe9: fp_push(c,3.321928094887362); break;    /* fldl2t */
-                    case 0xea: fp_push(c,1.4426950408889634); break;   /* fldl2e */
-                    case 0xeb: fp_push(c,3.141592653589793); break;    /* fldpi */
-                    case 0xec: fp_push(c,0.3010299956639812); break;   /* fldlg2 */
-                    case 0xed: fp_push(c,0.6931471805599453); break;   /* fldln2 */
-                    case 0xee: fp_push(c,0.0); break;                  /* fldz */
-                    case 0xf0: fp_set(c,0,exp2(fp_get(c,0))-1.0); break; /* f2xm1 */
-                    case 0xf1: fp_set(c,1,fp_get(c,1)*log2(fp_get(c,0))); fp_pop(c); break; /* fyl2x */
-                    case 0xf2: { double t=tan(fp_get(c,0)); fp_set(c,0,t); fp_push(c,1.0); } break; /* fptan */
-                    case 0xf3: fp_set(c,1,atan2(fp_get(c,1),fp_get(c,0))); fp_pop(c); break; /* fpatan */
-                    case 0xf5: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem1 */
-                    case 0xf6: c->fptop=(c->fptop-1)&7; break;         /* fdecstp */
-                    case 0xf7: c->fptop=(c->fptop+1)&7; break;         /* fincstp */
-                    case 0xf8: fp_set(c,0,fmod(fp_get(c,0),fp_get(c,1))); break; /* fprem */
-                    case 0xfa: fp_set(c,0,sqrt(fp_get(c,0))); break;   /* fsqrt */
-                    case 0xfb: { double s=sin(fp_get(c,0)),co=cos(fp_get(c,0)); fp_set(c,0,s); fp_push(c,co); } break; /* fsincos */
-                    case 0xfc: fp_set(c,0,rint(fp_get(c,0))); break;   /* frndint */
-                    case 0xfd: fp_set(c,0,ldexp(fp_get(c,0),(int)fp_get(c,1))); break; /* fscale */
-                    case 0xfe: fp_set(c,0,sin(fp_get(c,0))); break;    /* fsin */
-                    case 0xff: fp_set(c,0,cos(fp_get(c,0))); break;    /* fcos */
-                    default: break;
-                }
-            }
-            break;
-        }
-        case 0xda:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                double src = (double)(int32_t)rd32(m.ea), s0 = fp_get(c,0);
-                switch (m.reg) {
-                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
-                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
-                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
-                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
-                }
-            } else {
-                int b = 0xc0 | (m.reg<<3) | m.rm;
-                uint32_t f = get_flags(c);
-                if (b == 0xe9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fucompp */
-                else { int mv=0; switch(m.reg){case 0:mv=!!(f&CF);break;case 1:mv=!!(f&ZF);break;case 2:mv=!!(f&(CF|ZF));break;case 3:mv=!!(f&PF);break;}
-                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovb/e/be/u */
-            }
-            break;
-        }
-        case 0xdb:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                switch (m.reg) {
-                case 0: fp_push(c,(double)(int32_t)rd32(m.ea)); break;     /* fild m32 */
-                case 2: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_get(c,0))); break; /* fist m32 */
-                case 3: wr32(m.ea,(uint32_t)(int32_t)lrint(fp_pop(c))); break;   /* fistp m32 */
-                case 5: fp_push(c, rd80(m.ea)); break;                     /* fld m80 */
-                case 7: wr80(m.ea, fp_pop(c)); break;                      /* fstp m80 */
-                default: break;
-                }
-            } else {
-                int b = 0xc0 | (m.reg<<3) | m.rm;
-                uint32_t f = get_flags(c);
-                if (b == 0xe2) { c->fpsw &= ~0xff; }                       /* fnclex */
-                else if (b == 0xe3) { c->fpcw=0x037f; c->fpsw=0; c->fptop=0; } /* fninit */
-                else if (b >= 0xe8 && b <= 0xf7) fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); /* fucomi/fcomi */
-                else { int mv=0; switch(m.reg){case 0:mv=!(f&CF);break;case 1:mv=!(f&ZF);break;case 2:mv=!(f&(CF|ZF));break;case 3:mv=!(f&PF);break;}
-                       if (mv) fp_set(c,0,fp_get(c,m.rm)); } /* fcmovnb/ne/nbe/nu */
-            }
-            break;
-        }
-        case 0xdc:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                double src = rdf64(m.ea), s0 = fp_get(c,0);
-                switch (m.reg) {
-                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
-                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
-                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
-                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
-                }
-            } else {
-                double si = fp_get(c,m.rm), s0 = fp_get(c,0);  /* dest st(i); sub/div reversed */
-                switch (m.reg) {
-                case 0: fp_set(c,m.rm,si+s0); break; case 1: fp_set(c,m.rm,si*s0); break;
-                case 4: fp_set(c,m.rm,s0-si); break; case 5: fp_set(c,m.rm,si-s0); break;
-                case 6: fp_set(c,m.rm,s0/si); break; case 7: fp_set(c,m.rm,si/s0); break;
-                default: break;
-                }
-            }
-            break;
-        }
-        case 0xdd:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                switch (m.reg) {
-                case 0: fp_push(c, rdf64(m.ea)); break;        /* fld m64 */
-                case 2: wrf64(m.ea, fp_get(c,0)); break;       /* fst m64 */
-                case 3: wrf64(m.ea, fp_pop(c)); break;         /* fstp m64 */
-                case 7: wr16(m.ea, (uint16_t)(c->fpsw | ((c->fptop&7)<<11))); break; /* fnstsw m16 */
-                default: break;
-                }
-            } else {
-                switch (m.reg) {
-                case 0: break;                                 /* ffree: no-op */
-                case 2: fp_set(c,m.rm,fp_get(c,0)); break;      /* fst st(i) */
-                case 3: { double v=fp_get(c,0); fp_set(c,m.rm,v); fp_pop(c); } break; /* fstp st(i) */
-                case 4: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); break;       /* fucom */
-                case 5: fp_compare(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); break; /* fucomp */
-                default: break;
-                }
-            }
-            break;
-        }
-        case 0xde:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                double src = (double)(int16_t)rd16(m.ea), s0 = fp_get(c,0);
-                switch (m.reg) {
-                case 0: fp_set(c,0,s0+src); break; case 1: fp_set(c,0,s0*src); break;
-                case 2: fp_compare(c,s0,src); break; case 3: fp_compare(c,s0,src); fp_pop(c); break;
-                case 4: fp_set(c,0,s0-src); break; case 5: fp_set(c,0,src-s0); break;
-                case 6: fp_set(c,0,s0/src); break; case 7: fp_set(c,0,src/s0); break;
-                }
-            } else {
-                int b = 0xc0 | (m.reg<<3) | m.rm;
-                if (b == 0xd9) { fp_compare(c,fp_get(c,0),fp_get(c,1)); fp_pop(c); fp_pop(c); } /* fcompp */
-                else {
-                    double si = fp_get(c,m.rm), s0 = fp_get(c,0), r = 0;   /* st(i) op= st0; pop */
-                    switch (m.reg) {
-                    case 0: r=si+s0; break; case 1: r=si*s0; break;
-                    case 4: r=s0-si; break; case 5: r=si-s0; break;
-                    case 6: r=s0/si; break; case 7: r=si/s0; break;
-                    default: r=si; break;
-                    }
-                    fp_set(c,m.rm,r); fp_pop(c);
-                }
-            }
-            break;
-        }
-        case 0xdf:
-        {
-            m = decode_modrm(c,&d);
-            if (!m.is_reg) {
-                switch (m.reg) {
-                case 0: fp_push(c,(double)(int16_t)rd16(m.ea)); break;     /* fild m16 */
-                case 2: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_get(c,0))); break; /* fist m16 */
-                case 3: wr16(m.ea,(uint16_t)(int16_t)lrint(fp_pop(c))); break;   /* fistp m16 */
-                case 5: { int64_t v=(int64_t)(rd32(m.ea)|((uint64_t)rd32(m.ea+4)<<32)); fp_push(c,(double)v); } break; /* fild m64 */
-                case 7: { int64_t v=(int64_t)llrint(fp_pop(c)); wr32(m.ea,(uint32_t)v); wr32(m.ea+4,(uint32_t)((uint64_t)v>>32)); } break; /* fistp m64 */
-                default: break;
-                }
-            } else {
-                int b = 0xc0 | (m.reg<<3) | m.rm;
-                if (b == 0xe0) write_reg(c,EAX,2,(uint16_t)(c->fpsw | ((c->fptop&7)<<11))); /* fnstsw ax */
-                else if (b >= 0xe8 && b <= 0xf7) { fp_compare_eflags(c,fp_get(c,0),fp_get(c,m.rm)); fp_pop(c); } /* fucomip/fcomip */
-                else fp_pop(c);                                            /* ffreep */
-            }
-            break;
-        }
-
         case 0x0f: /* two-byte */
         {
             uint8_t op2 = f8(&d);
@@ -1096,307 +1512,9 @@ static void run( struct x86cpu *c )
             case 0xa2: /* cpuid */ c->regs[EAX]=0; c->regs[EBX]=0; c->regs[ECX]=0; c->regs[EDX]=0; break;
 
             /* ---- SSE/SSE2 (enough for memset/memcpy/strlen in ntdll) ---- */
-            case 0x10: case 0x28: /* movups/movaps/movss/movsd xmm, xmm/m */
-                m=decode_modrm(c,&d);
-                { int scalar=(op2==0x10)&&(d.rep==0xf3||d.rep==0xf2);
-                  int sz=(op2==0x10&&d.rep==0xf3)?4:(op2==0x10&&d.rep==0xf2)?8:16;
-                  if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], scalar?sz:16); /* reg movss/sd preserves upper */
-                  else { if(scalar) memset(c->xmm[m.reg],0,16); /* mem movss/sd ZERO the upper lanes */
-                         memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, sz); } }
+            default:   /* SSE/MMX/bit-ops live in run_sse (cold, see there) */
+                if (!run_sse( c, &d, op2 )) { unimplemented(c,start,0x0f); return; }
                 break;
-            case 0x11: case 0x29: /* store */
-                m=decode_modrm(c,&d);
-                { int scalar=(op2==0x11)&&(d.rep==0xf3||d.rep==0xf2);
-                  int sz=(op2==0x11&&d.rep==0xf3)?4:(op2==0x11&&d.rep==0xf2)?8:16;
-                  if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], scalar?sz:16); /* reg movss/sd preserves upper */
-                  else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], sz); }
-                break;
-            case 0x6f: /* movdqa/movdqu load */
-                m=decode_modrm(c,&d);
-                if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], 16);
-                else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, 16);
-                break;
-            case 0x7f: /* movdqa/movdqu store */
-                m=decode_modrm(c,&d);
-                if (m.is_reg) memcpy(c->xmm[m.rm], c->xmm[m.reg], 16);
-                else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 16);
-                break;
-            case 0x6e: /* movd xmm, r/m32 */
-                m=decode_modrm(c,&d); memset(c->xmm[m.reg],0,16);
-                { uint32_t v=read_rm(c,&m,4); memcpy(c->xmm[m.reg],&v,4); } break;
-            case 0x7e: /* f3: movq xmm,xmm/m64 ; else movd r/m32,xmm */
-                m=decode_modrm(c,&d);
-                if (d.rep==0xf3) { memset(c->xmm[m.reg],0,16);
-                    if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm], 8); else memcpy(c->xmm[m.reg],(void*)(uintptr_t)m.ea,8); }
-                else { uint32_t v; memcpy(&v,c->xmm[m.reg],4); write_rm(c,&m,4,v); }
-                break;
-            case 0xd6: /* movq store */
-                m=decode_modrm(c,&d);
-                if (m.is_reg) { memset(c->xmm[m.rm],0,16); memcpy(c->xmm[m.rm], c->xmm[m.reg], 8); }
-                else memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 8);
-                break;
-            case 0xef: /* pxor */
-                m=decode_modrm(c,&d);
-                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]^=src[i]; }
-                break;
-            case 0x74: case 0x75: case 0x76: /* pcmpeqb/w/d */
-                m=decode_modrm(c,&d);
-                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i;
-                  int step=(op2==0x74)?1:(op2==0x75)?2:4;
-                  for(i=0;i<16;i+=step){ int eq=!memcmp(&c->xmm[m.reg][i],&src[i],step); memset(&c->xmm[m.reg][i],eq?0xff:0,step);} }
-                break;
-            case 0xd7: /* pmovmskb r32, xmm */
-                m=decode_modrm(c,&d);
-                { uint32_t mask=0; int i; for(i=0;i<16;i++) if(c->xmm[m.rm][i]&0x80) mask|=(1u<<i); write_reg(c,m.reg,4,mask); }
-                break;
-            case 0xfc: case 0xfd: case 0xfe: /* paddb/w/d */
-                m=decode_modrm(c,&d);
-                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i;
-                  if(op2==0xfc) for(i=0;i<16;i++) c->xmm[m.reg][i]+=src[i];
-                  else if(op2==0xfd){ uint16_t *a16=(uint16_t*)c->xmm[m.reg],*s16=(uint16_t*)src; for(i=0;i<8;i++) a16[i]+=s16[i]; }
-                  else { uint32_t *a32=(uint32_t*)c->xmm[m.reg],*s32=(uint32_t*)src; for(i=0;i<4;i++) a32[i]+=s32[i]; } }
-                break;
-            case 0x12: case 0x13: case 0x16: case 0x17: /* movlps/movhps (mem) + movhlps/movlhps (reg) */
-                m=decode_modrm(c,&d);
-                if (op2==0x12) { /* movlps m64->lo  OR  movhlps: dst.lo = src.hi */
-                    if (m.is_reg) memcpy(c->xmm[m.reg], c->xmm[m.rm]+8, 8);
-                    else memcpy(c->xmm[m.reg], (void*)(uintptr_t)m.ea, 8);
-                }
-                else if (op2==0x16) { /* movhps m64->hi  OR  movlhps: dst.hi = src.lo */
-                    if (m.is_reg) memcpy(c->xmm[m.reg]+8, c->xmm[m.rm], 8);
-                    else memcpy(c->xmm[m.reg]+8, (void*)(uintptr_t)m.ea, 8);
-                }
-                else if (op2==0x13) { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg], 8); }      /* movlps store */
-                else { if(!m.is_reg) memcpy((void*)(uintptr_t)m.ea, c->xmm[m.reg]+8, 8); }                    /* movhps store */
-                break;
-            case 0x57: /* xorps */
-                m=decode_modrm(c,&d);
-                { uint8_t *src = m.is_reg ? c->xmm[m.rm] : (uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]^=src[i]; }
-                break;
-            case 0x55: /* andnps */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
-            /* --- SSE/SSE2 float arithmetic: prefix picks ps/pd/ss/sd --- */
-            case 0x51: case 0x52: case 0x53: /* sqrt / rsqrt / rcp (unary on src) */
-            case 0x58: case 0x59: case 0x5c: case 0x5d: case 0x5e: case 0x5f: /* add mul sub min div max */
-            {
-                m=decode_modrm(c,&d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
-                int dbl=(d.opsize==2||d.rep==0xf2), scal=(d.rep==0xf3||d.rep==0xf2);
-                int lanes=dbl?2:4, n=scal?1:lanes, i;
-                for(i=0;i<n;i++){
-                    double x,y,r;
-                    if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
-                    else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
-                    switch(op2){
-                        case 0x51: r=sqrt(y); break; case 0x52: r=1.0/sqrt(y); break; case 0x53: r=1.0/y; break;
-                        case 0x58: r=x+y; break; case 0x59: r=x*y; break; case 0x5c: r=x-y; break;
-                        case 0x5d: r=(x<y)?x:y; break; case 0x5e: r=x/y; break; case 0x5f: r=(x>y)?x:y; break;
-                        default: r=x;
-                    }
-                    if(dbl){ uint64_t rb; memcpy(&rb,&r,8); memcpy(dst+i*8,&rb,8); }
-                    else { float rf=(float)r; memcpy(dst+i*4,&rf,4); }
-                }
-                break;
-            }
-            case 0x2a: /* cvtsi2ss/sd (int r/m32 -> scalar float in dst low) */
-                m=decode_modrm(c,&d); { int32_t v=(int32_t)read_rm(c,&m,4); uint8_t *dst=c->xmm[m.reg];
-                    if(d.rep==0xf2){ double dv=v; memcpy(dst,&dv,8); } else { float fv=(float)v; memcpy(dst,&fv,4); } } break;
-            case 0x2c: case 0x2d: /* cvt(t)ss2si / sd2si -> r32 */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double v;
-                    if(d.rep==0xf2){ uint64_t b; memcpy(&b,s,8); memcpy(&v,&b,8); } else { float f; memcpy(&f,s,4); v=f; }
-                    int32_t r=(op2==0x2c)?(int32_t)v:(int32_t)llrint(v); write_reg(c,m.reg,4,(uint32_t)r); } break;
-            case 0x2e: case 0x2f: /* ucomiss/comiss (66 -> sd) -> EFLAGS */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; double x,y;
-                    if(d.opsize==2){ uint64_t xb,yb; memcpy(&xb,c->xmm[m.reg],8); memcpy(&yb,s,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8); }
-                    else { float xf,yf; memcpy(&xf,c->xmm[m.reg],4); memcpy(&yf,s,4); x=xf; y=yf; }
-                    c->eflags &= ~(ZF|PF|CF|OF|SF|AF); c->lf_size=0;
-                    if(isnan(x)||isnan(y)) c->eflags|=ZF|PF|CF; else if(x<y) c->eflags|=CF; else if(x==y) c->eflags|=ZF; }
-                break;
-            case 0x5a: /* cvtps2pd/pd2ps/ss2sd/sd2ss */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
-                    if(d.rep==0xf3){ float f; memcpy(&f,s,4); double dv=f; memcpy(dst,&dv,8); }
-                    else if(d.rep==0xf2){ uint64_t b; double dv; memcpy(&b,s,8); memcpy(&dv,&b,8); float f=(float)dv; memcpy(dst,&f,4); }
-                    else if(d.opsize==2){ uint64_t b0,b1; double d0,d1; memcpy(&b0,s,8); memcpy(&b1,s+8,8); memcpy(&d0,&b0,8); memcpy(&d1,&b1,8); float f0=(float)d0,f1=(float)d1; uint8_t t[16]; memset(t,0,16); memcpy(t,&f0,4); memcpy(t+4,&f1,4); memcpy(dst,t,16); }
-                    else { float f0,f1; memcpy(&f0,s,4); memcpy(&f1,s+4,4); double d0=f0,d1=f1; memcpy(dst,&d0,8); memcpy(dst+8,&d1,8); } }
-                break;
-            case 0x5b: /* cvtdq2ps / cvtps2dq(66) / cvttps2dq(f3) */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; int i;
-                    if(d.rep==0xf3){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)f; memcpy(t+i*4,&v,4);} }
-                    else if(d.opsize==2){ for(i=0;i<4;i++){ float f; memcpy(&f,s+i*4,4); int32_t v=(int32_t)llrintf(f); memcpy(t+i*4,&v,4);} }
-                    else { for(i=0;i<4;i++){ int32_t v; memcpy(&v,s+i*4,4); float f=(float)v; memcpy(t+i*4,&f,4);} }
-                    memcpy(dst,t,16); }
-                break;
-            case 0xe6: /* cvtdq2pd(f3) / cvttpd2dq(66) / cvtpd2dq(f2) */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t t[16]; memset(t,0,16); int i;
-                    if(d.rep==0xf3){ for(i=0;i<2;i++){ int32_t v; memcpy(&v,s+i*4,4); double dv=v; memcpy(t+i*8,&dv,8);} }
-                    else { int trunc=(d.opsize==2); for(i=0;i<2;i++){ uint64_t b; double dv; memcpy(&b,s+i*8,8); memcpy(&dv,&b,8); int32_t v=trunc?(int32_t)dv:(int32_t)llrint(dv); memcpy(t+i*4,&v,4);} }
-                    memcpy(dst,t,16); }
-                break;
-            case 0xc2: /* cmpps/pd/ss/sd imm8 predicate */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(&d);
-                    int dbl=(d.opsize==2||d.rep==0xf2), scal=(d.rep==0xf3||d.rep==0xf2); int lanes=dbl?2:4, n=scal?1:lanes, i;
-                    for(i=0;i<n;i++){ double x,y; if(dbl){ uint64_t xb,yb; memcpy(&xb,dst+i*8,8); memcpy(&yb,s+i*8,8); memcpy(&x,&xb,8); memcpy(&y,&yb,8);} else { float xf,yf; memcpy(&xf,dst+i*4,4); memcpy(&yf,s+i*4,4); x=xf; y=yf; }
-                        int un=isnan(x)||isnan(y),res; switch(im&7){ case 0:res=(x==y);break; case 1:res=(x<y);break; case 2:res=(x<=y);break; case 3:res=un;break; case 4:res=!(x==y);break; case 5:res=!(x<y);break; case 6:res=!(x<=y);break; default:res=!un; }
-                        if(dbl){ uint64_t mm=res?~0ULL:0; memcpy(dst+i*8,&mm,8);} else { uint32_t mm=res?~0U:0; memcpy(dst+i*4,&mm,4);} } }
-                break;
-            case 0xc6: /* shufps / shufpd(66) imm8 */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint8_t im=f8(&d); uint8_t t[16];
-                    if(d.opsize==2){ memcpy(&t[0],&dst[(im&1)?8:0],8); memcpy(&t[8],&s[(im&2)?8:0],8); }
-                    else { uint32_t *td=(uint32_t*)t,*dd=(uint32_t*)dst,*sd=(uint32_t*)s; td[0]=dd[(im>>0)&3]; td[1]=dd[(im>>2)&3]; td[2]=sd[(im>>4)&3]; td[3]=sd[(im>>6)&3]; }
-                    memcpy(dst,t,16); }
-                break;
-            case 0xdb: /* pand */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
-            case 0xdf: /* pandn */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]=(~c->xmm[m.reg][i])&s[i]; } break;
-            case 0xeb: /* por */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
-            case 0x60: case 0x61: case 0x62: case 0x6c: /* punpckl bw/wd/dq/qdq */
-            {
-                m=decode_modrm(c,&d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t tmp[16]; uint8_t *dst=c->xmm[m.reg];
-                int u = op2==0x60?1:op2==0x61?2:op2==0x62?4:8; int i,o=0;
-                for (i=0;i<8/ (u? u:1) + (u==8?1:0); i++) {} /* interleave low half */
-                { int k; o=0; for(k=0;k<8;k+=u){ memcpy(&tmp[o],&dst[k],u); o+=u; memcpy(&tmp[o],&s[k],u); o+=u; if(o>=16)break;} }
-                memcpy(dst,tmp,16); break;
-            }
-            case 0x68: case 0x69: case 0x6a: case 0x6d: /* punpckh */
-            {
-                m=decode_modrm(c,&d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t tmp[16]; uint8_t *dst=c->xmm[m.reg];
-                int u = op2==0x68?1:op2==0x69?2:op2==0x6a?4:8; int k,o=0;
-                for(k=8;k<16;k+=u){ memcpy(&tmp[o],&dst[k],u); o+=u; memcpy(&tmp[o],&s[k],u); o+=u; if(o>=16)break;}
-                memcpy(dst,tmp,16); break;
-            }
-            case 0x70: /* pshufd(66)/pshuflw(f2)/pshufhw(f3) */
-            {
-                m=decode_modrm(c,&d); uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t im=f8(&d); uint8_t tmp[16];
-                if (d.opsize==2) { uint32_t *sd=(uint32_t*)s,*td=(uint32_t*)tmp; int i; for(i=0;i<4;i++) td[i]=sd[(im>>(i*2))&3]; }
-                else if (d.rep==0xf2) { memcpy(tmp,s,16); uint16_t *sw=(uint16_t*)s,*tw=(uint16_t*)tmp; int i; for(i=0;i<4;i++) tw[i]=sw[(im>>(i*2))&3]; }
-                else { memcpy(tmp,s,16); uint16_t *sw=(uint16_t*)s,*tw=(uint16_t*)tmp; int i; for(i=0;i<4;i++) tw[4+i]=sw[4+((im>>(i*2))&3)]; }
-                memcpy(c->xmm[m.reg],tmp,16); break;
-            }
-            case 0x71: case 0x72: case 0x73: /* psll/psrl/psra by imm8 (reg field selects op) */
-            {
-                m=decode_modrm(c,&d); uint8_t im=f8(&d); uint8_t *dst=c->xmm[m.rm];
-                if (op2==0x73 && (m.reg==7||m.reg==3)) { /* pslldq/psrldq (byte shift) */
-                    uint8_t tmp[16]; memset(tmp,0,16);
-                    if(m.reg==7){ int sh=im; if(sh<16) memcpy(tmp+sh,dst,16-sh); } /* pslldq */
-                    else { int sh=im; if(sh<16) memcpy(tmp,dst+sh,16-sh); } /* psrldq */
-                    memcpy(dst,tmp,16); break;
-                }
-                int u = op2==0x71?2:4; if(op2==0x73&&m.reg!=2&&m.reg!=6) u=8;
-                int n=16/u,i;
-                for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,&dst[i*u],u);
-                    if(m.reg==6) v<<=im; else if(m.reg==2) v>>=im; else { /* psra */ int64_t sv=(int64_t)(v<<(64-u*8)); sv>>=(64-u*8); v=(uint64_t)(sv>>im);}
-                    memcpy(&dst[i*u],&v,u);} break;
-            }
-            case 0xc5: /* pextrw r32, xmm, imm8 */
-                m=decode_modrm(c,&d); { uint8_t im=f8(&d); uint16_t *w=(uint16_t*)c->xmm[m.rm]; write_reg(c,m.reg,4,w[im&7]); } break;
-            case 0xc4: /* pinsrw xmm, r/m16, imm8 */
-                m=decode_modrm(c,&d); { uint32_t v=read_rm(c,&m,2); uint8_t im=f8(&d); uint16_t *w=(uint16_t*)c->xmm[m.reg]; w[im&7]=(uint16_t)v; } break;
-            case 0x50: /* movmskps r32, xmm */
-                m=decode_modrm(c,&d); { uint32_t mask=0; int i; for(i=0;i<4;i++) if(c->xmm[m.rm][i*4+3]&0x80) mask|=(1u<<i); write_reg(c,m.reg,4,mask); } break;
-            case 0x64: case 0x65: case 0x66: /* pcmpgtb/w/d (signed) */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0x64){ for(i=0;i<16;i++) dst[i]=((int8_t)dst[i]>(int8_t)s[i])?0xff:0; }
-                  else if(op2==0x65){ int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++) a[i]=(a[i]>b[i])?-1:0; }
-                  else { int32_t *a=(int32_t*)dst,*b=(int32_t*)s; for(i=0;i<4;i++) a[i]=(a[i]>b[i])?-1:0; } } break;
-            case 0xd1: case 0xd2: case 0xd3: /* psrlw/d/q by xmm */
-            case 0xf1: case 0xf2: case 0xf3: /* psllw/d/q by xmm */
-            case 0xe1: case 0xe2: /* psraw/psrad by xmm */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg];
-                  uint64_t cnt; memcpy(&cnt,s,8);
-                  int u=(op2==0xd1||op2==0xf1||op2==0xe1)?2:(op2==0xd3||op2==0xf3)?8:4;
-                  int arith=(op2==0xe1||op2==0xe2), left=(op2==0xf1||op2==0xf2||op2==0xf3);
-                  int n=16/u,i; for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,&dst[i*u],u); int bits=u*8;
-                    if(cnt>=(uint64_t)bits){ if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=63; v=(uint64_t)sv; } else v=0; }
-                    else if(left) v<<=cnt;
-                    else if(arith){ int64_t sv=(int64_t)(v<<(64-bits)); sv>>=(64-bits); v=(uint64_t)(sv>>cnt); }
-                    else v>>=cnt;
-                    memcpy(&dst[i*u],&v,u);} } break;
-            case 0xd4: /* paddq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]+=b[0]; a[1]+=b[1]; } break;
-            case 0xfb: /* psubq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint64_t *a=(uint64_t*)c->xmm[m.reg],*b=(uint64_t*)s; a[0]-=b[0]; a[1]-=b[1]; } break;
-            case 0xd5: /* pmullw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(a[i]*b[i]); } break;
-            case 0xe5: /* pmulhw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i; for(i=0;i<8;i++) a[i]=(int16_t)(((int32_t)a[i]*b[i])>>16); } break;
-            case 0xe4: /* pmulhuw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint16_t *a=(uint16_t*)c->xmm[m.reg],*b=(uint16_t*)s; int i; for(i=0;i<8;i++) a[i]=(uint16_t)(((uint32_t)a[i]*b[i])>>16); } break;
-            case 0xf4: /* pmuludq */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint32_t *a=(uint32_t*)c->xmm[m.reg],*b=(uint32_t*)s; uint64_t r0=(uint64_t)a[0]*b[0], r1=(uint64_t)a[2]*b[2]; uint64_t *o=(uint64_t*)c->xmm[m.reg]; o[0]=r0; o[1]=r1; } break;
-            case 0xf5: /* pmaddwd */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int32_t r[4]; int i; for(i=0;i<4;i++) r[i]=(int32_t)a[i*2]*b[i*2]+(int32_t)a[i*2+1]*b[i*2+1]; memcpy(c->xmm[m.reg],r,16); } break;
-            case 0xf6: /* psadbw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; uint32_t s0=0,s1=0; int i; for(i=0;i<8;i++){ int dd=dst[i]-s[i]; s0+=dd<0?-dd:dd; } for(i=8;i<16;i++){ int dd=dst[i]-s[i]; s1+=dd<0?-dd:dd; } uint64_t *o=(uint64_t*)dst; o[0]=s0; o[1]=s1; } break;
-            case 0xd8: case 0xd9: /* psubusb/psubusw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xd8){ for(i=0;i<16;i++){ int r=dst[i]-s[i]; dst[i]=r<0?0:r; } }
-                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=r<0?0:(uint16_t)r; } } } break;
-            case 0xdc: case 0xdd: /* paddusb/paddusw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xdc){ for(i=0;i<16;i++){ int r=dst[i]+s[i]; dst[i]=r>255?255:r; } }
-                  else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=r>65535?65535:(uint16_t)r; } } } break;
-            case 0xe8: case 0xe9: /* psubsb/psubsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xe8){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]-(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
-                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]-b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
-            case 0xec: case 0xed: /* paddsb/paddsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xec){ for(i=0;i<16;i++){ int r=(int8_t)dst[i]+(int8_t)s[i]; dst[i]=(uint8_t)(int8_t)(r<-128?-128:r>127?127:r); } }
-                  else { int16_t *a=(int16_t*)dst,*b=(int16_t*)s; for(i=0;i<8;i++){ int r=a[i]+b[i]; a[i]=(int16_t)(r<-32768?-32768:r>32767?32767:r); } } } break;
-            case 0xda: case 0xde: /* pminub/pmaxub */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xda){ for(i=0;i<16;i++) if(s[i]<dst[i]) dst[i]=s[i]; } else { for(i=0;i<16;i++) if(s[i]>dst[i]) dst[i]=s[i]; } } break;
-            case 0xea: case 0xee: /* pminsw/pmaxsw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int16_t *a=(int16_t*)c->xmm[m.reg],*b=(int16_t*)s; int i;
-                  if(op2==0xea){ for(i=0;i<8;i++) if(b[i]<a[i]) a[i]=b[i]; } else { for(i=0;i<8;i++) if(b[i]>a[i]) a[i]=b[i]; } } break;
-            case 0xe0: case 0xe3: /* pavgb/pavgw */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xe0){ for(i=0;i<16;i++) dst[i]=(uint8_t)((dst[i]+s[i]+1)>>1); } else { uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]=(uint16_t)((a[i]+b[i]+1)>>1); } } break;
-            case 0xf8: case 0xf9: case 0xfa: /* psubb/w/d */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint8_t *dst=c->xmm[m.reg]; int i;
-                  if(op2==0xf8){ for(i=0;i<16;i++) dst[i]-=s[i]; }
-                  else if(op2==0xf9){ uint16_t *a=(uint16_t*)dst,*b=(uint16_t*)s; for(i=0;i<8;i++) a[i]-=b[i]; }
-                  else { uint32_t *a=(uint32_t*)dst,*b=(uint32_t*)s; for(i=0;i<4;i++) a[i]-=b[i]; } } break;
-            case 0x54: /* andps */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]&=s[i]; } break;
-            case 0x56: /* orps */ m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; int i; for(i=0;i<16;i++) c->xmm[m.reg][i]|=s[i]; } break;
-            case 0x14: case 0x15: /* unpcklps/unpckhps — 4-byte lane interleave */
-                m=decode_modrm(c,&d); { uint8_t *s=m.is_reg?c->xmm[m.rm]:(uint8_t*)(uintptr_t)m.ea; uint32_t *dd=(uint32_t*)c->xmm[m.reg],*ss=(uint32_t*)s; uint32_t t[4]; int base=(op2==0x15)?2:0; t[0]=dd[base];t[1]=ss[base];t[2]=dd[base+1];t[3]=ss[base+1]; memcpy(dd,t,16);} break;
-            case 0x77: break; /* emms */
-            case 0xae: decode_modrm(c,&d); break; /* fxsave/lfence/sfence/mfence group: ignore */
-            case 0x18: case 0x19: case 0x1a: case 0x1b: case 0x1c: case 0x1d: case 0x1e:
-                decode_modrm(c,&d); break; /* prefetch/nop hints */
-            case 0xa3: /* bt r/m, r */
-                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
-                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; break;
-            case 0xab: /* bts */
-                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
-                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a|(1u<<b)); break;
-            case 0xb3: /* btr r/m, r */
-                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
-                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a&~(1u<<b)); break;
-            case 0xbb: /* btc r/m, r */
-                m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os)&(os*8-1);
-                c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0; write_rm(c,&m,os,a^(1u<<b)); break;
-            case 0xba: /* grp8 bt/bts/btr/btc r/m, imm8 */
-                m=decode_modrm(c,&d); a=read_rm(c,&m,os); { uint32_t bit=f8(&d)&(os*8-1);
-                  c->eflags=(c->eflags&~CF)|(((a>>bit)&1)?CF:0); c->lf_size=0;
-                  if(m.reg==5) write_rm(c,&m,os,a|(1u<<bit)); else if(m.reg==6) write_rm(c,&m,os,a&~(1u<<bit)); else if(m.reg==7) write_rm(c,&m,os,a^(1u<<bit)); }
-                break;
-            case 0xb0: case 0xb1: /* cmpxchg */
-            {
-                int sz=(op2&1)?os:1; m=decode_modrm(c,&d); a=read_rm(c,&m,sz); uint32_t acc=read_reg(c,EAX,sz);
-                if (acc==a) { write_rm(c,&m,sz,read_reg(c,m.reg,sz)); set_lazy(c,K_SUB,acc,a,0,sz); }
-                else { write_reg(c,EAX,sz,a); set_lazy(c,K_SUB,acc,a,acc-a,sz); }
-                break;
-            }
-            case 0xc0: case 0xc1: /* xadd */
-            {
-                int sz=(op2&1)?os:1; m=decode_modrm(c,&d); a=read_rm(c,&m,sz); b=read_reg(c,m.reg,sz);
-                write_rm(c,&m,sz,a+b); write_reg(c,m.reg,sz,a); set_lazy(c,K_ADD,a,b,a+b,sz); break;
-            }
-            case 0xc7: /* cmpxchg8b m64 (reg field 1) */
-            {
-                m = decode_modrm(c,&d);
-                if (m.reg == 1) {
-                    uint64_t mem = rd32(m.ea) | ((uint64_t)rd32(m.ea+4) << 32);
-                    uint64_t edxeax = c->regs[EAX] | ((uint64_t)c->regs[EDX] << 32);
-                    c->eflags = get_flags(c);           /* materialize; only ZF changes */
-                    if (mem == edxeax) {
-                        wr32(m.ea, c->regs[EBX]); wr32(m.ea+4, c->regs[ECX]);
-                        c->eflags |= ZF;
-                    } else {
-                        c->regs[EAX] = (uint32_t)mem; c->regs[EDX] = (uint32_t)(mem >> 32);
-                        c->eflags &= ~ZF;
-                    }
-                    c->lf_size = 0;
-                }
-                break;
-            }
-            case 0xc8: case 0xc9: case 0xca: case 0xcb: case 0xcc: case 0xcd: case 0xce: case 0xcf: /* bswap */
-                { int rr=op2&7; uint32_t v=c->regs[rr]; c->regs[rr]=((v>>24)&0xff)|((v>>8)&0xff00)|((v<<8)&0xff0000)|((v<<24)&0xff000000); } break;
-            default: unimplemented(c,start,0x0f); return;
             }
             break;
         }
