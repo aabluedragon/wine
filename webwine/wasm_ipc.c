@@ -80,6 +80,22 @@ extern void wasm_vm_sync_shared(void);  /* refresh MAP_SHARED client mirrors */
  * failure fall back to the stream's underlying node fd (FS.streams[fd].nfd).
  * With the fd-borrow refcount keeping fd numbers stable, this is deterministic. */
 extern long __syscall_poll( long fds, long nfds, long timeout );
+/* Safe single-fd poll: emscripten's __poll_js dereferences stream.stream_ops.poll
+ * and throws on fds whose FS stream is missing or has no stream_ops (raw node
+ * fds, dup'd stream fds).  Mirror its logic but guard every step; a real fd we
+ * cannot classify is reported ready for the events it asked for. POLL* are the
+ * Linux values emscripten uses: IN=1 OUT=4 ERR=8 HUP=16 NVAL=32. */
+EM_JS(int, host_poll_fd, (int fd, int events), {
+  try {
+    var stream = (typeof FS !== 'undefined' && FS.getStream) ? FS.getStream(fd) : null;
+    if (stream && stream.stream_ops && stream.stream_ops.poll) {
+      var m = stream.stream_ops.poll(stream, -1);
+      return m & (events | 8 | 16);
+    }
+    if (stream) return events & (1 | 4);          /* stream w/o poll op: assume ready */
+    try { require('fs').fstatSync(fd); return events & (1 | 4); } catch(e) { return 32; } /* POLLNVAL */
+  } catch(e) { return events & (1 | 4); }
+});
 /* When readSync/writeSync on a stream fd fails, retry on the underlying node fd
  * (FS.streams[fd].nfd) AT THE STREAM'S OWN OFFSET — the guest seeks via lseek on
  * the stream fd, which advances the stream's .position, not the node fd's, so
@@ -409,24 +425,16 @@ int poll( struct pollfd *fds, nfds_t nfds, int timeout )
     }
     if (have_real)
     {
-        /* delegate the real fds with timeout 0 (never block while holding
-         * magic-fd state; the cooperative loop re-polls anyway) */
-        struct pollfd tmp[64];
-        int map[64], n = 0, r;
-        for (i = 0; i < nfds && n < 64; i++)
+        /* Poll each real fd through host_poll_fd (a crash-safe reimplementation
+         * of emscripten's __poll_js — see above) rather than the raw syscall,
+         * which throws on raw node fds / dup'd stream fds. */
+        for (i = 0; i < nfds; i++)
         {
-            if (fds[i].fd >= 0 && !is_magic( fds[i].fd ))
+            if (fds[i].fd >= 0 && !is_magic( fds[i].fd ) && !fds[i].revents)
             {
-                tmp[n] = fds[i];
-                map[n++] = i;
+                fds[i].revents = host_poll_fd( fds[i].fd, fds[i].events );
+                if (fds[i].revents) ready++;
             }
-        }
-        r = __syscall_poll( (long)tmp, n, 0 );
-        if (r > 0)
-        {
-            int j;
-            for (j = 0; j < n; j++)
-                if (tmp[j].revents) { fds[map[j]].revents = tmp[j].revents; ready++; }
         }
     }
     return ready;
