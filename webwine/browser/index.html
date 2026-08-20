@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>netduke32 — native-wasm Wine</title>
+<style>
+  body { margin: 0; background: #111; color: #ccc; font: 13px monospace; }
+  #wrap { display: flex; gap: 12px; padding: 12px; }
+  canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; width: 1024px; height: 768px; max-width: 100%; }
+  #side { width: 460px; }
+  #status { color: #6f6; white-space: pre; margin-bottom: 8px; }
+  #note { color: #888; margin-bottom: 8px; }
+  #log { height: 640px; overflow: auto; background: #000; padding: 6px; border: 1px solid #333; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div>
+    <canvas id="screen" width="1024" height="768"></canvas>
+  </div>
+  <div id="side">
+    <div id="status">booting…</div>
+    <div id="note">netduke32 via native-wasm Wine. Rendering at r_upscalefactor 2 (½ res, upscaled) for FPS — edit /game/autoexec.cfg to change.</div>
+    <div id="log"></div>
+  </div>
+</div>
+<script>
+const cv = document.getElementById('screen');
+const ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+let img = null;
+
+let frames = 0, lastFrames = 0, lastT = performance.now(), startT = lastT, firstFrameT = 0;
+function tick() {
+  const now = performance.now();
+  const dt = (now - lastT) / 1000;
+  if (dt >= 0.5) {
+    const fps = (frames - lastFrames) / dt;
+    lastFrames = frames; lastT = now;
+    const ttf = firstFrameT ? ((firstFrameT - startT) / 1000).toFixed(1) + 's' : '—';
+    const res = img ? `${img.width}×${img.height}` : '—';
+    statusEl.textContent =
+      `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+const worker = new Worker('worker.js');
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'frame') {
+    if (!firstFrameT) firstFrameT = performance.now();
+    if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; img = null; }
+    if (!img) img = ctx.createImageData(m.w, m.h);
+    const src = new Uint8Array(m.rgb), dst = img.data;
+    const n = m.w * m.h;
+    for (let i = 0, j = 0, k = 0; i < n; i++) {
+      dst[j++] = src[k++]; dst[j++] = src[k++]; dst[j++] = src[k++]; dst[j++] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    frames++;
+  } else if (m.type === 'log') {
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
+    logEl.textContent += m.line + '\n';
+    if (logEl.textContent.length > 60000) logEl.textContent = logEl.textContent.slice(-40000);
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+};
+</script>
+</body>
+</html>

@@ -112,6 +112,17 @@ static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v
 #define ND_CURPALETTE    0xa61220u  /* palette_t[256], 4 bytes/entry           */
 static int32_t nd_slide = 0;   /* actual_exe_base - 0x400000 (ASLR relocation) */
 static int g_present_count = 0;
+static uint64_t g_flip_count = 0;   /* # of _videoNextPage calls = real game frames */
+static uint32_t g_flip_addr = 0;    /* ND_VIDEONEXTPAGE + slide, set once slide known (0 = never matches, eip>=0x10000) */
+static int g_slide_ok = 0;          /* ASLR slide derived from PEB */
+/* Last non-zero frameplace + dims.  The engine clears `frameplace` to 0 in
+ * videoEndDrawing before the page flip, but the buffer it pointed at still holds
+ * the finished frame, and the pointer is constant across a frame's drawing — so
+ * caching it lets us present a COMPLETE frame at the flip instead of an empty 0. */
+static uint32_t g_last_fp = 0, g_last_bpl = 0;
+static int g_last_w = 0, g_last_h = 0;
+static uint64_t g_histo[512];       /* opcode histogram (env WASM_HISTO): [op], [256+op2] */
+static int g_histo_on = 0;
 
 static void wasm_dump_frame( struct x86cpu *c )
 {
@@ -120,12 +131,15 @@ static void wasm_dump_frame( struct x86cpu *c )
     const char *path = getenv( "WASM_DUMP_FRAME" );
     if (!path || !*path) return;
 #endif
+    /* Prefer the live frameplace; at a page flip it is 0 (cleared by
+     * videoEndDrawing), so fall back to the cached last-non-zero buffer, which
+     * still holds the just-finished frame. */
     uint32_t fp  = rd32( ND_FRAMEPLACE + nd_slide );
-    int w   = (int)rd32( ND_XDIM + nd_slide );
-    int h   = (int)rd32( ND_YDIM + nd_slide );
-    int bpl = (int)rd32( ND_BYTESPERLINE + nd_slide );
+    int w, h, bpl;
+    if (fp) { w = (int)rd32( ND_XDIM + nd_slide ); h = (int)rd32( ND_YDIM + nd_slide );
+              bpl = (int)rd32( ND_BYTESPERLINE + nd_slide ); }
+    else    { fp = g_last_fp; w = g_last_w; h = g_last_h; bpl = g_last_bpl; }
     uint32_t pal = ND_CURPALETTE + nd_slide;
-    fprintf( stderr, "wasm_x86: frame capture fp=%08x %dx%d bpl=%d\n", fp, w, h, bpl );
     if (!fp || w < 1 || h < 1 || w > 8192 || h > 8192 || bpl < w) return;
     /* host fopen() is broken in this build (wine overrides open -> EDOM), so
      * emit the RGB frame as base64 over stderr, which works.  Host side
@@ -421,6 +435,59 @@ static void run( struct x86cpu *c )
     while (c->running)
     {
         g_total_insns++;
+        /* Periodic housekeeping (~every 64K insns): derive the ASLR slide once
+         * the PEB is ready (which arms frame-boundary presenting), and — under
+         * WASM_TPUT — sample throughput/fps.  Kept off the per-instruction path
+         * so the hot loop stays tight. */
+        if ((g_total_insns & 0xffff) == 0)
+        {
+            extern double emscripten_get_now( void );
+            if (!g_slide_ok)
+            {
+                uint32_t teb = c->fs_base;
+                uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
+                uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
+                if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
+                          g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
+                          fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
+            }
+            /* Cache the live frameplace pointer while it is valid, so the flip
+             * handler can present the finished frame after it is cleared to 0. */
+            if (g_slide_ok)
+            {
+                uint32_t fp = rd32( ND_FRAMEPLACE + nd_slide );
+                if (fp) { g_last_fp = fp; g_last_bpl = rd32( ND_BYTESPERLINE + nd_slide );
+                          g_last_w = (int)rd32( ND_XDIM + nd_slide ); g_last_h = (int)rd32( ND_YDIM + nd_slide ); }
+            }
+            static int tp_on = -1;
+            static double tp_start = 0, tp_last = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0;
+            if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0; }
+            if (tp_on)
+            {
+                double now = emscripten_get_now();
+                if (tp_start == 0) { tp_start = tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count; }
+                else if (now - tp_last >= 1000.0)   /* sample once per wall-second */
+                {
+                    double dt = (now - tp_last) / 1000.0;
+                    double fps = (double)(g_flip_count - tp_last_flip) / dt;
+                    double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f\n",
+                             (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips );
+                    tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count;
+                    if (g_histo_on && (int)((now - tp_start) / 1000.0) % 10 == 0)
+                    {
+                        int idx[512]; for (int i=0;i<512;i++) idx[i]=i;
+                        for (int i=0;i<512;i++) for (int j=i+1;j<512;j++)
+                            if (g_histo[idx[j]] > g_histo[idx[i]]) { int t=idx[i]; idx[i]=idx[j]; idx[j]=t; }
+                        fprintf( stderr, "HISTO top:" );
+                        for (int i=0;i<16;i++) { int o=idx[i]; if (!g_histo[o]) break;
+                            fprintf( stderr, " %s%02x=%.1fM", o>=256?"0f":"", o&0xff, (double)g_histo[o]/1e6 ); }
+                        fprintf( stderr, "\n" );
+                    }
+                }
+            }
+        }
         /* a native trampoline address (small wasm table index) -> back to C */
         if (c->eip < 0x10000)
         {
@@ -434,71 +501,22 @@ static void run( struct x86cpu *c )
         }
         uint32_t start = c->eip;
         last_eip = start;
+        /* Frame boundary: _videoNextPage is the engine's page flip, entered once
+         * per rendered frame with frameplace holding the COMPLETE frame.  Present
+         * here (not on an insn-count timer) so the canvas shows whole, untorn
+         * frames and the present rate equals the real render rate. */
+        if (start == g_flip_addr)
         {
-            static int cap_on = -1, slide_ok = 0, cap_done = 0, valid_seen = 0, cap_need = 0;
-            static uint64_t next_probe = 0, probe_step = 500000;
-            if (cap_on == -1)   /* read env once */
-            {
+            g_flip_count++;
 #ifdef WEBWINE_BROWSER
-                cap_on = 1;               /* live display: always present */
-                probe_step = 3000000;     /* ~every 3M insns: bounded postMessage rate */
-                cap_need = 1;
+            wasm_dump_frame( c );
 #else
-                cap_on = getenv( "WASM_DUMP_FRAME" ) ? 1 : 0;
-                const char *e = getenv( "WASM_DUMP_FRAME_N" );
-                cap_need = (e && *e) ? atoi( e ) : 1;   /* # of valid probes before dump */
-#endif
-            }
-#ifdef WEBWINE_BROWSER
-            /* Heartbeat: surface where the interpreter is when no frame is
-             * appearing, so a browser-side hang/spin is diagnosable. */
-            {
-                static uint64_t next_hb = 0;
-                if (g_total_insns >= next_hb)
-                {
-                    next_hb = g_total_insns + 30000000;
-                    uint32_t fp = slide_ok ? rd32( ND_FRAMEPLACE + nd_slide ) : 0;
-                    int w = slide_ok ? (int)rd32( ND_XDIM + nd_slide ) : 0;
-                    int h = slide_ok ? (int)rd32( ND_YDIM + nd_slide ) : 0;
-                    fprintf( stderr, "wasm_x86: hb insns=%llu eip=%08x fp=%08x %dx%d presents=%d\n",
-                             (unsigned long long)g_total_insns, start, fp, w, h, g_present_count );
-                }
+            {   /* node headless capture: gated by WASM_DUMP_FRAME, up to 16 frames */
+                static int dmp = -1, nframes = 0;
+                if (dmp == -1) dmp = getenv( "WASM_DUMP_FRAME" ) ? 1 : 0;
+                if (dmp && (g_flip_count % 20) == 0 && nframes < 16) { wasm_dump_frame( c ); nframes++; }
             }
 #endif
-            if (cap_on && !cap_done && g_total_insns >= next_probe)
-            {
-                next_probe = g_total_insns + probe_step;
-                if (!slide_ok)   /* derive ASLR slide once PEB is ready */
-                {
-                    uint32_t teb = c->fs_base;
-                    uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
-                    uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
-                    if (ib) { nd_slide = (int32_t)(ib - 0x400000); slide_ok = 1;
-                              fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
-                }
-                if (slide_ok)
-                {
-                    uint32_t fp = rd32( ND_FRAMEPLACE + nd_slide );
-                    int w = (int)rd32( ND_XDIM + nd_slide ), h = (int)rd32( ND_YDIM + nd_slide );
-                    if (fp && w > 0 && h > 0 && ++valid_seen >= cap_need)
-                    {
-#ifdef WEBWINE_BROWSER
-                        wasm_dump_frame( c );   /* -> webwine_present -> canvas, every poll */
-#else
-                        fprintf( stderr, "wasm_x86: probe insns=%llu frameplace=%08x xdim=%d ydim=%d\n",
-                                 (unsigned long long)g_total_insns, fp, w, h );
-                        static int nframes = 0;
-                        /* emit up to 16 frames, one every 40 valid probes (~20M
-                         * insns) so the set spans the intro logo + title. */
-                        if ((valid_seen - cap_need) % 40 == 0)
-                        {
-                            wasm_dump_frame( c );
-                            if (++nframes >= 16) cap_done = 1;
-                        }
-#endif
-                    }
-                }
-            }
         }
         struct decode d = { 4, 4, 0, 0, c->eip };
         uint8_t op;
@@ -521,6 +539,7 @@ static void run( struct x86cpu *c )
         struct modrm m;
         uint32_t a, b, r;
 
+        if (g_histo_on) g_histo[op]++;
         switch (op)
         {
         case 0x88: m = decode_modrm(c,&d); write_rm(c,&m,1, read_reg(c,m.reg,1)); break;
@@ -1016,6 +1035,7 @@ static void run( struct x86cpu *c )
         case 0x0f: /* two-byte */
         {
             uint8_t op2 = f8(&d);
+            if (g_histo_on) g_histo[256 + op2]++;
             if (op2 >= 0x80 && op2 <= 0x8f) /* jcc rel32 */
             { int32_t rel=f32(&d); if (cond(c, op2-0x80)) { c->eip=d.eip+rel; goto next; } break; }
             if (op2 >= 0x90 && op2 <= 0x9f) /* setcc */

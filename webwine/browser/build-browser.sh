@@ -1,0 +1,40 @@
+#!/bin/bash
+# Browser (Web Worker + MEMFS) bundle for native-wasm Wine + netduke32.
+# Reuses build-node.sh's env-agnostic objects; rebuilds only wasm_ipc
+# (-DWEBWINE_MEMFS) and wasm_x86 (-DWEBWINE_BROWSER).  Interpreter compiled -O1
+# (fastest for this interpreter), whole-module link at -O2.
+# Prereqs: build-node.sh (OPT=-O1) and assemble-assets.sh have run.
+#   WORK=/tmp/webwine-browser ./build-browser.sh   -> $WORK/web/webwine-bw.{js,wasm,data}
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WINE="${WINE:-$HOME/dev/wine}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
+WORK="${WORK:-/tmp/webwine-browser}"
+NODEO="$WORK/nd_O1"; OUT="$WORK/web"; AT="$WORK/assets"
+CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"
+source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
+mkdir -p "$OUT"; cd "$BUILD"
+[ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O1) first"; exit 1; }
+[ -d "$AT/game" ]   || { echo "run assemble-assets.sh first"; exit 1; }
+
+INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
+CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
+echo "[1/3] MEMFS ipc + BROWSER interpreter ($CINT)"
+emcc $CINT -DWEBWINE_MEMFS -c "$WEBW/wasm_ipc.c" -o "$NODEO/wasm_ipc_bw.o"
+emcc -std=gnu23 $CINT -DWEBWINE_BROWSER $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
+
+echo "[2/3] response file"
+RSP="$NODEO/objs_bw.rsp"; : > "$RSP"
+echo "$NODEO/combined_main.o" >> "$RSP"; ls "$NODEO"/srv/*.o >> "$RSP"
+for so in dlls/ntdll/ntdll.so dlls/win32u/win32u.so dlls/ws2_32/ws2_32.so; do echo "$so" >> "$RSP"; done
+for o in wasm_cpu_bridge wasm_vm wasm_ipc_bw wasm_x86_bw; do echo "$NODEO/$o.o" >> "$RSP"; done
+
+echo "[3/3] link browser bundle (worker, MEMFS, link $LOPT)"
+emcc $LOPT @"$RSP" -o "$OUT/webwine-bw.js" \
+  -sENVIRONMENT=worker -sFORCE_FILESYSTEM=1 \
+  -sGLOBAL_BASE=1879048192 -sINITIAL_MEMORY=2147483648 -sALLOW_MEMORY_GROWTH=0 \
+  -sSTACK_SIZE=67108864 -sEXIT_RUNTIME=0 \
+  --pre-js "$HERE/bw-pre.js" \
+  --preload-file "$AT/game@/game" --preload-file "$AT/root@/root"
+cp "$HERE/worker.js" "$HERE/index.html" "$OUT/"
+echo "done -> $OUT/webwine-bw.{js,wasm,data}  (+ worker.js, index.html)"
+echo "serve: (cd $OUT && python3 -m http.server 8799)"
