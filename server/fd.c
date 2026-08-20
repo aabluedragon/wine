@@ -1004,7 +1004,13 @@ static struct list device_hash[DEVICE_HASH_SIZE];
 
 static int is_device_removable( dev_t dev, int unix_fd )
 {
-#if defined(linux) && defined(HAVE_FSTATFS)
+#if defined(__wasm__)
+    /* Single-process in-process server: no removable media, and emscripten's
+     * fstatfs() returns garbage.  Treat every device as fixed so file fds stay
+     * cacheable — otherwise the client re-fetches (and dup's/closes) a fresh fd
+     * on every read, and the churn aliases fds in the shared table -> EBADF. */
+    return 0;
+#elif defined(linux) && defined(HAVE_FSTATFS)
     struct statfs stfs;
 
     /* check for floppy disk */
