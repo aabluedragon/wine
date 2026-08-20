@@ -1118,7 +1118,14 @@ int wine_server_receive_fd( obj_handle_t *handle )
              * so the server closed them and the client's later read()s hit EBADF. */
             {
                 extern int wasm_ipc_is_magic( int fd ) __attribute__((weak));
-                if (fd >= 0 && (!&wasm_ipc_is_magic || !wasm_ipc_is_magic( fd )))
+                /* Do NOT dup the std streams (0/1/2): they are the process's real
+                 * stdio, shared with the in-process server, and close() already
+                 * protects them from NtClose.  Crucially, node's stderr/stdout are
+                 * WriteStreams, not plain fds, so a dup of them is not usable by
+                 * fs.writeSync -> the guest's console/log writes (which map to its
+                 * StandardOutput handle == fd 2) would hit EBADF.  Use them as-is;
+                 * dup only real fds (>2) that are not magic transport channels. */
+                if (fd > 2 && (!&wasm_ipc_is_magic || !wasm_ipc_is_magic( fd )))
                 {
                     int d = dup( fd );
                     if (d != -1) fd = d;
