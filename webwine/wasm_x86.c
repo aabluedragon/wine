@@ -436,7 +436,7 @@ static void run( struct x86cpu *c )
             {
 #ifdef WEBWINE_BROWSER
                 cap_on = 1;               /* live display: always present */
-                probe_step = 120000;      /* poll ~every 120k insns for a smooth feed */
+                probe_step = 3000000;     /* ~every 3M insns: bounded postMessage rate */
                 cap_need = 1;
 #else
                 cap_on = getenv( "WASM_DUMP_FRAME" ) ? 1 : 0;
@@ -467,11 +467,12 @@ static void run( struct x86cpu *c )
                         fprintf( stderr, "wasm_x86: probe insns=%llu frameplace=%08x xdim=%d ydim=%d\n",
                                  (unsigned long long)g_total_insns, fp, w, h );
                         static int nframes = 0;
-                        /* emit up to 8 frames, one every 6 valid probes (~3M insns) */
-                        if ((valid_seen - cap_need) % 6 == 0)
+                        /* emit up to 16 frames, one every 40 valid probes (~20M
+                         * insns) so the set spans the intro logo + title. */
+                        if ((valid_seen - cap_need) % 40 == 0)
                         {
                             wasm_dump_frame( c );
-                            if (++nframes >= 8) cap_done = 1;
+                            if (++nframes >= 16) cap_done = 1;
                         }
 #endif
                     }

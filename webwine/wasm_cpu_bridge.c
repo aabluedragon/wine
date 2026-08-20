@@ -131,3 +131,26 @@ uid_t getuid(void)  { return wasm_host_uid(); }
 uid_t geteuid(void) { return wasm_host_uid(); }
 gid_t getgid(void)  { return wasm_host_gid(); }
 gid_t getegid(void) { return wasm_host_gid(); }
+
+/* getrusage: emscripten leaves __syscall_getrusage unimplemented, so it warns
+ * on every call and returns zeroed time.  netduke32's frame timer polls process
+ * CPU time (clock()/GetProcessTimes) in a tight loop; with time frozen at 0 it
+ * busy-waits forever and floods stderr.  Provide a real, monotonically-advancing
+ * ru_utime from the JS clock so the timer progresses and the flood stops. */
+#include <sys/resource.h>
+#include <sys/time.h>
+#include <string.h>
+EM_JS(double, wasm_now_ms, (void), {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+});
+int getrusage( int who, struct rusage *ru )
+{
+    if (ru)
+    {
+        double us = wasm_now_ms() * 1000.0;
+        memset( ru, 0, sizeof(*ru) );
+        ru->ru_utime.tv_sec  = (time_t)(us / 1000000.0);
+        ru->ru_utime.tv_usec = (suseconds_t)(us - (double)ru->ru_utime.tv_sec * 1000000.0);
+    }
+    return 0;
+}
