@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -91,6 +92,78 @@ static inline uint32_t rd32( uint32_t a ){ return *(uint32_t *)(uintptr_t)a; }
 static inline void wr8 ( uint32_t a, uint8_t  v ){ *(uint8_t  *)(uintptr_t)a = v; }
 static inline void wr16( uint32_t a, uint16_t v ){ *(uint16_t *)(uintptr_t)a = v; }
 static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v; }
+
+/* ---- headless frame capture ----------------------------------------------
+ * netduke32 renders its 8-bpp Build frame, then de-palettises it to a 16-bpp
+ * RGB565 staging buffer via softsurface_blitBufferInternal<uint16_t> before
+ * handing it to SDL_UpdateTexture.  With no display backend we intercept that
+ * function (EAX = destination buffer) and dump the RGB565 frame as a PPM so
+ * the running game is visibly demonstrable.  Env-gated:
+ *   WASM_DUMP_FRAME    = output PPM path (enables capture)
+ *   WASM_DUMP_FRAME_N  = which blit call to dump (default 60; lets the attract
+ *                        loop advance past black startup frames)
+ * The blit-internal address and the width/height globals are read from the
+ * supplied netduke32.exe disassembly (see webwine-netduke32-runs memory).   */
+#define ND_VIDEONEXTPAGE 0x519620u  /* _videoNextPage — page flip (frame done) */
+#define ND_FRAMEPLACE    0xe168bcu  /* uint8_t* current 8-bpp frame buffer     */
+#define ND_BYTESPERLINE  0x10d3b40u /* stride in bytes                         */
+#define ND_XDIM          0x93004cu  /* screen width                            */
+#define ND_YDIM          0x930048u  /* screen height                           */
+#define ND_CURPALETTE    0xa61220u  /* palette_t[256], 4 bytes/entry           */
+static int32_t nd_slide = 0;   /* actual_exe_base - 0x400000 (ASLR relocation) */
+
+static void wasm_dump_frame( struct x86cpu *c )
+{
+    (void)c;
+    const char *path = getenv( "WASM_DUMP_FRAME" );
+    if (!path || !*path) return;
+    uint32_t fp  = rd32( ND_FRAMEPLACE + nd_slide );
+    int w   = (int)rd32( ND_XDIM + nd_slide );
+    int h   = (int)rd32( ND_YDIM + nd_slide );
+    int bpl = (int)rd32( ND_BYTESPERLINE + nd_slide );
+    uint32_t pal = ND_CURPALETTE + nd_slide;
+    fprintf( stderr, "wasm_x86: frame capture fp=%08x %dx%d bpl=%d\n", fp, w, h, bpl );
+    if (!fp || w < 1 || h < 1 || w > 8192 || h > 8192 || bpl < w) return;
+    /* host fopen() is broken in this build (wine overrides open -> EDOM), so
+     * emit the RGB frame as base64 over stderr, which works.  Host side
+     * extracts between the markers and rebuilds a PPM.                      */
+    size_t npix = (size_t)w * h, nrgb = npix * 3;
+    unsigned char *rgb = malloc( nrgb );
+    if (!rgb) { fprintf( stderr, "wasm_x86: frame malloc failed\n" ); return; }
+    size_t o = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+        {
+            uint8_t idx = rd8( fp + (uint32_t)y * bpl + x );
+            uint32_t pe = pal + (uint32_t)idx * 4;
+            rgb[o++] = rd8( pe + 0 );
+            rgb[o++] = rd8( pe + 1 );
+            rgb[o++] = rd8( pe + 2 );
+        }
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t enclen = (nrgb + 2) / 3 * 4;
+    char *enc = malloc( enclen + 1 );
+    if (!enc) { free( rgb ); fprintf( stderr, "wasm_x86: b64 malloc failed\n" ); return; }
+    size_t e = 0;
+    for (size_t i = 0; i < nrgb; i += 3)
+    {
+        unsigned v = rgb[i] << 16;
+        int n = 1;
+        if (i + 1 < nrgb) { v |= rgb[i+1] << 8; n = 2; }
+        if (i + 2 < nrgb) { v |= rgb[i+2];      n = 3; }
+        enc[e++] = b64[(v >> 18) & 63];
+        enc[e++] = b64[(v >> 12) & 63];
+        enc[e++] = n > 1 ? b64[(v >> 6) & 63] : '=';
+        enc[e++] = n > 2 ? b64[v & 63]        : '=';
+    }
+    enc[e] = 0;
+    fprintf( stderr, "WASM_FRAME_BEGIN %d %d\n", w, h );
+    fwrite( enc, 1, e, stderr );
+    fprintf( stderr, "\nWASM_FRAME_END\n" );
+    fflush( stderr );
+    free( enc ); free( rgb );
+    fprintf( stderr, "wasm_x86: emitted frame %dx%d (%zu b64 bytes)\n", w, h, e );
+}
 
 /* ---- flags ---- */
 static uint32_t parity( uint8_t v ){ v ^= v>>4; v ^= v>>2; v ^= v>>1; return (~v)&1; }
@@ -349,6 +422,45 @@ static void run( struct x86cpu *c )
         }
         uint32_t start = c->eip;
         last_eip = start;
+        {
+            static int cap_on = -1, slide_ok = 0, cap_done = 0, valid_seen = 0, cap_need = 0;
+            static uint64_t next_probe = 0;
+            if (cap_on == -1)   /* read env once */
+            {
+                cap_on = getenv( "WASM_DUMP_FRAME" ) ? 1 : 0;
+                const char *e = getenv( "WASM_DUMP_FRAME_N" );
+                cap_need = (e && *e) ? atoi( e ) : 1;   /* # of valid probes before dump */
+            }
+            if (cap_on && !cap_done && g_total_insns >= next_probe)
+            {
+                next_probe = g_total_insns + 500000;
+                if (!slide_ok)   /* derive ASLR slide once PEB is ready */
+                {
+                    uint32_t teb = c->fs_base;
+                    uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
+                    uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
+                    if (ib) { nd_slide = (int32_t)(ib - 0x400000); slide_ok = 1;
+                              fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
+                }
+                if (slide_ok)
+                {
+                    uint32_t fp = rd32( ND_FRAMEPLACE + nd_slide );
+                    int w = (int)rd32( ND_XDIM + nd_slide ), h = (int)rd32( ND_YDIM + nd_slide );
+                    fprintf( stderr, "wasm_x86: probe insns=%llu frameplace=%08x xdim=%d ydim=%d\n",
+                             (unsigned long long)g_total_insns, fp, w, h );
+                    if (fp && w > 0 && h > 0 && ++valid_seen >= cap_need)
+                    {
+                        static int nframes = 0;
+                        /* emit up to 8 frames, one every 6 valid probes (~3M insns) */
+                        if ((valid_seen - cap_need) % 6 == 0)
+                        {
+                            wasm_dump_frame( c );
+                            if (++nframes >= 8) cap_done = 1;
+                        }
+                    }
+                }
+            }
+        }
         struct decode d = { 4, 4, 0, 0, c->eip };
         uint8_t op;
 
