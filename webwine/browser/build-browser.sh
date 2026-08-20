@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 WINE="${WINE:-$HOME/dev/wine}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
 WORK="${WORK:-/tmp/webwine-browser}"
 NODEO="$WORK/nd_O1"; OUT="$WORK/web"; AT="$WORK/assets"
-CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"
+CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"; XOPT="${XOPT:--O2}"
 source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
 mkdir -p "$OUT"; cd "$BUILD"
 [ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O1) first"; exit 1; }
@@ -18,9 +18,9 @@ mkdir -p "$OUT"; cd "$BUILD"
 
 INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
 CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
-echo "[1/3] MEMFS ipc + BROWSER interpreter ($CINT)"
+echo "[1/3] MEMFS ipc ($CINT) + BROWSER interpreter ($XOPT)"
 emcc $CINT -DWEBWINE_MEMFS -c "$WEBW/wasm_ipc.c" -o "$NODEO/wasm_ipc_bw.o"
-emcc -std=gnu23 $CINT -DWEBWINE_BROWSER $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
+emcc -std=gnu23 $XOPT -DWEBWINE_BROWSER $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
 
 echo "[2/3] response file"
 RSP="$NODEO/objs_bw.rsp"; : > "$RSP"

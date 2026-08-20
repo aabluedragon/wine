@@ -6,11 +6,13 @@
 #
 #   OPT=-O1 WORK=/tmp/webwine-browser ./build-node.sh
 # NOTE: run under bash, not zsh (zsh does not word-split $DLLS/$INC).
-# Interpreter opt: -O1 is FASTEST for this switch-dispatch interpreter
-# (measured: O1 ~95 > O2 ~91 > O3 ~84 > Os ~77 Minsn/s — do NOT use -O3).
+# Interpreter opt is XOPT, default -O2.  Once the cold x87/SSE blocks were split
+# out of run(), -O2 beat -O1 by ~11%; BEFORE that split -O1 won.  See README.md.
 set -e
 WINE="${WINE:-$HOME/dev/wine}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
 OPT="${OPT:--O1}"
+# The interpreter itself wants -O2; see the perf notes in README.md.
+XOPT="${XOPT:--O2}"
 WORK="${WORK:-/tmp/webwine-browser}"
 OUT="$WORK/nd_${OPT#-}"
 source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
@@ -30,13 +32,13 @@ arch -x86_64 make server/wineserver 2>/dev/null || true
 for c in ../server/*.c; do b=$(basename "$c" .c)
   emcc "${CF[@]}" "${R[@]}" -c "$c" -o "$OUT/srv/$b.o" 2>/dev/null || cp "server/$b.o" "$OUT/srv/$b.o"; done
 
-echo "[2/4] shims + interpreter ($OPT)"
+echo "[2/4] shims ($OPT) + interpreter ($XOPT)"
 INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
 CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
 emcc $OPT -c "$WEBW/wasm_vm.c"  -o "$OUT/wasm_vm.o"
 emcc $OPT -c "$WEBW/wasm_ipc.c" -o "$OUT/wasm_ipc.o"
 emcc -std=gnu23 $OPT $CF2 $INC -c "$WEBW/wasm_cpu_bridge.c" -o "$OUT/wasm_cpu_bridge.o"
-emcc -std=gnu23 $OPT $CF2 $INC -c "$WEBW/wasm_x86.c"        -o "$OUT/wasm_x86.o"
+emcc -std=gnu23 $XOPT $CF2 $INC -c "$WEBW/wasm_x86.c"       -o "$OUT/wasm_x86.o"
 emcc $OPT -c "$WEBW/wasm_combined_main.c" -o "$OUT/combined_main.o"
 
 echo "[3/4] response file"
