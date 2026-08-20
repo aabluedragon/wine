@@ -36,7 +36,12 @@
 #include <emscripten.h>
 
 
-#define MAGIC_BASE  0x300
+/* Magic transport-channel fd numbers.  These must sit ABOVE any real node fd:
+ * the guest opens hundreds of files/dirs at once (asset scanning), so real fds
+ * climb well past the old 0x300 base and would collide with a channel marker,
+ * which is_magic() then misreads -> transport corruption ("Bad message").  A
+ * billion is unreachable by real fds (node hits RLIMIT_NOFILE long before). */
+#define MAGIC_BASE  0x40000000
 #define MAGIC_COUNT 64
 #define RING_SIZE   0x20000
 #define FDQ_SIZE    64
@@ -55,18 +60,21 @@ struct chan
 
 static struct chan chans[MAGIC_COUNT];
 
-/* Borrow refcount for REAL (node) fds passed between the in-process client and
- * server.  Both ends share one fd table, so an fd received over the transport
- * (identity-passed) is the SAME fd the server owns.  We must NOT dup it (node's
- * dup gives an unreadable VFS-stream fd) and must NOT let either end's close()
- * pull it out from under the other.  Instead, each transfer bumps the borrow
- * count; a close() while borrows are outstanding just drops one reference, and
- * only the close that finds the count at zero actually closes the fd.  This is
- * order-independent: the fd is closed exactly once, by whichever party issues
- * the (borrows+1)-th close. */
-#define FD_BORROW_MAX 65536
-static unsigned short fd_borrow[FD_BORROW_MAX];
-static void fd_borrow_inc( int fd ) { if (fd >= 0 && fd < FD_BORROW_MAX && fd_borrow[fd] < 0xffff) fd_borrow[fd]++; }
+/* REAL (node) fds passed from the in-process server to the client are the SAME
+ * fd the server owns (identity transfer in one shared table).  We must NOT dup
+ * them (node's dup gives an unreadable VFS-stream fd) and the CLIENT must never
+ * close them — only the SERVER (which owns the underlying file object) may.
+ * Mark a received fd "server-owned"; the client's close() of it is a no-op, and
+ * the server's close() (recognised because it runs inside the cooperative drive,
+ * g_wasm_in_server) actually closes it and clears the mark.  This closes each fd
+ * exactly once, regardless of how many times it was fetched, so fds don't leak
+ * (leaking climbs the fd number into the magic-channel range and corrupts the
+ * transport). */
+#define FD_OWN_MAX 65536
+static unsigned char fd_srv_owned[FD_OWN_MAX];
+int g_wasm_in_server;  /* set while executing the in-process wineserver */
+void wasm_ipc_enter_server( void ) { g_wasm_in_server++; }
+void wasm_ipc_leave_server( void ) { if (g_wasm_in_server) g_wasm_in_server--; }
 
 extern void wineserver_inproc_drive(void) __attribute__((weak));
 extern void wasm_vm_sync_shared(void);  /* refresh MAP_SHARED client mirrors */
@@ -266,8 +274,8 @@ ssize_t recvmsg( int fd, struct msghdr *msg, int flags )
             {
                 int rfd = self->fdq[self->fdq_head++ % FDQ_SIZE];
                 out[n++] = rfd;
-                /* real fd: the receiver now co-owns the server's fd (see above) */
-                if (!is_magic( rfd )) fd_borrow_inc( rfd );
+                /* real fd: the server owns it; the client must not close it */
+                if (!is_magic( rfd ) && rfd >= 0 && rfd < FD_OWN_MAX) fd_srv_owned[rfd] = 1;
             }
             cmsg->cmsg_level = SOL_SOCKET;
             cmsg->cmsg_type  = SCM_RIGHTS;
@@ -388,9 +396,14 @@ int close( int fd )
      * so closing the std streams (0/1/2) would close node's real stdio and kill
      * the process. The guest's std handles alias these fds; keep them open. */
     if (fd >= 0 && fd <= 2) return 0;
-    /* Outstanding borrow of a server-owned fd: drop one reference, don't close
-     * yet — the other end still uses this exact fd (see fd_borrow above). */
-    if (fd >= 0 && fd < FD_BORROW_MAX && fd_borrow[fd]) { fd_borrow[fd]--; return 0; }
+    /* A server-owned fd (received by the client from the server) may only be
+     * closed by the SERVER — recognised because it runs inside the cooperative
+     * drive (g_wasm_in_server).  The client's close of it is a no-op. */
+    if (fd >= 0 && fd < FD_OWN_MAX && fd_srv_owned[fd])
+    {
+        if (!g_wasm_in_server) return 0;   /* client borrowing: keep it open */
+        fd_srv_owned[fd] = 0;              /* server closing its own fd: fall through */
+    }
     {
         if (getenv("WINEWASMLOADTRACE")) { struct stat st; int rr=fstat(fd,&st);
             fprintf(stderr,"wasm_ipc: close real fd=%d ino=%llu\n", fd, rr==0?(unsigned long long)st.st_ino:0); }

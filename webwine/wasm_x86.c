@@ -405,6 +405,13 @@ static void run( struct x86cpu *c )
         case 0x8f: m = decode_modrm(c,&d); write_rm(c,&m,os, pop32(c)); break;
         case 0x9c: push32(c, get_flags(c)); break;           /* pushfd */
         case 0x9d: c->eflags = pop32(c); c->lf_size = 0; break; /* popfd */
+        case 0xfe: m = decode_modrm(c,&d); /* grp4: inc/dec r/m8 */
+            switch (m.reg) {
+            case 0: a = read_rm(c,&m,1); r = (a+1)&0xff; write_rm(c,&m,1,r); set_lazy(c,K_INC,a,1,r,1); break; /* inc */
+            case 1: a = read_rm(c,&m,1); r = (a-1)&0xff; write_rm(c,&m,1,r); set_lazy(c,K_DEC,a,1,r,1); break; /* dec */
+            default: unimplemented(c,start,op); return;
+            }
+            break;
 
         /* arithmetic families: opcodes xx0..xx5 (reg8, reg, r/m8<-r, r/m<-r, r<-r/m8, r<-r/m, al,imm8, eax,imm) */
 #define ARITH(base, KIND, EXPR) \
@@ -470,6 +477,15 @@ static void run( struct x86cpu *c )
         case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
             a=c->regs[EAX]; c->regs[EAX]=c->regs[op&7]; c->regs[op&7]=a; break;
         case 0x90: break; /* nop / xchg eax,eax */
+        case 0x9b: break; /* fwait/wait: no async x87 exceptions here -> no-op */
+        case 0x9e: /* sahf: AH -> SF ZF AF PF CF (AH mirrors the low EFLAGS byte) */
+            { uint8_t ah = (c->regs[EAX] >> 8) & 0xff; c->eflags = get_flags(c);
+              c->eflags = (c->eflags & ~(SF|ZF|AF|PF|CF)) | (ah & (SF|ZF|AF|PF|CF)); c->lf_size = 0; }
+            break;
+        case 0x9f: /* lahf: SF ZF AF PF CF -> AH (bit1 always set) */
+            { uint32_t fl = get_flags(c);
+              c->regs[EAX] = (c->regs[EAX] & ~0xff00u) | ((((fl & (SF|ZF|AF|PF|CF)) | 0x02) & 0xff) << 8); }
+            break;
 
         /* control flow */
         case 0xe8: { int32_t rel = f32(&d); push32(c, d.eip); c->eip = d.eip + rel; goto next; } /* call rel */
@@ -500,6 +516,12 @@ static void run( struct x86cpu *c )
         case 0x18: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,1); b=read_reg(c,m.reg,1); r=a-b-ci; write_rm(c,&m,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break;
         case 0x19: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_rm(c,&m,os); b=read_reg(c,m.reg,os); r=a-b-ci; write_rm(c,&m,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
         case 0x1b: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,os); b=read_rm(c,&m,os); r=a-b-ci; write_reg(c,m.reg,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break;
+        case 0x12: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a+b+ci; write_reg(c,m.reg,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc r8,r/m8 */
+        case 0x14: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,1); b=f8(&d); r=a+b+ci; write_reg(c,EAX,1,r); set_lazy(c,K_ADC,a,b,r,1); c->lf_cin=ci; } break; /* adc al,imm8 */
+        case 0x15: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a+b+ci; write_reg(c,EAX,os,r); set_lazy(c,K_ADC,a,b,r,os); c->lf_cin=ci; } break; /* adc eax,imm */
+        case 0x1a: { int ci=(get_flags(c)&CF)?1:0; m=decode_modrm(c,&d); a=read_reg(c,m.reg,1); b=read_rm(c,&m,1); r=a-b-ci; write_reg(c,m.reg,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb r8,r/m8 */
+        case 0x1c: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,1); b=f8(&d); r=a-b-ci; write_reg(c,EAX,1,r); set_lazy(c,K_SBB,a,b,r,1); c->lf_cin=ci; } break; /* sbb al,imm8 */
+        case 0x1d: { int ci=(get_flags(c)&CF)?1:0; a=read_reg(c,EAX,os); b=os==2?f16(&d):f32(&d); r=a-b-ci; write_reg(c,EAX,os,r); set_lazy(c,K_SBB,a,b,r,os); c->lf_cin=ci; } break; /* sbb eax,imm */
 
         /* pushad / popad */
         case 0x60: { uint32_t sp=c->regs[ESP]; push32(c,c->regs[EAX]); push32(c,c->regs[ECX]); push32(c,c->regs[EDX]); push32(c,c->regs[EBX]); push32(c,sp); push32(c,c->regs[EBP]); push32(c,c->regs[ESI]); push32(c,c->regs[EDI]); } break;

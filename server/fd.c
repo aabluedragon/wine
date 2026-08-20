@@ -936,6 +936,12 @@ void wineserver_inproc_drive(void)
 {
     int i, ret, passes;
     static int drv_trace = -1;
+    /* Tell the transport we are now executing server code, so close()s here are
+     * the SERVER closing its own (client-borrowed) fds and must actually close,
+     * whereas the client's own close()s of those fds stay no-ops.  See wasm_ipc.c */
+    extern void wasm_ipc_enter_server( void ) __attribute__((weak));
+    extern void wasm_ipc_leave_server( void ) __attribute__((weak));
+    if (&wasm_ipc_enter_server) wasm_ipc_enter_server();
     if (drv_trace < 0) { const char *e = getenv("WINEWASMIPCTRACE"); drv_trace = e && *e && *e!='0'; }
 
     set_current_time();
@@ -961,6 +967,7 @@ void wineserver_inproc_drive(void)
         }
         set_current_time();
     }
+    if (&wasm_ipc_leave_server) wasm_ipc_leave_server();
 }
 
 void main_loop(void)
