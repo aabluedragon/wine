@@ -3638,6 +3638,30 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
     filter.flags = PM_REMOVE | (mask << 16);
     while (!(ret = peek_message( msg, &filter )))
     {
+#ifdef __wasm__
+        /* Headless auto-dismiss: netduke32's modal setup dialog blocks here (its
+         * pump ends in GetMessage) with nothing to wake it.  When WINE_AUTO_ENTER
+         * is set, synthesise Enter to the active/foreground window BEFORE we wait;
+         * the posted message both wakes wait_objects and, via IsDialogMessage,
+         * clicks the dialog's default button ("Start").  Limited shots so it walks
+         * a few successive dialogs without spamming later gameplay input. */
+        {
+            static int shots, checked, enabled;
+            if (!checked) { const char *e = getenv("WINE_AUTO_ENTER"); enabled = e && *e && *e != '0'; checked = 1; }
+            if (enabled && shots < 16)
+            {
+                HWND fg = NtUserGetForegroundWindow(), aw = get_active_window();
+                HWND target = fg ? fg : aw;
+                fprintf( stderr, "WASM_AUTO_ENTER: block, fg=%p active=%p target=%p shot=%d\n", fg, aw, target, shots );
+                if (target)
+                {
+                    NtUserPostMessage( target, WM_KEYDOWN, VK_RETURN, 0x001c0001 );
+                    NtUserPostMessage( target, WM_KEYUP,   VK_RETURN, 0xc01c0001 );
+                }
+                shots++;
+            }
+        }
+#endif
         wait_objects( 1, &server_queue, INFINITE, mask & (QS_SENDMESSAGE | QS_SMRESULT), mask, 0 );
     }
     if (ret < 0) return -1;
