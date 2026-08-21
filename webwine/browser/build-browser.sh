@@ -20,7 +20,7 @@ INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
 CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
 echo "[1/3] MEMFS ipc ($CINT) + BROWSER interpreter ($XOPT)"
 emcc $CINT -DWEBWINE_MEMFS -c "$WEBW/wasm_ipc.c" -o "$NODEO/wasm_ipc_bw.o"
-emcc -std=gnu23 $XOPT -DWEBWINE_BROWSER $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
+emcc -std=gnu23 $XOPT -DWEBWINE_BROWSER ${PROFILE:+-DWASM_X86_PROFILE} $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
 
 echo "[2/3] response file"
 RSP="$NODEO/objs_bw.rsp"; : > "$RSP"

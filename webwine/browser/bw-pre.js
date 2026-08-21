@@ -16,7 +16,10 @@ Module['preRun'].push(function () {
   E.WINELOADERNOEXEC = '1';
   E.WINE_NO_SERVER_SPAWN = '1';
   E.WINE_AUTO_ENTER = '1';
-  E.SDL_VIDEODRIVER = 'windows';   /* EXPERIMENT: real Win32 window -> WM_* input */
+  /* 'windows' (not 'dummy'): SDL then creates a real Win32 window through our
+     null user driver and pumps WM_* messages, which is what makes keyboard and
+     mouse work at all - and it measured faster than the dummy driver too. */
+  E.SDL_VIDEODRIVER = 'windows';
   E.SDL_AUDIODRIVER = 'dummy';
 
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }

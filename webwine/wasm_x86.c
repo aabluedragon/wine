@@ -135,6 +135,7 @@ static int g_histo_on = 0;
 static uint32_t g_prof_eip[PROF_SLOTS];
 static uint32_t g_prof_cnt[PROF_SLOTS];
 static int g_prof_on = 0;
+static int g_prof_countdown = 1;
 static void prof_sample( uint32_t eip )
 {
     uint32_t h = (eip * 2654435761u) >> 20;      /* fibonacci hash -> 12 bits */
@@ -202,7 +203,8 @@ static const char *prof_module( uint32_t va )
  * direct-mapped table, so the hot path costs one indexed load + compare, the
  * same as the frame-flip check it replaces (run() is register-pressure bound,
  * so it must not get more expensive than that). */
-enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET };
+enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP };
+static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 #define NAT_SLOTS 256
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
@@ -283,8 +285,63 @@ static void nat_init( struct x86cpu *c )
  * caller cleans the stack, and the return value is the destination pointer.
  * Declines (returns 0, so the guest code runs as usual) if the buffers are not
  * wholly inside the guest address space. */
+static void set_lazy( struct x86cpu *c, int kind, uint32_t op1, uint32_t op2, uint32_t res, int size );
+
+/* netduke32 walks its whole sprite-timer array once per frame inside
+ * videoNextPage - 16,650 iterations of a five-instruction loop, ~10% of the
+ * frame when interpreted one instruction at a time.  Run it natively.
+ *
+ * Like the ND_* frame-capture constants this build already depends on, the
+ * address is specific to this executable, so it is NOT taken on trust: the exact
+ * instruction bytes are verified before arming, and if they differ (another
+ * build, another game) the loop is simply left to the interpreter. */
+#define ND_AGELOOP 0x5196c0u
+static const uint8_t nd_ageloop_code[] = {
+    0xf6,0x40,0xfc,0x02,  /* testb $0x2,-0x4(%eax) */
+    0x74,0x02,            /* je    +2              */
+    0x01,0x18,            /* add   %ebx,(%eax)     */
+    0x83,0xc0,0x40,       /* add   $0x40,%eax      */
+    0x39,0xd0,            /* cmp   %edx,%eax       */
+    0x75,0xf1             /* jne   loop            */
+};
+
+static void nat_arm_ageloop( void )
+{
+    uint32_t a = ND_AGELOOP + (uint32_t)nd_slide;
+    unsigned i;
+
+    for (i = 0; i < sizeof(nd_ageloop_code); i++)
+        if (rd8( a + i ) != nd_ageloop_code[i]) break;
+    if (i == sizeof(nd_ageloop_code)) nat_register( a, NAT_AGELOOP, "sprite-timer loop" );
+    else fprintf( stderr, "wasm_x86: sprite-timer loop bytes differ at %08x - leaving it interpreted\n", a );
+}
+
+/* EXPERIMENT (env WASM_NAT_AGELOOP): run the engine's per-frame sprite-timer
+ * walk natively to measure what it really costs.  Exact semantics of
+ *   loop: testb $2,-4(%eax); je s; add %ebx,(%eax); s: add $0x40,%eax;
+ *         cmp %edx,%eax; jne loop
+ * which exits with eax==edx and ZF set. */
+static int nat_ageloop( struct x86cpu *c )
+{
+    uint32_t p = c->regs[EAX], end = c->regs[EDX], inc = c->regs[EBX];
+    const uint32_t GUEST_END = 0x70000000u;
+    /* The guest loop is do-while and steps by 0x40, so only accelerate a range
+     * that is ahead of p and 0x40-aligned; anything else falls back to the
+     * interpreter rather than guessing. */
+    if (p >= GUEST_END || end > GUEST_END || end <= p || ((end - p) & 0x3f)) return 0;
+    do {
+        if (rd8( p - 4 ) & 2) wr32( p, rd32( p ) + inc );
+        p += 0x40;
+    } while (p != end);
+    c->regs[EAX] = p;
+    set_lazy( c, K_SUB, p, end, 0, 4 );      /* the cmp that ends the loop */
+    c->eip = ND_AGELOOP + (uint32_t)sizeof(nd_ageloop_code) + (uint32_t)nd_slide;
+    return 1;
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
+    if (kind == NAT_AGELOOP) return nat_ageloop( c );
     uint32_t esp = c->regs[ESP];
     uint32_t dst = rd32( esp + 4 ), a1 = rd32( esp + 8 ), n = rd32( esp + 12 );
     const uint32_t GUEST_END = 0x70000000u;              /* native wine lives above this */
@@ -1063,6 +1120,32 @@ static __attribute__((noinline)) int run_sse( struct x86cpu *c, struct decode *d
  * compile to a lot of code, and run() is register-pressure bound - every byte
  * of cold code in that one function costs the hot dispatch path.  Pure code
  * motion. */
+/* grp3 mul/imul/div/idiv (F6/F7 with reg>=4).  Split from the hot test/not/neg
+ * arms, which run() handles inline: 64-bit division compiles to a lot of code
+ * and is rare, while "test" is in the engine's hottest per-frame loop.
+ * The caller has already decoded the modrm. */
+static __attribute__((noinline)) void run_cold_grp3( struct x86cpu *c, struct decode *d,
+                                                     uint8_t op, struct modrm *mp, int sz )
+{
+    struct modrm m = *mp;
+    uint32_t a = read_rm( c, &m, sz );
+    (void)op; (void)d;
+    switch (m.reg)
+    {
+    case 4: /* mul */ { uint64_t p=(uint64_t)(a&sizemask(sz))*(sz==1?(c->regs[EAX]&0xff):sz==2?(c->regs[EAX]&0xffff):c->regs[EAX]);
+                        if(sz==1) c->regs[EAX]=(c->regs[EAX]&0xffff0000)|(uint16_t)p;
+                        else if(sz==2){write_reg(c,EAX,2,(uint16_t)p); write_reg(c,EDX,2,(uint16_t)(p>>16));}
+                        else {c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} } break;
+    case 5: /* imul */ { int64_t p=(int64_t)(int32_t)a*(int32_t)c->regs[EAX];
+                         if(sz==4){c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} else write_reg(c,EAX,sz,(uint32_t)p);} break;
+    case 6: /* div */ if(sz==4){ uint64_t dividend=((uint64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/a); c->regs[EDX]=(uint32_t)(dividend%a);} }
+                      else if(sz==2){ uint32_t dividend=((c->regs[EDX]&0xffff)<<16)|(c->regs[EAX]&0xffff); if(a){write_reg(c,EAX,2,dividend/a); write_reg(c,EDX,2,dividend%a);} }
+                      else { uint32_t dividend=c->regs[EAX]&0xffff; if(a){c->regs[EAX]=(c->regs[EAX]&0xffff0000)|((dividend/a)&0xff)|(((dividend%a)&0xff)<<8);} } break;
+    case 7: /* idiv */ if(sz==4){ int64_t dividend=((int64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dividend/(int32_t)a); c->regs[EDX]=(uint32_t)(dividend%(int32_t)a);} } break;
+    default: break;
+    }
+}
+
 static __attribute__((noinline)) void run_cold( struct x86cpu *c, struct decode *d, uint8_t op )
 {
     struct modrm m;
@@ -1071,7 +1154,8 @@ static __attribute__((noinline)) void run_cold( struct x86cpu *c, struct decode 
     (void)r;
     switch (op)
     {
-        /* grp3: F6/F7 test/not/neg/mul/imul/div/idiv */
+        /* grp3 mul/div now live in run_cold_grp3 (below); test/not/neg are inline
+         * in run() because they are hot. */
         case 0xf6: case 0xf7:
         {
             int sz=(op&1)?os:1;
@@ -1430,6 +1514,19 @@ static void run( struct x86cpu *c )
          * the PEB is ready (which arms frame-boundary presenting), and — under
          * WASM_TPUT — sample throughput/fps.  Kept off the per-instruction path
          * so the hot loop stays tight. */
+#ifdef WASM_X86_PROFILE
+        /* Sampling profiler (diagnostic builds only).  The stride is JITTERED:
+         * sampling on the fixed 64K housekeeping tick aliases against tight
+         * loops and once reported a 5-instruction engine loop at ~30% of the
+         * frame when a direct counter proved it was ~6%. */
+        if (g_prof_on && --g_prof_countdown <= 0)
+        {
+            static uint32_t lcg = 12345;
+            lcg = lcg * 1664525u + 1013904223u;
+            g_prof_countdown = 40000 + (int)(lcg % 50000u);
+            prof_sample( c->eip );
+        }
+#endif
         if (++idelta == 0x10000)
         {
             g_total_insns += idelta;
@@ -1443,6 +1540,10 @@ static void run( struct x86cpu *c )
                 if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
                           g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
                           nat_register( g_flip_addr, NAT_FLIP, "frame flip" );
+                          if (getenv( "WASM_COUNT_LOOP" ))
+                              nat_register( ND_AGELOOP + (uint32_t)nd_slide, NAT_COUNT, "loop probe" );
+                          else if (!getenv( "WASM_NO_AGELOOP" ))
+                              nat_arm_ageloop();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
@@ -1459,10 +1560,9 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
-            if (g_prof_on) prof_sample( c->eip );
             if (tp_on)
             {
                 double now = emscripten_get_now();
@@ -1472,8 +1572,10 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f\n",
-                             (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips );
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f\n",
+                             (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
+                             fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0 );
+                    tp_last_hits = g_count_hits;
                     tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count;
                     if (g_prof_on && (int)((now - tp_start) / 1000.0) % 15 == 0) prof_dump();
                     if (g_histo_on && (int)((now - tp_start) / 1000.0) % 10 == 0)
@@ -1509,7 +1611,8 @@ static void run( struct x86cpu *c )
         if (g_nat_addr[NAT_SLOT(start)] == start)
         {
             int kind = g_nat_kind[NAT_SLOT(start)];
-            if (kind != NAT_FLIP)
+            if (kind == NAT_COUNT) g_count_hits++;   /* diagnostic only: falls through */
+            else if (kind != NAT_FLIP)
             {
                 if (nat_call( c, kind )) continue;   /* eip set by the native call */
             }
@@ -1727,8 +1830,28 @@ static void run( struct x86cpu *c )
             run_cold( c, &d, op );
             break;
 
-        /* grp3 + string ops: cold, see run_cold */
+        /* grp3: test/not/neg are cheap AND hot - the engine's per-frame sprite
+         * walk in videoNextPage runs "testb $imm,disp(%eax)" every iteration, so
+         * sending 0xf6 to run_cold cost a call per iteration of the hottest loop
+         * in the frame.  Only the bulky mul/imul/div/idiv arms stay cold. */
         case 0xf6: case 0xf7:
+        {
+            int sz = (op&1) ? os : 1;
+            m = decode_modrm(c,&d);
+            if (m.reg >= 4) { run_cold_grp3( c, &d, op, &m, sz ); break; }
+            a = read_rm(c,&m,sz);
+            switch (m.reg)
+            {
+            case 0: case 1: b = (sz==1) ? f8(&d) : (os==2 ? f16(&d) : f32(&d));
+                            set_lazy(c,K_LOGIC,a,b,a&b,sz); break;   /* test */
+            case 2: write_rm(c,&m,sz,~a); break;                     /* not */
+            default: r = (uint32_t)(-(int32_t)a); write_rm(c,&m,sz,r);
+                     set_lazy(c,K_SUB,0,a,r,sz); break;              /* neg */
+            }
+            break;
+        }
+
+        /* string ops: cold, see run_cold */
         case 0xa4: case 0xa5:
         case 0xaa: case 0xab:
         case 0xac: case 0xad:
