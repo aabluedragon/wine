@@ -8,6 +8,13 @@
 self.onmessage = function (e) {
   if (!e.data || e.data.type !== 'input') return;
   if (e.data.ring) self.__wwInput = e.data.ring;   // Int32Array over a SharedArrayBuffer
+  if (e.data.audio) {                              // PCM ring drained by the AudioWorklet
+    self.__wwAudio = {
+      idx:  new Int32Array(e.data.audio, 0, 2),
+      data: new Float32Array(e.data.audio, 8),
+      cap:  e.data.audioCap,
+    };
+  }
   self.onmessage = null;
   importScripts('webwine-bw.js');
 };

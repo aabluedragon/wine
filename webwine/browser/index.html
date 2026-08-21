@@ -33,6 +33,7 @@ const statusEl = document.getElementById('status');
 const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
 let lastW = 0, lastH = 0;
+let audioCtx = null, audioState = 'off';
 
 let frames = 0, lastFrames = 0, lastT = performance.now(), startT = lastT, firstFrameT = 0;
 function tick() {
@@ -62,6 +63,14 @@ try {
   if (self.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined') {
     ring = new Int32Array(new SharedArrayBuffer((2 + SLOTS * 4) * 4));
   }
+} catch (e) {}
+
+/* PCM ring the interpreter fills and an AudioWorklet drains. 32768 stereo
+ * frames is ~0.74s at 44.1kHz - plenty of slack for a bursty producer. */
+const AUDIO_CAP = 32768;
+let audioSab = null;
+try {
+  if (ring) audioSab = new SharedArrayBuffer(8 + AUDIO_CAP * 2 * 4);
 } catch (e) {}
 
 function push(type, a, b, c) {
@@ -113,7 +122,7 @@ const KEYMAP = {
 let keysSent = 0, mouseSent = 0;
 function noteInput() {
   inputEl.textContent = ring
-    ? `input: ready — keys sent ${keysSent}, mouse ${mouseSent}. Click the canvas, then use arrows/Enter/Esc, WASD, Ctrl+Space.`
+    ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}. Click the canvas, then arrows/Enter/Esc, WASD, Ctrl+Space.`
     : 'input: DISABLED — no SharedArrayBuffer (serve with COOP/COEP headers, e.g. serve.py)';
 }
 noteInput();
@@ -145,10 +154,33 @@ cv.addEventListener('contextmenu', (e) => e.preventDefault());
 setInterval(noteInput, 500);
 cv.focus();
 
+async function startAudio(freq, channels) {
+  if (audioCtx || !audioSab) { if (!audioSab) audioState = 'no SAB'; return; }
+  try {
+    // Open the context at the game's own rate so nothing has to resample.
+    try { audioCtx = new AudioContext({ sampleRate: freq, latencyHint: 'interactive' }); }
+    catch (e) { audioCtx = new AudioContext({ latencyHint: 'interactive' }); }
+    await audioCtx.audioWorklet.addModule('audio-worklet.js');
+    const node = new AudioWorkletNode(audioCtx, 'ww-audio', {
+      outputChannelCount: [2],
+      processorOptions: { sab: audioSab, cap: AUDIO_CAP, srcRate: freq },
+    });
+    node.connect(audioCtx.destination);
+    audioState = audioCtx.state === 'running'
+      ? `on ${freq}Hz/${channels}ch` : 'click to enable';
+  } catch (e) { audioState = 'failed: ' + e.message; }
+}
+// Browsers only allow audio after a gesture; the canvas already takes clicks.
+function resumeAudio() {
+  if (audioCtx && audioCtx.state !== 'running') audioCtx.resume().then(() => { audioState = 'on'; });
+}
+addEventListener('pointerdown', resumeAudio, true);
+addEventListener('keydown', resumeAudio, true);
+
 const worker = new Worker('worker.js');
 // Hand over the ring BEFORE the module boots - once it starts interpreting, the
 // worker never services messages again.
-worker.postMessage({ type: 'input', ring: ring });
+worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP });
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -158,6 +190,8 @@ worker.onmessage = (e) => {
     lastW = m.w; lastH = m.h;
     ctx.putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
     frames++;
+  } else if (m.type === 'audio') {
+    startAudio(m.freq, m.channels);
   } else if (m.type === 'log') {
     const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
     logEl.textContent += m.line + '\n';

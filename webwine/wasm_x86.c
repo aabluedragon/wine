@@ -203,7 +203,9 @@ static const char *prof_module( uint32_t va )
  * direct-mapped table, so the hot path costs one indexed load + compare, the
  * same as the frame-flip check it replaces (run() is register-pressure bound,
  * so it must not get more expensive than that). */
-enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP };
+enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
+       NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
+       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 #define NAT_SLOTS 256
 static uint32_t g_nat_addr[NAT_SLOTS];
@@ -286,6 +288,45 @@ static void nat_init( struct x86cpu *c )
  * Declines (returns 0, so the guest code runs as usual) if the buffers are not
  * wholly inside the guest address space. */
 static void set_lazy( struct x86cpu *c, int kind, uint32_t op1, uint32_t op2, uint32_t res, int size );
+static void run( struct x86cpu *c );
+
+/* Audio bridge to the page (webwine/wasm_ipc.c). */
+extern void webwine_audio_open( int freq, int channels );
+extern int  webwine_audio_want( void );
+extern int  webwine_audio_queued( void );
+extern void webwine_audio_push( const void *buf, int frames, int channels, int fmt );
+
+/* Call a cdecl function in the GUEST from C and return its EAX.
+ *
+ * The nested run() ends when the guest returns to GUEST_RET_SENTINEL, which is
+ * below 0x10000 and so lands in wasm_x86_dispatch (the same route the syscall
+ * trampolines use).  The whole CPU state is saved and restored, so whatever the
+ * guest was doing resumes untouched; `stack_below` is the lowest guest address
+ * the caller still needs, and the callee's frame is built under it. */
+#define GUEST_RET_SENTINEL 0xfff0u
+static int g_in_guest_call;
+static int call_guest_cdecl( struct x86cpu *c, uint32_t func, int argc,
+                             const uint32_t *argv, uint32_t stack_below )
+{
+    struct x86cpu saved = *c;
+    uint32_t esp;
+    int i;
+
+    if (g_in_guest_call) return 0;               /* never re-enter */
+    esp = (stack_below - 512 - (uint32_t)argc * 4) & ~15u;
+    if (esp < 0x20000 || esp >= stack_below) return 0;
+    esp -= 4;
+    wr32( esp, GUEST_RET_SENTINEL );
+    for (i = 0; i < argc; i++) wr32( esp + 4 + i * 4, argv[i] );
+    c->regs[ESP] = esp;
+    c->eip = func;
+    c->running = 1;
+    g_in_guest_call = 1;
+    run( c );
+    g_in_guest_call = 0;
+    *c = saved;
+    return 1;
+}
 
 /* netduke32 walks its whole sprite-timer array once per frame inside
  * videoNextPage - 16,650 iterations of a five-instruction loop, ~10% of the
@@ -339,9 +380,181 @@ static int nat_ageloop( struct x86cpu *c )
     return 1;
 }
 
+/* ---- SDL audio, driven by the interpreter -----------------------------------
+ *
+ * SDL_OpenAudioDevice starts an audio THREAD.  This interpreter has a single
+ * guest CPU (one g_cpu), so that can never succeed, and every SDL audio backend
+ * fails the same way regardless of SDL_AUDIODRIVER.  So we take SDL's place:
+ * intercept its audio entry points, accept the device ourselves, and then call
+ * the game's own audio callback from here, shipping the PCM to the page, which
+ * plays it through Web Audio.
+ *
+ * Two things keep this honest:
+ *  - the callback is only ever invoked when the game is NOT holding the SDL
+ *    audio lock (we track SDL_LockAudioDevice depth), which is exactly the
+ *    contract SDL itself provides for mixer state;
+ *  - the entry points are netduke32's, so like the sprite-timer loop the exact
+ *    thunk bytes are verified before arming and anything unexpected is left to
+ *    the interpreter.
+ */
+#define SDL_A_OPEN        0x6a8140u   /* SDL_OpenAudio(desired, obtained)        */
+#define SDL_A_OPENDEV     0x6a8170u   /* SDL_OpenAudioDevice(dev,cap,des,obt,ch) */
+#define SDL_A_PAUSE       0x6a81a0u   /* SDL_PauseAudio(pause)                   */
+#define SDL_A_PAUSEDEV    0x6a81b0u   /* SDL_PauseAudioDevice(dev, pause)        */
+#define SDL_A_LOCK        0x6a8240u
+#define SDL_A_LOCKDEV     0x6a8250u
+#define SDL_A_UNLOCK      0x6a8260u
+#define SDL_A_UNLOCKDEV   0x6a8270u
+#define SDL_A_CLOSEDEV    0x6a8290u
+
+/* every one of these is a 6-byte dynapi thunk: ff 25 <slot32> */
+static int sdl_thunk_ok( uint32_t va, uint32_t slot )
+{
+    return rd8( va ) == 0xff && rd8( va + 1 ) == 0x25 && rd32( va + 2 ) == slot;
+}
+
+#define AUDIO_TARGET_FRAMES 6000   /* ~136ms at 44.1kHz */
+static struct {
+    int      armed, open, paused, lock;
+    uint32_t callback, userdata;
+    int      freq, channels, samples;
+    uint32_t fmt;
+    uint32_t size;          /* bytes the callback fills per call */
+    uint64_t cb_insns, cb_calls;
+    uint8_t  silence;
+    uint64_t frames_out;
+} g_aud;
+
+static uint32_t garg( struct x86cpu *c, int i ) { return rd32( c->regs[ESP] + 4 + i * 4 ); }
+static void gret( struct x86cpu *c, uint32_t eax )
+{
+    c->regs[EAX] = eax;
+    c->eip = rd32( c->regs[ESP] );
+    c->regs[ESP] += 4;
+}
+
+/* Accept an SDL audio device: remember the format + callback and report success. */
+static int sdl_open_audio( struct x86cpu *c, int with_device )
+{
+    uint32_t desired = with_device ? garg( c, 2 ) : garg( c, 0 );
+    uint32_t obtained = with_device ? garg( c, 3 ) : garg( c, 1 );
+    int bits;
+
+    if (!desired) { gret( c, with_device ? 0 : (uint32_t)-1 ); return 1; }
+
+    g_aud.freq     = (int)rd32( desired + 0 );
+    g_aud.fmt      = rd16( desired + 4 );
+    g_aud.channels = rd8 ( desired + 6 );
+    g_aud.samples  = rd16( desired + 8 );
+    g_aud.callback = rd32( desired + 16 );
+    g_aud.userdata = rd32( desired + 20 );
+
+    if (g_aud.freq <= 0) g_aud.freq = 44100;
+    if (g_aud.channels < 1 || g_aud.channels > 2) g_aud.channels = 2;
+    if (g_aud.samples <= 0) g_aud.samples = 1024;
+    bits = g_aud.fmt & 0xff;
+    if (bits != 8 && bits != 16 && bits != 32) { g_aud.fmt = 0x8010; bits = 16; }
+    g_aud.silence = (g_aud.fmt == 0x0008) ? 0x80 : 0x00;   /* AUDIO_U8 is centred at 128 */
+    g_aud.size    = (uint32_t)g_aud.samples * g_aud.channels * (bits / 8);
+
+    if (obtained)
+    {
+        wr32( obtained + 0, (uint32_t)g_aud.freq );
+        wr16( obtained + 4, (uint16_t)g_aud.fmt );
+        wr8 ( obtained + 6, (uint8_t)g_aud.channels );
+        wr8 ( obtained + 7, g_aud.silence );
+        wr16( obtained + 8, (uint16_t)g_aud.samples );
+        wr16( obtained + 10, 0 );
+        wr32( obtained + 12, g_aud.size );
+        wr32( obtained + 16, g_aud.callback );
+        wr32( obtained + 20, g_aud.userdata );
+    }
+
+    g_aud.open = 1;
+    g_aud.paused = 1;            /* SDL opens paused */
+    g_aud.lock = 0;
+    webwine_audio_open( g_aud.freq, g_aud.channels );
+    fprintf( stderr, "wasm_x86: SDL audio %dHz %dch fmt=%04x samples=%d cb=%08x (driven by us)\n",
+             g_aud.freq, g_aud.channels, g_aud.fmt, g_aud.samples, g_aud.callback );
+    gret( c, with_device ? 2u : 0u );   /* device id / success */
+    return 1;
+}
+
+/* Call the game's audio callback and hand the PCM to the page.  The buffer lives
+ * transiently below the guest stack pointer; the callback runs with its own frame
+ * below that, and the interpreter state is restored afterwards. */
+static void audio_pump( struct x86cpu *c )
+{
+    uint32_t saved_esp, buf, args[3];
+    int want;
+
+    if (!g_aud.open || g_aud.paused || g_aud.lock || !g_aud.callback) return;
+    /* Keep only a small cushion queued (~140ms).  The callback is the game's own
+     * mixer plus the OPL3 music synth running under the interpreter, so every
+     * frame rendered ahead of time is real CPU taken from the renderer. */
+    if (webwine_audio_queued() >= AUDIO_TARGET_FRAMES) return;
+    want = webwine_audio_want();
+    if (want < g_aud.samples) return;
+
+    saved_esp = c->regs[ESP];
+    buf = (saved_esp - 64 - g_aud.size) & ~15u;
+    if (buf < 0x10000 || buf + g_aud.size > saved_esp) return;
+
+    memset( (void *)(uintptr_t)buf, g_aud.silence, g_aud.size );
+    args[0] = g_aud.userdata; args[1] = buf; args[2] = g_aud.size;
+    {
+        uint64_t before = g_total_insns;
+        if (!call_guest_cdecl( c, g_aud.callback, 3, args, buf )) return;
+        g_aud.cb_insns += g_total_insns - before;
+        g_aud.cb_calls++;
+    }
+
+    webwine_audio_push( (const void *)(uintptr_t)buf, g_aud.samples, g_aud.channels, (int)g_aud.fmt );
+    g_aud.frames_out += g_aud.samples;
+}
+
+static void nat_arm_audio( void )
+{
+    static const struct { uint32_t va, slot; int kind; const char *name; } t[] = {
+        { SDL_A_OPEN,      0x0082fde4u, NAT_SDL_OPEN,    "SDL_OpenAudio"        },
+        { SDL_A_OPENDEV,   0x0082fdf0u, NAT_SDL_OPENDEV, "SDL_OpenAudioDevice"  },
+        { SDL_A_PAUSE,     0x0082fdfcu, NAT_SDL_PAUSE,   "SDL_PauseAudio"       },
+        { SDL_A_PAUSEDEV,  0x0082fe00u, NAT_SDL_PAUSEDEV,"SDL_PauseAudioDevice" },
+        { SDL_A_LOCK,      0x0082fe1cu, NAT_SDL_LOCK,    "SDL_LockAudio"        },
+        { SDL_A_LOCKDEV,   0x0082fe20u, NAT_SDL_LOCK,    "SDL_LockAudioDevice"  },
+        { SDL_A_UNLOCK,    0x0082fe24u, NAT_SDL_UNLOCK,  "SDL_UnlockAudio"      },
+        { SDL_A_UNLOCKDEV, 0x0082fe28u, NAT_SDL_UNLOCK,  "SDL_UnlockAudioDevice"},
+        { SDL_A_CLOSEDEV,  0x0082fe30u, NAT_SDL_CLOSE,   "SDL_CloseAudioDevice" },
+    };
+    unsigned i, ok = 0;
+
+    for (i = 0; i < sizeof(t)/sizeof(t[0]); i++)
+    {
+        uint32_t va = t[i].va + (uint32_t)nd_slide;
+        if (!sdl_thunk_ok( va, t[i].slot + (uint32_t)nd_slide )) continue;
+        nat_register( va, t[i].kind, t[i].name );
+        ok++;
+    }
+    if (ok != sizeof(t)/sizeof(t[0]))
+        fprintf( stderr, "wasm_x86: SDL audio thunks: %u/%u matched; audio left to SDL\n",
+                 ok, (unsigned)(sizeof(t)/sizeof(t[0])) );
+    g_aud.armed = (ok == sizeof(t)/sizeof(t[0]));
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
+    switch (kind)
+    {
+    case NAT_SDL_OPEN:     return sdl_open_audio( c, 0 );
+    case NAT_SDL_OPENDEV:  return sdl_open_audio( c, 1 );
+    case NAT_SDL_PAUSE:    g_aud.paused = (int)garg( c, 0 ) != 0; gret( c, 0 ); return 1;
+    case NAT_SDL_PAUSEDEV: g_aud.paused = (int)garg( c, 1 ) != 0; gret( c, 0 ); return 1;
+    case NAT_SDL_LOCK:     g_aud.lock++; gret( c, 0 ); return 1;
+    case NAT_SDL_UNLOCK:   if (g_aud.lock) g_aud.lock--; gret( c, 0 ); return 1;
+    case NAT_SDL_CLOSE:    g_aud.open = 0; g_aud.paused = 1; gret( c, 0 ); return 1;
+    default: break;
+    }
     uint32_t esp = c->regs[ESP];
     uint32_t dst = rd32( esp + 4 ), a1 = rd32( esp + 8 ), n = rd32( esp + 12 );
     const uint32_t GUEST_END = 0x70000000u;              /* native wine lives above this */
@@ -1544,12 +1757,14 @@ static void run( struct x86cpu *c )
                               nat_register( ND_AGELOOP + (uint32_t)nd_slide, NAT_COUNT, "loop probe" );
                           else if (!getenv( "WASM_NO_AGELOOP" ))
                               nat_arm_ageloop();
+                          if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
              * list on every tick measurably slowed boot. */
             { static uint32_t nat_tries;
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
+            audio_pump( c );
             /* Cache the live frameplace pointer while it is valid, so the flip
              * handler can present the finished frame after it is cleared to 0. */
             if (g_slide_ok)
@@ -1560,7 +1775,7 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
             if (tp_on)
@@ -1572,10 +1787,13 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
-                             fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0 );
+                             fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
+                             (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
+                             (unsigned long long)(g_aud.cb_calls - tp_last_calls) );
                     tp_last_hits = g_count_hits;
+                    tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;
                     tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count;
                     if (g_prof_on && (int)((now - tp_start) / 1000.0) % 15 == 0) prof_dump();
                     if (g_histo_on && (int)((now - tp_start) / 1000.0) % 10 == 0)
@@ -2087,6 +2305,11 @@ void wasm_x86_setup_exception( EXCEPTION_RECORD *rec, CONTEXT *ctx )
 
 int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
 {
+    if (target == GUEST_RET_SENTINEL)            /* end of a call_guest_cdecl() */
+    {
+        c->running = 0;
+        return 0;
+    }
     if (target == 0xdeadbabe || target == 0)
     {
         fprintf( stderr, "wasm_x86: guest returned to top-level (%08x) — thread exit\n", target );

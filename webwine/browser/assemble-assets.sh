@@ -32,11 +32,17 @@ for f in netduke32.exe DUKE3D.GRP eduke32.dat; do cp "$GAME/$f" "$AT/game/"; don
 #   r_upscalefactor - render the classic view at 1/N and upscale.  The engine
 #     clamps the result to its 320x200 floor, so 3 lands on 320x200 here.
 #   r_maxfps/r_vsync - make sure nothing caps the frame rate.
+#   snd_mixrate/snd_numvoices - the mixer and the OPL3 music synth are guest code
+#     run under the interpreter, so they are expensive here; 22050Hz and 16 voices
+#     sound fine for this game and cost roughly half of 44.1kHz/96.
 cat > "$AT/game/autoexec.cfg" <<'CFG'
 vidmode 640 400 8 0
 r_upscalefactor 3
 r_maxfps 0
 r_vsync 0
+snd_mixrate 22050
+snd_numvoices 16
+mus_enabled 0
 CFG
 
 touch "$AT/root/lib/wine/i386-unix/ntdll.so"          # loader path-math marker

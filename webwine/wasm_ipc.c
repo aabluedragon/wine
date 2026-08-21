@@ -209,6 +209,61 @@ EM_JS(int, webwine_poll_input, (int *ev), {
   return 1;
 });
 
+/* ---- audio bridge ----
+ * The interpreter calls the game's SDL audio callback (there is no guest thread
+ * to run it on) and pushes the PCM here.  It goes into a SharedArrayBuffer ring
+ * that an AudioWorklet on the main thread drains, converted to interleaved
+ * stereo float32 on the way; a ring rather than postMessage because the audio
+ * thread must never wait on the main thread's message loop. */
+EM_JS(void, webwine_audio_open, (int freq, int channels), {
+  postMessage({ type: 'audio', freq: freq, channels: channels });
+});
+
+/* Frames the ring can still accept - the interpreter only runs the game's
+ * callback when there is room, which is what paces the whole thing. */
+EM_JS(int, webwine_audio_want, (void), {
+  var a = self.__wwAudio;
+  if (!a) return 0;
+  var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
+  return a.cap - 1 - ((w - r + a.cap) % a.cap);
+});
+
+/* Frames already queued - the pump uses this to keep only a small cushion.
+ * Rendering far ahead is wasted work: the mixer and the OPL3 synth are guest
+ * code, so every queued frame costs interpreted instructions. */
+EM_JS(int, webwine_audio_queued, (void), {
+  var a = self.__wwAudio;
+  if (!a) return 1 << 30;                 /* no ring: never ask for audio */
+  var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
+  return (w - r + a.cap) % a.cap;
+});
+
+EM_JS(void, webwine_audio_push, (const void *buf, int frames, int channels, int fmt), {
+  var a = self.__wwAudio;
+  if (!a) return;
+  var cap = a.cap, d = a.data;
+  var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
+  var free = cap - 1 - ((w - r + cap) % cap);
+  if (frames > free) frames = free;
+  var bits = fmt & 0xff, isFloat = (fmt & 0x8000) !== 0 && bits === 32;
+  for (var i = 0; i < frames; i++) {
+    var l = 0, rr = 0;
+    if (bits === 16) {
+      var o = (buf + i * channels * 2) >> 1;
+      l = HEAP16[o] / 32768; rr = channels > 1 ? HEAP16[o + 1] / 32768 : l;
+    } else if (isFloat) {
+      var o2 = (buf + i * channels * 4) >> 2;
+      l = HEAPF32[o2]; rr = channels > 1 ? HEAPF32[o2 + 1] : l;
+    } else if (bits === 8) {
+      var o3 = buf + i * channels;
+      l = (HEAPU8[o3] - 128) / 128; rr = channels > 1 ? (HEAPU8[o3 + 1] - 128) / 128 : l;
+    }
+    var p = ((w + i) % cap) * 2;
+    d[p] = l; d[p + 1] = rr;
+  }
+  Atomics.store(a.idx, 0, (w + frames) % cap);
+});
+
 static int is_magic( int fd ) { return fd >= MAGIC_BASE && fd < MAGIC_BASE + MAGIC_COUNT && chans[fd - MAGIC_BASE].used; }
 /* Exported so the client's fd-receive path (dlls/ntdll/unix/server.c) can tell a
  * real (dup-able, must-dup) fd from a magic transport channel passed by identity.

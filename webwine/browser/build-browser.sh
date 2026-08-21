@@ -35,6 +35,6 @@ emcc $LOPT @"$RSP" -o "$OUT/webwine-bw.js" \
   -sSTACK_SIZE=67108864 -sEXIT_RUNTIME=0 \
   --pre-js "$HERE/bw-pre.js" \
   --preload-file "$AT/game@/game" --preload-file "$AT/root@/root"
-cp "$HERE/worker.js" "$HERE/index.html" "$HERE/serve.py" "$OUT/"
+cp "$HERE/worker.js" "$HERE/index.html" "$HERE/serve.py" "$HERE/audio-worklet.js" "$OUT/"
 echo "done -> $OUT/webwine-bw.{js,wasm,data}  (+ worker.js, index.html)"
 echo "serve: (cd $OUT && python3 -m http.server 8799)"

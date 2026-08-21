@@ -20,6 +20,9 @@ Module['preRun'].push(function () {
      null user driver and pumps WM_* messages, which is what makes keyboard and
      mouse work at all - and it measured faster than the dummy driver too. */
   E.SDL_VIDEODRIVER = 'windows';
+  /* 'dummy' just has to let SDL_InitSubSystem(AUDIO) succeed - we intercept
+     SDL_OpenAudioDevice itself and drive the game's callback ourselves,
+     because opening a real device would need an audio thread we do not have. */
   E.SDL_AUDIODRIVER = 'dummy';
 
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }
