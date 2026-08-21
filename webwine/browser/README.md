@@ -51,9 +51,14 @@ frames on stderr.
 `PROF <addr> <count> [module!export+off]`, resolving non-exe addresses by walking
 the PE headers in guest memory.  Map exe addresses to names with the shipped
 symbols (`VA = symbol value + 0x401000`).  This is what found the memmove
-result; guessing would not have.  Current top cost is `_videoNextPage` (~37%) — a
-64-byte-stride per-frame bookkeeping walk *inside the engine*, which is why
-dropping resolution stopped scaling fps linearly.
+result; guessing would not have.  The stride is **jittered** and the sampler is
+compile-time gated (`PROFILE=1`), so production builds pay nothing.
+
+**Do not trust PROF percentages for very tight loops.**  It reported the engine's
+sprite-timer loop at 29-37% of the frame; a direct execution counter
+(`WASM_COUNT_LOOP`) measured exactly 16,650 iterations/frame — ~6% — and running
+that loop natively gained ~10% wall, not 37%.  Confirm any hot-loop claim with a
+counter before acting on it.
 
 - **THE governing constraint: `run()` is register-pressure bound.**  It was a
   **76KB single wasm function — 90% of the whole module** — far past the size
@@ -86,9 +91,9 @@ dropping resolution stopped scaling fps linearly.
   last non-zero `frameplace` pointer during drawing and present *that* buffer at
   the flip — it still holds the finished frame (the pointer is constant across a
   frame's draw).
-- **`r_upscalefactor 2`** (autoexec.cfg, preloaded) renders the classic view at
-  ½ res and upscales → ~2× fps (8→17 at the menu) for a modest sharpness cost.
-  Edit `assemble-assets.sh` / `/game/autoexec.cfg` to set 1 (full res) or 4.
+- **Resolution is set in `autoexec.cfg`** (preloaded at `/game`): `vidmode 640 400
+  8 0` + `r_upscalefactor 3` lands on the engine's 320×200 floor.  See the two
+  big levers above; edit `assemble-assets.sh` to change it.
 - **Cheaper flags.**  `cond()` used to call `get_flags()`, which materialises all
   six arithmetic flags (parity fold + per-kind switch) to consume one or two bits;
   cmp+jcc is the guest's most common pair.  Per-flag accessors (`lf_zf/sf/pf/cf/of`)
