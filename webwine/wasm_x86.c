@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -998,11 +998,140 @@ static void nat_arm_mouse( void )
     }
 }
 
+/* ---- the WHOLE 8-bpp -> 32-bpp span, not just its remainder loop -----------
+ *
+ * The conversion above turned out to be only the tail.  The compiler also
+ * emitted a 64-pixel unrolled copy of the same three lookups, and that is where
+ * 80% of the pixels actually go - the tail was doing 12800 of 64000 a frame.
+ *
+ * It hid for a simple reason: a fresh in-level profile put 34% of everything in
+ * _videoNextPage but spread it FLAT over a 1255-byte range, ~0.14% per address,
+ * because straight-line unrolled code has no hot address to point at.  A top-N
+ * address profile will never show that; only summing per function does.
+ *
+ * Rather than intercept the unrolled block alone we take the whole span -
+ * guard, unrolled block, fixup arithmetic and tail loop - and rejoin the guest
+ * after all of it, because the two loops together are just
+ *     while (dst < end) { *dst++ = pal[lut[*src++]]; }
+ * with the block doing 64 pixels a pass and the tail the remainder.  The pixel
+ * counts agree exactly (64n + ceil(rest/4) == ceil((end-start)/4)), so one
+ * merged loop reproduces both.
+ *
+ * Verification: the guard and the fixup/tail are compared byte-for-byte, and
+ * each of the 64 unrolled groups is REBUILT from its index and compared - which
+ * also pins the source and destination displacement progressions the merged
+ * loop relies on, rather than trusting a reading of the disassembly.
+ */
+#define ND_SURFSPAN   0x519a41u
+#define ND_SPAN_GRP   0x2au     /* the 64 unrolled groups   */
+#define ND_SPAN_EPI   0x511u    /* fixup arithmetic + tail  */
+#define ND_SPAN_EXIT  0x56du    /* where the two paths join */
+#define ND_SPAN_PAL   (ND_SPAN_EPI + 69u)
+
+static const uint8_t nd_span_pro[42] = {
+    0x8d,0x83,0x00,0xff,0xff,0xff,0x89,0x85,0x2c,0xff,0xff,0xff,
+    0x39,0xc1,0x0f,0x83,0x2c,0x05,0x00,0x00,0x89,0x9d,0x28,0xff,
+    0xff,0xff,0x89,0xc8,0x89,0xf2,0x89,0x8d,0x24,0xff,0xff,0xff,
+    0x8b,0x8d,0x2c,0xff,0xff,0xff,
+};
+static const uint8_t nd_span_epi[92] = {   /* +69..72 (the palette) is a wildcard */
+    0x39,0xc8,0x0f,0x82,0x11,0xfb,0xff,0xff,0x8b,0x8d,0x24,0xff,
+    0xff,0xff,0x8b,0x9d,0x28,0xff,0xff,0xff,0xb8,0xff,0xfe,0xff,
+    0xff,0x29,0xc8,0x01,0xd8,0xc1,0xe8,0x08,0x83,0xc0,0x01,0x89,
+    0xc2,0xc1,0xe0,0x08,0xc1,0xe2,0x07,0x01,0xc1,0x01,0xd6,0x39,
+    0xd9,0x73,0x29,0x89,0xc8,0x0f,0xb7,0x16,0x83,0xc0,0x04,0x83,
+    0xc6,0x02,0x0f,0xb6,0x14,0x17,0x8b,0x14,0x95,0x00,0x00,0x00,
+    0x00,0x89,0x50,0xfc,0x39,0xd8,0x72,0xe5,0x8d,0x43,0xff,0x29,
+    0xc8,0xc1,0xe8,0x02,0x8d,0x4c,0x81,0x04,
+};
+
+static int nd_span_skeleton_ok( uint32_t va, uint32_t *palout )
+{
+    uint32_t pal, o;
+    unsigned i, k;
+    static const uint8_t g0[] = { 0x0f,0xb7,0x1a, 0x05,0x00,0x01,0x00,0x00, 0x83,0xea,0x80 };
+
+    for (i = 0; i < sizeof(nd_span_pro); i++)
+        if (rd8( va + i ) != nd_span_pro[i]) return 0;
+    for (i = 0; i < sizeof(nd_span_epi); i++)
+        if ((i < 69 || i > 72) && rd8( va + ND_SPAN_EPI + i ) != nd_span_epi[i]) return 0;
+    pal = rd32( va + ND_SPAN_PAL );
+
+    o = va + ND_SPAN_GRP;
+    for (k = 0; k < sizeof(g0); k++) if (rd8( o + k ) != g0[k]) return 0;
+    o += sizeof(g0);
+    for (i = 0; i < 64; i++)
+    {
+        int32_t dd = -0x100 + 4 * (int32_t)i;
+        if (i)      /* group 0 reads (%edx); every later one uses a disp8 */
+        {
+            if (rd8( o ) != 0x0f || rd8( o+1 ) != 0xb7 || rd8( o+2 ) != 0x5a ||
+                rd8( o+3 ) != (uint8_t)(2 * i - 128)) return 0;
+            o += 4;
+        }
+        if (rd8( o ) != 0x0f || rd8( o+1 ) != 0xb6 ||
+            rd8( o+2 ) != 0x1c || rd8( o+3 ) != 0x1f) return 0;       /* (%edi,%ebx,1) */
+        o += 4;
+        if (rd8( o ) != 0x8b || rd8( o+1 ) != 0x1c ||
+            rd8( o+2 ) != 0x9d || rd32( o+3 ) != pal) return 0;       /* PAL(,%ebx,4)  */
+        o += 7;
+        if (dd >= -128)
+        {
+            if (rd8( o ) != 0x89 || rd8( o+1 ) != 0x58 || rd8( o+2 ) != (uint8_t)dd) return 0;
+            o += 3;
+        }
+        else
+        {
+            if (rd8( o ) != 0x89 || rd8( o+1 ) != 0x98 || rd32( o+2 ) != (uint32_t)dd) return 0;
+            o += 6;
+        }
+    }
+    if (o != va + ND_SPAN_EPI) return 0;      /* the groups must exactly fill the gap */
+    *palout = pal;
+    return 1;
+}
+
+static int nat_surfspan( struct x86cpu *c )
+{
+    uint32_t b   = ND_SURFSPAN + (uint32_t)nd_slide;
+    uint32_t pal = rd32( b + ND_SPAN_PAL );
+    uint32_t dst = c->regs[ECX], end = c->regs[EBX];
+    uint32_t src = c->regs[ESI], lut = c->regs[EDI], ebp = c->regs[EBP];
+    unsigned n = 0;
+
+    /* the guest spills these before it branches and something later in this
+     * 13KB function may read them, so write exactly what it would have */
+    wr32( ebp - 0xd4, end - 0x100 );
+    if (dst < end - 0x100) { wr32( ebp - 0xd8, end ); wr32( ebp - 0xdc, dst ); }
+
+    while (dst < end)
+    {
+        wr32( dst, rd32( pal + 4u * rd8( lut + rd16( src ) ) ) );
+        dst += 4; src += 2; n++;
+    }
+    g_sb_calls++; g_sb_iters += n;
+
+    /* At the join %eax and %edx are dead (both reloaded before any use), %ebx
+     * still holds `end`, and %esi is immediately overwritten with %ecx - so only
+     * %ecx has to be right.  %esi is kept honest anyway. */
+    c->regs[ECX] = dst; c->regs[ESI] = src;
+    c->eip = b + ND_SPAN_EXIT;
+    return 1;
+}
+
+static void nat_arm_surfspan( void )
+{
+    uint32_t va = ND_SURFSPAN + (uint32_t)nd_slide, pal = 0;
+    if (nd_span_skeleton_ok( va, &pal )) nat_register( va, NAT_SURFSPAN, "surface span" );
+    else fprintf( stderr, "wasm_x86: surface span skeleton differs at %08x - left interpreted\n", va );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
+    if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
     switch (kind)
     {
@@ -1036,7 +1165,10 @@ static int nat_call( struct x86cpu *c, int kind )
 
 static void prof_dump( void )
 {
-    for (int top = 0; top < 60; top++)
+    /* dump every occupied slot, not a top-N: once the obvious hot loops are
+     * gone the profile is flat, and a top-N list of a flat profile invites the
+     * exact error of computing percentages against the listed subset */
+    for (int top = 0; top < PROF_SLOTS; top++)
     {
         uint32_t best = 0, bi = 0;
         for (int i = 0; i < PROF_SLOTS; i++)
@@ -2235,6 +2367,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
+                          if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
