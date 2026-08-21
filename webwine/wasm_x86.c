@@ -1980,6 +1980,30 @@ static void run( struct x86cpu *c )
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
              * list on every tick measurably slowed boot. */
+            /* Audio starvation escape hatch.
+             *
+             * Audio is normally topped up at the frame flip, which is a clean
+             * guest function entry (see the flip handler).  But the game can
+             * BLOCK waiting for the mixer to drain before it ever reaches the
+             * next flip - SDL's mixer waits on its own mutex - and with a single
+             * guest thread that is a deadlock: no flip, so no audio; no audio, so
+             * no progress; and it spins in SDL_LockMutex_srw forever.  That is
+             * exactly what hung "new game" after the skill screen.
+             *
+             * So if flips have stopped for far longer than a frame, pump from
+             * here regardless.  This runs only when the game is already stuck, so
+             * it does not put the mixer back on the arbitrary-boundary path in
+             * normal play. */
+            {
+                static uint64_t last_flip;
+                static int stall;
+                if (g_flip_count != last_flip) { last_flip = g_flip_count; stall = 0; }
+                else if (++stall > 60)          /* ~4M instructions without a frame */
+                {
+                    stall = 0;
+                    audio_pump( c );
+                }
+            }
             { static uint32_t nat_tries;
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
             /* Cache the live frameplace pointer while it is valid, so the flip
