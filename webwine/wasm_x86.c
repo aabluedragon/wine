@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1263,11 +1263,141 @@ static void nat_arm_libdivide( void )
     nat_register( va, NAT_LIBDIV, "libdivide gen cache" );
 }
 
+/* ---- mhlineskipmodify: the masked HORIZONTAL mapper ------------------------
+ *
+ * The floor/ceiling counterpart of mvlineasm4, and the last self-modifying
+ * mapper of any size left.  A direct counter (not the sampler, which claimed
+ * 7.2%) puts it at 1395 loop iterations a frame x 22 instructions = 4.5% of the
+ * frame.
+ *
+ * Two pixels an iteration, from two texture coordinates: %ebp and %esi.  Each
+ * pixel's texel index is built as ((coord >> shift) << n) | (esi >> (32 - n)) -
+ * a `shr` immediately followed by `shld`, which is how Build glues the two
+ * coordinates' high bits into one texture offset.  Every shift and base address
+ * is patched per span, so all fourteen are read from the code on entry.
+ *
+ * 0xff is transparent, giving four cases per pair (both, neither, either), each
+ * with its OWN patched shade-table address - mmach2d/2da/2db/6d are normally the
+ * same table but are written separately, so they are read separately.
+ *
+ * Entering at mbeghline covers the odd-pixel prologue too, since that path ends
+ * by jumping here.  The exit is easy: mendhline pops ebx/ecx/edx/esi/edi/ebp
+ * straight back off the stack, so only %eax survives the function and only it
+ * has to be right.
+ */
+#define ND_MHLINE      0x632a90u    /* mpreprebeghline: the template starts here */
+#define ND_MHLINE_LEN  0x90u
+#define ND_MHL_ENTRY   0x19u        /* mbeghline, where we intercept            */
+#define ND_MHL_EXIT    0x90u        /* mendhline                                */
+
+static const struct { uint16_t off; uint8_t len; } nd_mhline_imm[] = {
+    { 0x04, 4 }, { 0x1b, 4 }, { 0x21, 1 }, { 0x25, 1 }, { 0x28, 4 }, { 0x2e, 4 },
+    { 0x34, 4 }, { 0x3a, 1 }, { 0x3e, 1 }, { 0x41, 4 }, { 0x47, 4 }, { 0x59, 4 },
+    { 0x61, 4 }, { 0x7e, 4 },
+};
+static const uint8_t nd_mhline_code[ND_MHLINE_LEN] = {
+    0x88,0xc8,0x8a,0x80,0x00,0x00,0x00,0x00,0x88,0x07,0x83,0xc7,
+    0x02,0x81,0xe9,0x00,0x00,0x02,0x00,0x0f,0x82,0x77,0x00,0x00,
+    0x00,0x8d,0x9d,0x00,0x00,0x00,0x00,0xc1,0xed,0x00,0x0f,0xa4,
+    0xf5,0x00,0x81,0xc6,0x00,0x00,0x00,0x00,0x8a,0x8d,0x00,0x00,
+    0x00,0x00,0x8d,0xab,0x00,0x00,0x00,0x00,0xc1,0xeb,0x00,0x0f,
+    0xa4,0xf3,0x00,0x81,0xc6,0x00,0x00,0x00,0x00,0x8a,0xab,0x00,
+    0x00,0x00,0x00,0x80,0xf9,0xff,0x74,0x25,0x80,0xfd,0xff,0x74,
+    0xab,0x88,0xc8,0x8a,0x98,0x00,0x00,0x00,0x00,0x88,0xe8,0x8a,
+    0xb8,0x00,0x00,0x00,0x00,0x66,0x89,0x1f,0x83,0xc7,0x02,0x81,
+    0xe9,0x00,0x00,0x02,0x00,0x73,0xa6,0xeb,0x1b,0x80,0xfd,0xff,
+    0x74,0x90,0x88,0xe8,0x8a,0x80,0x00,0x00,0x00,0x00,0x88,0x47,
+    0x01,0x83,0xc7,0x02,0x81,0xe9,0x00,0x00,0x02,0x00,0x73,0x89,
+};
+
+static int nd_mhline_skeleton_ok( uint32_t va )
+{
+    uint8_t wild[ND_MHLINE_LEN];
+    unsigned i, k;
+
+    memset( wild, 0, sizeof(wild) );
+    for (i = 0; i < sizeof(nd_mhline_imm)/sizeof(nd_mhline_imm[0]); i++)
+        for (k = 0; k < nd_mhline_imm[i].len; k++) wild[nd_mhline_imm[i].off + k] = 1;
+    for (i = 0; i < ND_MHLINE_LEN; i++)
+        if (!wild[i] && rd8( va + i ) != nd_mhline_code[i]) return 0;
+    return 1;
+}
+
+static uint64_t g_mh_calls, g_mh_iters;
+
+static int nat_mhlineskip( struct x86cpu *c )
+{
+    uint32_t t = ND_MHLINE + (uint32_t)nd_slide;
+    uint32_t d2   = rd32( t + 0x04 ), mbeg = rd32( t + 0x1b );
+    uint32_t s3   = rd8 ( t + 0x21 ) & 31, i4 = rd8( t + 0x25 ) & 31;
+    uint32_t a4   = rd32( t + 0x28 ), d1   = rd32( t + 0x2e );
+    uint32_t m7   = rd32( t + 0x34 );
+    uint32_t s5   = rd8 ( t + 0x3a ) & 31, i6 = rd8( t + 0x3e ) & 31;
+    uint32_t a8   = rd32( t + 0x41 ), d5   = rd32( t + 0x47 );
+    uint32_t d2a  = rd32( t + 0x59 ), d2b  = rd32( t + 0x61 ), d6 = rd32( t + 0x7e );
+    uint32_t eax = c->regs[EAX], ebx = c->regs[EBX], ecx = c->regs[ECX];
+    uint32_t esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
+    unsigned n = 0;
+
+    for (;;)
+    {
+        uint32_t cl, ch;
+
+        ebx = ebp + mbeg;
+        ebp >>= s3;  if (i4) ebp = (ebp << i4) | (esi >> (32 - i4));
+        esi += a4;
+        cl = rd8( ebp + d1 );
+        ebp = ebx + m7;
+        ebx >>= s5;  if (i6) ebx = (ebx << i6) | (esi >> (32 - i6));
+        esi += a8;
+        ch = rd8( ebx + d5 );
+
+        if (cl != 0xff && ch != 0xff)
+        {
+            eax = ch;
+            ebx = (ebx & 0xffff0000u) | rd8( cl + d2a ) | ((uint32_t)rd8( ch + d2b ) << 8);
+            wr16( edi, (uint16_t)ebx );
+        }
+        else if (cl == 0xff && ch != 0xff)      /* mskip1 -> mmach6d */
+        {
+            eax = rd8( ch + d6 );
+            wr8( edi + 1, (uint8_t)eax );
+        }
+        else if (cl != 0xff)                    /* ch transparent -> mmach2d */
+        {
+            eax = rd8( cl + d2 );
+            wr8( edi, (uint8_t)eax );
+        }
+        /* else: both transparent, write nothing */
+
+        edi += 2;
+        n++;
+        if (ecx < 0x20000u) { ecx -= 0x20000u; break; }   /* the borrow that ends it */
+        ecx -= 0x20000u;
+    }
+    g_mh_calls++; g_mh_iters += n;
+
+    /* mendhline pops ebx/ecx/edx/esi/edi/ebp, so only %eax outlives the call -
+     * the rest are written back only to keep the visible state coherent. */
+    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = ecx;
+    c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
+    c->eip = t + ND_MHL_EXIT;
+    return 1;
+}
+
+static void nat_arm_mhline( void )
+{
+    uint32_t t = ND_MHLINE + (uint32_t)nd_slide;
+    if (nd_mhline_skeleton_ok( t )) nat_register( t + ND_MHL_ENTRY, NAT_MHLINE, "mhlineskipmodify" );
+    else fprintf( stderr, "wasm_x86: mhlineskipmodify skeleton differs at %08x - left interpreted\n", t );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
+    if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
@@ -2509,6 +2639,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
+                          if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
@@ -2555,7 +2686,7 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0, tp_last_mhc = 0, tp_last_mhi = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
             if (tp_on)
@@ -2567,7 +2698,7 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f mh=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
@@ -2576,6 +2707,8 @@ static void run( struct x86cpu *c )
                              fps > 0 ? (double)(g_vl_iters - tp_last_vli) / fps : 0.0,
                              fps > 0 ? (double)(g_mv_calls - tp_last_mvc) / fps : 0.0,
                              fps > 0 ? (double)(g_mv_iters - tp_last_mvi) / fps : 0.0,
+                             fps > 0 ? (double)(g_mh_calls - tp_last_mhc) / fps : 0.0,
+                             fps > 0 ? (double)(g_mh_iters - tp_last_mhi) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_calls - tp_last_sbc) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_iters - tp_last_sbi) / fps : 0.0,
                              (unsigned long long)g_ld_hits, (unsigned long long)g_ld_calls,
@@ -2583,6 +2716,7 @@ static void run( struct x86cpu *c )
                              fps > 0 ? (double)(g_total_insns - tp_last_insns) / fps / 1000.0 : 0.0 );
                     tp_last_sbc = g_sb_calls; tp_last_sbi = g_sb_iters;
                     tp_last_mvc = g_mv_calls; tp_last_mvi = g_mv_iters;
+                    tp_last_mhc = g_mh_calls; tp_last_mhi = g_mh_iters;
                     tp_last_vlc = g_vl_calls; tp_last_vli = g_vl_iters;
                     tp_last_hits = g_count_hits;
                     tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;
