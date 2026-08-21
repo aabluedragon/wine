@@ -207,7 +207,8 @@ static const char *prof_module( uint32_t va )
  * so it must not get more expensive than that). */
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
-       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT };
+       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -744,6 +745,71 @@ static void nat_arm_surfblit( void )
     nat_register( va, NAT_SURFBLIT, "surface blit" );
 }
 
+/* ---- mouse capture (pointer lock) ------------------------------------------
+ *
+ * The game never polls mouse state (SDL_GetRelativeMouseState has zero call
+ * sites); it reads SDL_MOUSEMOTION events and uses their xrel/yrel, after asking
+ * for SDL_SetRelativeMouseMode.  Real SDL answers that by switching its Windows
+ * backend to RAW INPUT (WM_INPUT), which we do not deliver - so relative mouse
+ * would produce nothing no matter what WM_MOUSEMOVEs we post.
+ *
+ * So: accept SetRelativeMouseMode (the game hides its cursor and starts using
+ * xrel/yrel), and synthesise the motion events ourselves from the pointer-lock
+ * deltas the page collects.  SDL_PollEvent is intercepted only while a delta is
+ * pending; otherwise it declines and the real SDL_PollEvent runs, so the normal
+ * event stream (keys, buttons, quit) is untouched.
+ *
+ * Layout below is from the exe's own DWARF: SDL_MouseMotionEvent is 36 bytes,
+ * type@0 timestamp@4 windowID@8 which@12 state@16 x@20 y@24 xrel@28 yrel@32,
+ * and SDL_MOUSEMOTION == 1024. */
+#define SDL_A_POLL      0x6a8420u
+#define SDL_A_RELMOUSE  0x6a8c80u
+#define SDL_EV_MOUSEMOTION 1024u
+
+/* Filled by the win32u ring drain (dlls/win32u/message.c) from page events. */
+int g_mouse_dx, g_mouse_dy;      /* accumulated pointer-lock motion */
+int g_mouse_buttons;             /* SDL button mask */
+int g_mouse_x = 160, g_mouse_y = 100;
+
+static int sdl_poll_event( struct x86cpu *c )
+{
+    uint32_t ev = garg( c, 0 );
+    int dx = g_mouse_dx, dy = g_mouse_dy;
+
+    if ((!dx && !dy) || !ev) return 0;      /* nothing pending: run the real one */
+    g_mouse_dx = 0; g_mouse_dy = 0;
+    g_mouse_x += dx; g_mouse_y += dy;
+
+    wr32( ev + 0,  SDL_EV_MOUSEMOTION );
+    wr32( ev + 4,  0 );                      /* timestamp: unused by the game */
+    wr32( ev + 8,  1 );                      /* windowID: its only window */
+    wr32( ev + 12, 0 );                      /* which: mouse index */
+    wr32( ev + 16, (uint32_t)g_mouse_buttons );
+    wr32( ev + 20, (uint32_t)g_mouse_x );
+    wr32( ev + 24, (uint32_t)g_mouse_y );
+    wr32( ev + 28, (uint32_t)dx );
+    wr32( ev + 32, (uint32_t)dy );
+    gret( c, 1 );                            /* an event is available */
+    return 1;
+}
+
+static void nat_arm_mouse( void )
+{
+    static const struct { uint32_t va, slot; int kind; const char *name; } t[] = {
+        { SDL_A_POLL,     0x0082fe94u, NAT_SDL_POLL,     "SDL_PollEvent"           },
+        { SDL_A_RELMOUSE, 0x00830090u, NAT_SDL_RELMOUSE, "SDL_SetRelativeMouseMode" },
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(t)/sizeof(t[0]); i++)
+    {
+        uint32_t va = t[i].va + (uint32_t)nd_slide;
+        if (sdl_thunk_ok( va, t[i].slot + (uint32_t)nd_slide ))
+            nat_register( va, t[i].kind, t[i].name );
+        else
+            fprintf( stderr, "wasm_x86: %s thunk differs - mouse capture off\n", t[i].name );
+    }
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
@@ -758,6 +824,9 @@ static int nat_call( struct x86cpu *c, int kind )
     case NAT_SDL_LOCK:     g_aud.lock++; gret( c, 0 ); return 1;
     case NAT_SDL_UNLOCK:   if (g_aud.lock) g_aud.lock--; gret( c, 0 ); return 1;
     case NAT_SDL_CLOSE:    g_aud.open = 0; g_aud.paused = 1; gret( c, 0 ); return 1;
+    case NAT_SDL_POLL:     return sdl_poll_event( c );
+    /* Say yes to relative mode: the game then uses xrel/yrel, which we supply. */
+    case NAT_SDL_RELMOUSE: gret( c, 0 ); return 1;
     default: break;
     }
     uint32_t esp = c->regs[ESP];
@@ -1976,6 +2045,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
+                          if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader

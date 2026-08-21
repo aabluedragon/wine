@@ -6,7 +6,9 @@
 <style>
   body { margin: 0; background: #111; color: #ccc; font: 13px monospace; }
   #wrap { display: flex; gap: 12px; padding: 12px; }
-  canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; width: 1024px; height: 768px; max-width: 100%; outline: none; }
+  /* Display size is set from the frame's own dimensions (see fitCanvas) so the
+     picture is never stretched - the game renders 320x200 (8:5), not 4:3. */
+  canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; outline: none; display: block; }
   #side { width: 460px; }
   #status { color: #6f6; white-space: pre; margin-bottom: 8px; }
   #note { color: #888; margin-bottom: 8px; }
@@ -17,12 +19,12 @@
 <body>
 <div id="wrap">
   <div>
-    <canvas id="screen" width="1024" height="768" tabindex="0"></canvas>
+    <canvas id="screen" width="640" height="400" style="width:1024px;height:640px" tabindex="0"></canvas>
   </div>
   <div id="side">
     <div id="status">booting…</div>
     <div id="input">input: initialising…</div>
-    <div id="note">netduke32 via native-wasm Wine. 320×200 in a 640×400 window. Sound effects on; music (OPL3) is off because synthesising it under the interpreter costs ~3× the whole CPU budget — set mus_enabled 1 in /game/autoexec.cfg to hear it at single-digit fps.</div>
+    <div id="note">netduke32 via native-wasm Wine. 320×200 in a 640×400 window. <b>Click the canvas to capture the mouse</b> for mouselook (Esc releases). Sound effects on; music (OPL3) is off — synthesising it under the interpreter costs ~3× the whole CPU budget (mus_enabled 1 in /game/autoexec.cfg to try it).</div>
     <div id="log"></div>
   </div>
 </div>
@@ -34,6 +36,17 @@ const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
 let lastW = 0, lastH = 0;
 let audioCtx = null, audioState = 'off';
+let locked = false;          // pointer lock (mouse capture) state
+
+// Scale the canvas to fit a box WITHOUT distorting it: one integer-ish factor
+// applied to both axes, from the frame's real dimensions.
+const MAX_W = 1024, MAX_H = 768;
+function fitCanvas(w, h) {
+  if (!w || !h) return;
+  const scale = Math.min(MAX_W / w, MAX_H / h);
+  cv.style.width  = Math.round(w * scale) + 'px';
+  cv.style.height = Math.round(h * scale) + 'px';
+}
 
 let frames = 0, lastFrames = 0, lastT = performance.now(), startT = lastT, firstFrameT = 0;
 function tick() {
@@ -43,7 +56,7 @@ function tick() {
     const fps = (frames - lastFrames) / dt;
     lastFrames = frames; lastT = now;
     const ttf = firstFrameT ? ((firstFrameT - startT) / 1000).toFixed(1) + 's' : '—';
-    const res = lastW ? `${lastW}×${lastH}` : '—';
+    const res = lastW ? `${lastW}×${lastH} (${(lastW/lastH).toFixed(2)}:1)` : '—';
     statusEl.textContent = `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
   }
   requestAnimationFrame(tick);
@@ -122,7 +135,7 @@ const KEYMAP = {
 let keysSent = 0, mouseSent = 0;
 function noteInput() {
   inputEl.textContent = ring
-    ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}. Click the canvas, then arrows/Enter/Esc, WASD, Ctrl+Space.`
+    ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}   |   mouse: ${locked ? 'CAPTURED (Esc to release)' : 'click canvas to capture'}`
     : 'input: DISABLED — no SharedArrayBuffer (serve with COOP/COEP headers, e.g. serve.py)';
 }
 noteInput();
@@ -147,7 +160,22 @@ function guestXY(e) {
   const y = Math.max(0, Math.min(lastH - 1, Math.round((e.clientY - r.top)  / r.height * (lastH || 200))));
   return [x, y];
 }
-cv.addEventListener('mousemove', (e) => { const [x,y] = guestXY(e); push(3, x, y, 0); mouseSent++; });
+// Mouse capture: clicking the canvas takes pointer lock, which is what makes
+// mouselook possible - locked, the browser reports unbounded movementX/movementY
+// instead of a cursor position pinned inside the window. Esc releases it.
+document.addEventListener('pointerlockchange', () => {
+  locked = (document.pointerLockElement === cv);
+});
+cv.addEventListener('click', () => { if (!locked && cv.requestPointerLock) cv.requestPointerLock(); });
+
+cv.addEventListener('mousemove', (e) => {
+  if (locked) {
+    // relative motion -> synthetic SDL_MOUSEMOTION (see wasm_x86.c sdl_poll_event)
+    if (e.movementX || e.movementY) { push(6, e.movementX | 0, e.movementY | 0, 0); mouseSent++; }
+  } else {
+    const [x,y] = guestXY(e); push(3, x, y, 0); mouseSent++;
+  }
+});
 cv.addEventListener('mousedown', (e) => { const [x,y] = guestXY(e); push(4, e.button, x, y); mouseSent++; cv.focus(); e.preventDefault(); });
 cv.addEventListener('mouseup',   (e) => { const [x,y] = guestXY(e); push(5, e.button, x, y); mouseSent++; e.preventDefault(); });
 cv.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -186,7 +214,7 @@ worker.onmessage = (e) => {
   const m = e.data;
   if (m.type === 'frame') {
     if (!firstFrameT) firstFrameT = performance.now();
-    if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; }
+    if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; fitCanvas(m.w, m.h); }
     lastW = m.w; lastH = m.h;
     ctx.putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
     frames++;
