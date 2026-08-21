@@ -413,6 +413,7 @@ static int nat_ageloop( struct x86cpu *c )
 #define SDL_A_LOCKDEV     0x6a8250u
 #define SDL_A_UNLOCK      0x6a8260u
 #define SDL_A_UNLOCKDEV   0x6a8270u
+#define SDL_A_CLOSE       0x6a8280u   /* the one this game actually calls */
 #define SDL_A_CLOSEDEV    0x6a8290u
 
 /* every one of these is a 6-byte dynapi thunk: ff 25 <slot32> */
@@ -535,6 +536,7 @@ static void nat_arm_audio( void )
         { SDL_A_LOCKDEV,   0x0082fe20u, NAT_SDL_LOCK,    "SDL_LockAudioDevice"  },
         { SDL_A_UNLOCK,    0x0082fe24u, NAT_SDL_UNLOCK,  "SDL_UnlockAudio"      },
         { SDL_A_UNLOCKDEV, 0x0082fe28u, NAT_SDL_UNLOCK,  "SDL_UnlockAudioDevice"},
+        { SDL_A_CLOSE,     0x0082fe2cu, NAT_SDL_CLOSE,   "SDL_CloseAudio"       },
         { SDL_A_CLOSEDEV,  0x0082fe30u, NAT_SDL_CLOSE,   "SDL_CloseAudioDevice" },
     };
     unsigned i, ok = 0;

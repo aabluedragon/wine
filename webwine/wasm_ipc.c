@@ -245,18 +245,26 @@ EM_JS(void, webwine_audio_push, (const void *buf, int frames, int channels, int 
   var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
   var free = cap - 1 - ((w - r + cap) % cap);
   if (frames > free) frames = free;
-  var bits = fmt & 0xff, isFloat = (fmt & 0x8000) !== 0 && bits === 32;
+  /* SDL_AudioFormat: bits 0-7 size, bit 8 float, bit 12 big-endian, bit 15 signed.
+   * Float is bit 8 - NOT "signed and 32-bit", which would misread AUDIO_S32LSB
+   * (0x8020) as float. */
+  var bits = fmt & 0xff, isFloat = (fmt & 0x0100) !== 0, isSigned = (fmt & 0x8000) !== 0;
   for (var i = 0; i < frames; i++) {
     var l = 0, rr = 0;
-    if (bits === 16) {
-      var o = (buf + i * channels * 2) >> 1;
-      l = HEAP16[o] / 32768; rr = channels > 1 ? HEAP16[o + 1] / 32768 : l;
-    } else if (isFloat) {
+    if (isFloat) {
       var o2 = (buf + i * channels * 4) >> 2;
       l = HEAPF32[o2]; rr = channels > 1 ? HEAPF32[o2 + 1] : l;
+    } else if (bits === 16) {
+      var o = (buf + i * channels * 2) >> 1;
+      if (isSigned) { l = HEAP16[o] / 32768; rr = channels > 1 ? HEAP16[o + 1] / 32768 : l; }
+      else          { l = (HEAPU16[o] - 32768) / 32768; rr = channels > 1 ? (HEAPU16[o + 1] - 32768) / 32768 : l; }
+    } else if (bits === 32) {
+      var o4 = (buf + i * channels * 4) >> 2;
+      l = HEAP32[o4] / 2147483648; rr = channels > 1 ? HEAP32[o4 + 1] / 2147483648 : l;
     } else if (bits === 8) {
       var o3 = buf + i * channels;
-      l = (HEAPU8[o3] - 128) / 128; rr = channels > 1 ? (HEAPU8[o3 + 1] - 128) / 128 : l;
+      if (isSigned) { l = HEAP8[o3] / 128; rr = channels > 1 ? HEAP8[o3 + 1] / 128 : l; }
+      else          { l = (HEAPU8[o3] - 128) / 128; rr = channels > 1 ? (HEAPU8[o3 + 1] - 128) / 128 : l; }
     }
     var p = ((w + i) % cap) * 2;
     d[p] = l; d[p + 1] = rr;
