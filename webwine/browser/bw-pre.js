@@ -16,7 +16,7 @@ Module['preRun'].push(function () {
   E.WINELOADERNOEXEC = '1';
   E.WINE_NO_SERVER_SPAWN = '1';
   E.WINE_AUTO_ENTER = '1';
-  E.SDL_VIDEODRIVER = 'dummy';
+  E.SDL_VIDEODRIVER = 'windows';   /* EXPERIMENT: real Win32 window -> WM_* input */
   E.SDL_AUDIODRIVER = 'dummy';
 
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }

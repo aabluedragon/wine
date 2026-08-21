@@ -3561,6 +3561,101 @@ BOOL WINAPI NtUserWaitMessage(void)
     return NtUserMsgWaitForMultipleObjectsEx( 0, NULL, INFINITE, QS_ALLINPUT, 0 ) != WAIT_FAILED;
 }
 
+#ifdef __wasm__
+/* ---- browser input ----
+ *
+ * In the browser the whole session runs inside the interpreter loop on the
+ * worker thread, which therefore never returns to its event loop and can never
+ * service postMessage.  The page instead writes key/mouse events into a
+ * SharedArrayBuffer ring (see webwine/wasm_ipc.c webwine_poll_input and
+ * webwine/browser/index.html) and we drain it here: PeekMessage is where SDL
+ * polls for messages, so this runs on the right thread, in the right context,
+ * and at exactly the rate the game asks for input.
+ *
+ * Posting the WM_KEY and WM_MOUSE messages is enough because the guest reads input through
+ * SDL, whose window procedure turns these into SDL events and maintains its own
+ * key state (this is the same mechanism the WINE_AUTO_ENTER dialog hack uses).
+ */
+extern int webwine_poll_input( int *ev ) __attribute__((weak));
+
+/* WM_KEY* lParam: repeat(0-15) scancode(16-23) extended(24) prev(30) transition(31) */
+static LPARAM wasm_key_lparam( int scan, int ext, int up )
+{
+    LPARAM lp = 1 | ((LPARAM)(scan & 0xff) << 16);
+    if (ext) lp |= 0x01000000;
+    if (up)  lp |= 0xc0000000;
+    return lp;
+}
+
+/* Nothing ever becomes the foreground window under the null user driver, so
+ * fall back to this process's first visible top-level window - that is the one
+ * SDL created - and make it foreground so focus-dependent paths behave normally
+ * from then on. */
+static HWND wasm_input_target(void)
+{
+    static HWND cached;
+    HWND target = NtUserGetForegroundWindow();
+    HWND *list;
+
+    if (!target) target = get_active_window();
+    if (target) return target;
+    if (cached && is_window( cached )) return cached;
+
+    cached = 0;
+    if ((list = list_window_children( 0 )))
+    {
+        UINT i;
+        for (i = 0; list[i]; i++)
+            if (is_window_visible( list[i] )) { cached = list[i]; break; }
+        if (!cached) cached = list[0];
+        free( list );
+    }
+    if (cached)
+    {
+        NtUserSetForegroundWindow( cached );
+        fprintf( stderr, "wasm_input: input target window %p\n", cached );
+    }
+    return cached;
+}
+
+static void wasm_drain_browser_input(void)
+{
+    int ev[4];
+
+    if (!webwine_poll_input) return;
+    while (webwine_poll_input( ev ))
+    {
+        HWND target = wasm_input_target();
+        if (!target) continue;
+        switch (ev[0])
+        {
+        case 1:  /* key down: vk, scancode, extended */
+            NtUserPostMessage( target, WM_KEYDOWN, ev[1], wasm_key_lparam( ev[2], ev[3], 0 ));
+            break;
+        case 2:  /* key up */
+            NtUserPostMessage( target, WM_KEYUP, ev[1], wasm_key_lparam( ev[2], ev[3], 1 ));
+            break;
+        case 3:  /* mouse move: x, y (client coords) */
+            NtUserPostMessage( target, WM_MOUSEMOVE, 0,
+                               (ev[1] & 0xffff) | ((LPARAM)(ev[2] & 0xffff) << 16) );
+            break;
+        case 4:  /* button down: button, x, y */
+        case 5:  /* button up */
+        {
+            UINT down = (ev[0] == 4);
+            UINT msg = ev[1] == 2 ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP)
+                     : ev[1] == 1 ? (down ? WM_MBUTTONDOWN : WM_MBUTTONUP)
+                                  : (down ? WM_LBUTTONDOWN : WM_LBUTTONUP);
+            NtUserPostMessage( target, msg, 0,
+                               (ev[2] & 0xffff) | ((LPARAM)(ev[3] & 0xffff) << 16) );
+            break;
+        }
+        default: break;
+        }
+    }
+}
+#endif  /* __wasm__ */
+
 /***********************************************************************
  *           NtUserPeekMessage  (win32u.@)
  */
@@ -3571,6 +3666,9 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
     int ret;
 
     user_check_not_lock();
+#ifdef __wasm__
+    wasm_drain_browser_input();
+#endif
     check_for_driver_events();
 
     if ((ret = peek_message( &msg, &filter )) <= 0)

@@ -183,6 +183,32 @@ EM_JS(void, webwine_present, (const void *rgba, int w, int h), {
 void webwine_present( const void *rgb, int w, int h ) { (void)rgb; (void)w; (void)h; }
 #endif
 
+/* ---- browser input ring ----
+ *
+ * The worker thread is blocked inside the interpreter for the whole session and
+ * can never service postMessage, so the page hands it a SharedArrayBuffer up
+ * front (worker.js installs an onmessage handler BEFORE loading this module) and
+ * writes input events into it as a lock-free ring.  We drain it from win32u's
+ * PeekMessage path, which is exactly where SDL polls for messages.
+ *
+ * Layout (Int32Array): [0]=head (producer), [1]=tail (consumer), then N slots of
+ * 4 ints: {type, a, b, c}.  Only the page writes head; only we write tail.
+ */
+EM_JS(int, webwine_poll_input, (int *ev), {
+  var r = self.__wwInput;
+  if (!r) return 0;
+  var head = Atomics.load(r, 0), tail = Atomics.load(r, 1);
+  if (head === tail) return 0;
+  var slots = (r.length - 2) >> 2;
+  var b = 2 + tail * 4;
+  HEAP32[(ev >> 2) + 0] = r[b + 0];
+  HEAP32[(ev >> 2) + 1] = r[b + 1];
+  HEAP32[(ev >> 2) + 2] = r[b + 2];
+  HEAP32[(ev >> 2) + 3] = r[b + 3];
+  Atomics.store(r, 1, (tail + 1) % slots);
+  return 1;
+});
+
 static int is_magic( int fd ) { return fd >= MAGIC_BASE && fd < MAGIC_BASE + MAGIC_COUNT && chans[fd - MAGIC_BASE].used; }
 /* Exported so the client's fd-receive path (dlls/ntdll/unix/server.c) can tell a
  * real (dup-able, must-dup) fd from a magic transport channel passed by identity.

@@ -6,20 +6,22 @@
 <style>
   body { margin: 0; background: #111; color: #ccc; font: 13px monospace; }
   #wrap { display: flex; gap: 12px; padding: 12px; }
-  canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; width: 1024px; height: 768px; max-width: 100%; }
+  canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; width: 1024px; height: 768px; max-width: 100%; outline: none; }
   #side { width: 460px; }
   #status { color: #6f6; white-space: pre; margin-bottom: 8px; }
   #note { color: #888; margin-bottom: 8px; }
-  #log { height: 640px; overflow: auto; background: #000; padding: 6px; border: 1px solid #333; white-space: pre-wrap; }
+  #input { color: #fc6; margin-bottom: 8px; }
+  #log { height: 600px; overflow: auto; background: #000; padding: 6px; border: 1px solid #333; white-space: pre-wrap; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <div>
-    <canvas id="screen" width="1024" height="768"></canvas>
+    <canvas id="screen" width="1024" height="768" tabindex="0"></canvas>
   </div>
   <div id="side">
     <div id="status">booting…</div>
+    <div id="input">input: initialising…</div>
     <div id="note">netduke32 via native-wasm Wine. Rendering 320×200 in a 640×400 window (edit /game/autoexec.cfg); Wine's own CRT block moves run natively.</div>
     <div id="log"></div>
   </div>
@@ -28,6 +30,7 @@
 const cv = document.getElementById('screen');
 const ctx = cv.getContext('2d');
 const statusEl = document.getElementById('status');
+const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
 let lastW = 0, lastH = 0;
 
@@ -40,22 +43,119 @@ function tick() {
     lastFrames = frames; lastT = now;
     const ttf = firstFrameT ? ((firstFrameT - startT) / 1000).toFixed(1) + 's' : '—';
     const res = lastW ? `${lastW}×${lastH}` : '—';
-    statusEl.textContent =
-      `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
+    statusEl.textContent = `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
   }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
 
+/* ---- input ----
+ * The worker runs the interpreter for the whole session and never returns to its
+ * event loop, so it can never receive postMessage.  Hand it a SharedArrayBuffer
+ * up front and write events into it as a lock-free ring; win32u's PeekMessage
+ * drains it (dlls/win32u/message.c).  SAB needs cross-origin isolation, which
+ * serve.py supplies via COOP/COEP.
+ * Ring: [0]=head (page writes), [1]=tail (worker writes), then slots of 4 ints. */
+const SLOTS = 512;
+let ring = null;
+try {
+  if (self.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined') {
+    ring = new Int32Array(new SharedArrayBuffer((2 + SLOTS * 4) * 4));
+  }
+} catch (e) {}
+
+function push(type, a, b, c) {
+  if (!ring) return;
+  const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
+  const next = (head + 1) % SLOTS;
+  if (next === tail) return;                 // full: drop rather than block
+  const base = 2 + head * 4;
+  ring[base] = type; ring[base + 1] = a | 0; ring[base + 2] = b | 0; ring[base + 3] = c | 0;
+  Atomics.store(ring, 0, next);
+}
+
+// KeyboardEvent.code -> [Windows VK, PS/2 set-1 scancode, extended].
+// SDL's windows driver maps mainly by SCANCODE, and the extended bit is what
+// distinguishes the arrows / right-hand modifiers - getting it wrong silently
+// breaks movement keys, so it is spelled out per key.
+const KEYMAP = {
+  Escape:[0x1B,0x01,0], Digit1:[0x31,0x02,0], Digit2:[0x32,0x03,0], Digit3:[0x33,0x04,0],
+  Digit4:[0x34,0x05,0], Digit5:[0x35,0x06,0], Digit6:[0x36,0x07,0], Digit7:[0x37,0x08,0],
+  Digit8:[0x38,0x09,0], Digit9:[0x39,0x0A,0], Digit0:[0x30,0x0B,0],
+  Minus:[0xBD,0x0C,0], Equal:[0xBB,0x0D,0], Backspace:[0x08,0x0E,0], Tab:[0x09,0x0F,0],
+  KeyQ:[0x51,0x10,0], KeyW:[0x57,0x11,0], KeyE:[0x45,0x12,0], KeyR:[0x52,0x13,0],
+  KeyT:[0x54,0x14,0], KeyY:[0x59,0x15,0], KeyU:[0x55,0x16,0], KeyI:[0x49,0x17,0],
+  KeyO:[0x4F,0x18,0], KeyP:[0x50,0x19,0], BracketLeft:[0xDB,0x1A,0], BracketRight:[0xDD,0x1B,0],
+  Enter:[0x0D,0x1C,0], ControlLeft:[0xA2,0x1D,0],
+  KeyA:[0x41,0x1E,0], KeyS:[0x53,0x1F,0], KeyD:[0x44,0x20,0], KeyF:[0x46,0x21,0],
+  KeyG:[0x47,0x22,0], KeyH:[0x48,0x23,0], KeyJ:[0x4A,0x24,0], KeyK:[0x4B,0x25,0],
+  KeyL:[0x4C,0x26,0], Semicolon:[0xBA,0x27,0], Quote:[0xDE,0x28,0], Backquote:[0xC0,0x29,0],
+  ShiftLeft:[0xA0,0x2A,0], Backslash:[0xDC,0x2B,0],
+  KeyZ:[0x5A,0x2C,0], KeyX:[0x58,0x2D,0], KeyC:[0x43,0x2E,0], KeyV:[0x56,0x2F,0],
+  KeyB:[0x42,0x30,0], KeyN:[0x4E,0x31,0], KeyM:[0x4D,0x32,0],
+  Comma:[0xBC,0x33,0], Period:[0xBE,0x34,0], Slash:[0xBF,0x35,0], ShiftRight:[0xA1,0x36,0],
+  NumpadMultiply:[0x6A,0x37,0], AltLeft:[0xA4,0x38,0], Space:[0x20,0x39,0], CapsLock:[0x14,0x3A,0],
+  F1:[0x70,0x3B,0], F2:[0x71,0x3C,0], F3:[0x72,0x3D,0], F4:[0x73,0x3E,0], F5:[0x74,0x3F,0],
+  F6:[0x75,0x40,0], F7:[0x76,0x41,0], F8:[0x77,0x42,0], F9:[0x78,0x43,0], F10:[0x79,0x44,0],
+  F11:[0x7A,0x57,0], F12:[0x7B,0x58,0],
+  NumLock:[0x90,0x45,0], ScrollLock:[0x91,0x46,0],
+  Numpad7:[0x67,0x47,0], Numpad8:[0x68,0x48,0], Numpad9:[0x69,0x49,0], NumpadSubtract:[0x6D,0x4A,0],
+  Numpad4:[0x64,0x4B,0], Numpad5:[0x65,0x4C,0], Numpad6:[0x66,0x4D,0], NumpadAdd:[0x6B,0x4E,0],
+  Numpad1:[0x61,0x4F,0], Numpad2:[0x62,0x50,0], Numpad3:[0x63,0x51,0], Numpad0:[0x60,0x52,0],
+  NumpadDecimal:[0x6E,0x53,0],
+  ControlRight:[0xA3,0x1D,1], AltRight:[0xA5,0x38,1], NumpadDivide:[0x6F,0x35,1], NumpadEnter:[0x0D,0x1C,1],
+  Home:[0x24,0x47,1], ArrowUp:[0x26,0x48,1], PageUp:[0x21,0x49,1],
+  ArrowLeft:[0x25,0x4B,1], ArrowRight:[0x27,0x4D,1],
+  End:[0x23,0x4F,1], ArrowDown:[0x28,0x50,1], PageDown:[0x22,0x51,1],
+  Insert:[0x2D,0x52,1], Delete:[0x2E,0x53,1],
+};
+
+let keysSent = 0, mouseSent = 0;
+function noteInput() {
+  inputEl.textContent = ring
+    ? `input: ready — keys sent ${keysSent}, mouse ${mouseSent}. Click the canvas, then use arrows/Enter/Esc, WASD, Ctrl+Space.`
+    : 'input: DISABLED — no SharedArrayBuffer (serve with COOP/COEP headers, e.g. serve.py)';
+}
+noteInput();
+
+addEventListener('keydown', (e) => {
+  const m = KEYMAP[e.code];
+  if (!m) return;
+  if (!e.repeat) { push(1, m[0], m[1], m[2]); keysSent++; }   // the game does its own repeat
+  e.preventDefault();
+}, true);
+addEventListener('keyup', (e) => {
+  const m = KEYMAP[e.code];
+  if (!m) return;
+  push(2, m[0], m[1], m[2]); keysSent++;
+  e.preventDefault();
+}, true);
+
+// Mouse: deliver client coords in the guest's own render resolution.
+function guestXY(e) {
+  const r = cv.getBoundingClientRect();
+  const x = Math.max(0, Math.min(lastW - 1, Math.round((e.clientX - r.left) / r.width  * (lastW || 320))));
+  const y = Math.max(0, Math.min(lastH - 1, Math.round((e.clientY - r.top)  / r.height * (lastH || 200))));
+  return [x, y];
+}
+cv.addEventListener('mousemove', (e) => { const [x,y] = guestXY(e); push(3, x, y, 0); mouseSent++; });
+cv.addEventListener('mousedown', (e) => { const [x,y] = guestXY(e); push(4, e.button, x, y); mouseSent++; cv.focus(); e.preventDefault(); });
+cv.addEventListener('mouseup',   (e) => { const [x,y] = guestXY(e); push(5, e.button, x, y); mouseSent++; e.preventDefault(); });
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+setInterval(noteInput, 500);
+cv.focus();
+
 const worker = new Worker('worker.js');
+// Hand over the ring BEFORE the module boots - once it starts interpreting, the
+// worker never services messages again.
+worker.postMessage({ type: 'input', ring: ring });
+
 worker.onmessage = (e) => {
   const m = e.data;
   if (m.type === 'frame') {
     if (!firstFrameT) firstFrameT = performance.now();
     if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; }
     lastW = m.w; lastH = m.h;
-    // The worker already produced RGBA, so wrap the transferred buffer in an
-    // ImageData and blit it — no per-pixel conversion loop on the main thread.
     ctx.putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
     frames++;
   } else if (m.type === 'log') {
