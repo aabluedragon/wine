@@ -1091,6 +1091,8 @@ static int nd_span_skeleton_ok( uint32_t va, uint32_t *palout )
     return 1;
 }
 
+static int g_skip_blit;
+
 static int nat_surfspan( struct x86cpu *c )
 {
     uint32_t b   = ND_SURFSPAN + (uint32_t)nd_slide;
@@ -1104,7 +1106,18 @@ static int nat_surfspan( struct x86cpu *c )
     wr32( ebp - 0xd4, end - 0x100 );
     if (dst < end - 0x100) { wr32( ebp - 0xd8, end ); wr32( ebp - 0xdc, dst ); }
 
-    while (dst < end)
+    if (g_skip_blit)
+    {   /* Default: don't convert at all.  The game owes SDL a 32-bpp surface,
+         * but on our path nobody ever reads it - we present the 8-bpp
+         * frameplace ourselves at the frame flip - so this is 128,000 pixels a
+         * frame of lookups for a buffer no one looks at.  Verified by playing
+         * with it off: the picture is unchanged.  %ecx must still end where the
+         * loop would have left it, since the caller walks scanlines with it.
+         * WASM_KEEP_BLIT=1 restores the conversion. */
+        n = (end - dst + 3) / 4;
+        src += 2 * n; dst += 4 * n;
+    }
+    else while (dst < end)
     {
         wr32( dst, rd32( pal + 4u * rd8( lut + rd16( src ) ) ) );
         dst += 4; src += 2; n++;
@@ -2459,7 +2472,12 @@ static void run( struct x86cpu *c )
         {
             static uint32_t lcg = 12345;
             lcg = lcg * 1664525u + 1013904223u;
-            g_prof_countdown = 40000 + (int)(lcg % 50000u);
+            /* Take the HIGH bits.  An LCG's low bits have tiny periods (bit 0
+             * alternates, bit 1 has period 4...), so `lcg % 50000` produced a
+             * strongly periodic "jitter" that still aliased against per-frame
+             * work: it read the audio mixer at 6.2% of the frame where two
+             * independent direct counters both put it at 1.8%. */
+            g_prof_countdown = 40000 + (int)(((uint64_t)(lcg >> 16) * 50000u) >> 16);
             prof_sample( c->eip );
         }
 #endif
@@ -2492,6 +2510,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
+                          g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
                           g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
                           if (!getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
