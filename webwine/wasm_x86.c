@@ -315,6 +315,14 @@ static int call_guest_cdecl( struct x86cpu *c, uint32_t func, int argc,
     if (g_in_guest_call) return 0;               /* never re-enter */
     esp = (stack_below - 512 - (uint32_t)argc * 4) & ~15u;
     if (esp < 0x20000 || esp >= stack_below) return 0;
+    /* Leave the callee real room below us: the guest's own stack limit is in its
+     * TEB (NT_TIB: StackLimit at +0x08).  Refuse rather than run the mixer into
+     * the guard page. */
+    if (c->fs_base)
+    {
+        uint32_t limit = rd32( c->fs_base + 0x08 );
+        if (limit && esp < limit + 0x40000) return 0;      /* keep 256K spare */
+    }
     esp -= 4;
     wr32( esp, GUEST_RET_SENTINEL );
     for (i = 0; i < argc; i++) wr32( esp + 4 + i * 4, argv[i] );
@@ -486,31 +494,34 @@ static int sdl_open_audio( struct x86cpu *c, int with_device )
 static void audio_pump( struct x86cpu *c )
 {
     uint32_t saved_esp, buf, args[3];
-    int want;
+    int want, rounds;
 
     if (!g_aud.open || g_aud.paused || g_aud.lock || !g_aud.callback) return;
+  for (rounds = 0; rounds < 8; rounds++)
+  {
     /* Keep only a small cushion queued (~140ms).  The callback is the game's own
      * mixer plus the OPL3 music synth running under the interpreter, so every
      * frame rendered ahead of time is real CPU taken from the renderer. */
-    if (webwine_audio_queued() >= AUDIO_TARGET_FRAMES) return;
+    if (webwine_audio_queued() >= AUDIO_TARGET_FRAMES) break;
     want = webwine_audio_want();
-    if (want < g_aud.samples) return;
+    if (want < g_aud.samples) break;
 
     saved_esp = c->regs[ESP];
     buf = (saved_esp - 64 - g_aud.size) & ~15u;
-    if (buf < 0x10000 || buf + g_aud.size > saved_esp) return;
+    if (buf < 0x10000 || buf + g_aud.size > saved_esp) break;
 
     memset( (void *)(uintptr_t)buf, g_aud.silence, g_aud.size );
     args[0] = g_aud.userdata; args[1] = buf; args[2] = g_aud.size;
     {
         uint64_t before = g_total_insns;
-        if (!call_guest_cdecl( c, g_aud.callback, 3, args, buf )) return;
+        if (!call_guest_cdecl( c, g_aud.callback, 3, args, buf )) break;
         g_aud.cb_insns += g_total_insns - before;
         g_aud.cb_calls++;
     }
 
     webwine_audio_push( (const void *)(uintptr_t)buf, g_aud.samples, g_aud.channels, (int)g_aud.fmt );
     g_aud.frames_out += g_aud.samples;
+  }
 }
 
 static void nat_arm_audio( void )
@@ -1764,7 +1775,6 @@ static void run( struct x86cpu *c )
              * list on every tick measurably slowed boot. */
             { static uint32_t nat_tries;
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
-            audio_pump( c );
             /* Cache the live frameplace pointer while it is valid, so the flip
              * handler can present the finished frame after it is cleared to 0. */
             if (g_slide_ok)
@@ -1836,6 +1846,14 @@ static void run( struct x86cpu *c )
             }
             else {
             g_flip_count++;
+            /* Refill audio here rather than on the arbitrary housekeeping tick:
+             * this is a clean guest function entry, whereas an arbitrary
+             * instruction boundary can fall inside the guest's own heap or CRT
+             * locks, and its critical sections are recursive for one thread - so
+             * a mixer malloc could re-enter a half-updated allocator.  The frame
+             * rate (~84/s) exceeds the buffer rate (~43/s), and the pump tops up
+             * to the cushion in one visit, so this is also more than fast enough. */
+            audio_pump( c );
 #ifdef WEBWINE_BROWSER
             wasm_dump_frame( c );
 #else

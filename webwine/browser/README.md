@@ -130,6 +130,50 @@ dropping resolution stopped scaling fps linearly.
   — and prefer `mips` over `fps`.  `relink_x86.sh`-style rebuilds of only
   `wasm_x86.o` isolate the interpreter and are much faster than a full rebuild.
 
+
+## Audio
+
+Sound effects work; **music is off on purpose** (see below).
+
+SDL could never open a device here, and the driver was never the problem:
+`SDL_OpenAudioDevice` starts an audio **thread**, and the interpreter has a single
+guest CPU. So we take SDL's place - its audio entry points are intercepted (after
+byte-checking each 6-byte dynapi thunk) and we call the game's own audio callback
+ourselves, shipping PCM to the page through a second SharedArrayBuffer ring that
+an `AudioWorklet` drains.
+
+What keeps it smooth, and correct:
+- The callback only runs while the game is **not** holding the SDL audio lock
+  (`SDL_LockAudioDevice`/`Unlock` are intercepted to track depth) - the same
+  contract SDL gives the mixer, which matters because we are single-threaded.
+- It is pumped **at the frame flip**, not on the arbitrary housekeeping tick. An
+  arbitrary instruction boundary can land inside the guest's own heap/CRT locks,
+  and guest critical sections are recursive for one thread, so a mixer `malloc`
+  could re-enter a half-updated allocator. The flip is a clean function entry,
+  and at ~84 fps it comfortably outruns the ~43 buffers/sec needed.
+- Each visit tops the queue up to a ~140ms cushion and no further: every queued
+  frame is interpreted guest code, so rendering ahead steals CPU from the renderer.
+- On underrun the worklet emits **silence and re-cushions** rather than repeating
+  the last block (a repeat loops a short period into an audible buzz, and since it
+  consumes no ring data it is self-perpetuating).
+
+### Why music is off — measured, not assumed
+
+`mus_enabled 0` in `autoexec.cfg`. With music on, the guest profile is **100%
+`AdLibDrv_MIDI_Service`** — the Nuked OPL3 synthesiser, LTO-inlined into it:
+
+| | audio cost | callbacks/sec | result |
+|---|---|---|---|
+| SFX only | ~1.4-2.8 M insn/s (**~3%**) | 43-44 (full rate) | 80+ fps, no underrun |
+| + OPL3 music | ~165-180 M insn/s (**~98%**) | 20 of 43 needed | ~2 fps, permanent underrun |
+
+Music needs ~357M guest instructions/sec against an interpreter that does ~110M/s
+— about **3x the entire budget** — so it is not a tuning problem. Lowering the
+rate does not help (the game already asks for 22050) and the mitigations bottom
+out. Real music would need a *native* OPL3 core driven by intercepting the game's
+register writes, or a MIDI-to-WebAudio path; both are separate projects.
+To hear it anyway, set `mus_enabled 1` and expect single-digit fps.
+
 ## Files
 
 `build-node.sh` `run-node.sh` `build-browser.sh` `assemble-assets.sh`
