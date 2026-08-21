@@ -44,6 +44,36 @@ frames on stderr.
   code run) if the buffers are not wholly inside the guest address space.
   msvcrt vanished from the profile completely.
 
+### Native fast paths for the engine's hot loops
+
+Three of netduke32's inner loops are executed natively instead of interpreted.
+All three use the same self-validating pattern: the **opcode skeleton is verified
+byte-for-byte** with only the engine's patched immediate fields as wildcards, so
+they cannot fire on unrelated code, and each has an env kill-switch.
+
+| loop | what it is | measured |
+|---|---|---|
+| `vlineasm4` (0x6321f3) | 4-column texture mapper, 13,200 iters/frame | **+41%** (interleaved A/B) |
+| 8bpp→32bpp blit (0x519f87) | `videoNextPage`'s surface conversion, ~12,800 iters/frame | **+11.7%** (interleaved A/B, quiet machine) |
+| sprite-timer walk (0x5196c0) | per-frame `videoNextPage` bookkeeping, 16,650 iters/frame | **+10%** |
+
+The interesting part: **the self-modifying code that blocks a block JIT is what
+makes this easy.** The engine patches shift counts, fixed-point steps and every
+texture/palette/framebuffer displacement straight into the instruction stream
+before each call (they read as `0x88` filler on disk). A JIT would have to
+recompile constantly; here we just re-read the immediates from the code bytes on
+entry.  Correctness is checked by comparing captured frame hashes against a
+reference build with the fast path disabled — several frames match bit-exactly.
+
+**Where it stands now: the profile is FLAT.** After these, ~79% of execution is
+diffuse across thousands of addresses. The largest identifiable block left is
+`mvlineasm4` (the *masked* texture mapper) at ~12-14%, and it is much nastier
+than its sibling — the transparency mask is accumulated in the low byte of a
+register that is simultaneously a live texture coordinate (`adc %dl,%dl` while
+`edx` also steps), the store is a 16-way computed jump through a table of masked
+variants, and the whole thing is a nested loop. Past that, only a decoded-block
+JIT would move the number.
+
 ### Profiling the guest
 
 `WASM_PROF=1` turns on an eip sampler that piggybacks on the existing

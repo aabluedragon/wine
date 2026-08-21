@@ -24,7 +24,6 @@ Module['preRun'].push(function () {
      SDL_OpenAudioDevice itself and drive the game's callback ourselves,
      because opening a real device would need an audio thread we do not have. */
   E.SDL_AUDIODRIVER = 'dummy';
-  E.WASM_TPUT = '1'; E.WASM_PROF = '1'; E.WASM_COUNT_ADDR = '0x6325c5';   /* TEMP */
 
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }
   function sym(t, l) { try { FS.symlink(t, l); } catch (e) {} }
