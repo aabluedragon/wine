@@ -46,33 +46,66 @@ frames on stderr.
 
 ### Native fast paths for the engine's hot loops
 
-Three of netduke32's inner loops are executed natively instead of interpreted.
-All three use the same self-validating pattern: the **opcode skeleton is verified
+Eight of netduke32's inner loops now run natively instead of interpreted. They
+share one self-validating pattern: the **opcode skeleton is verified
 byte-for-byte** with only the engine's patched immediate fields as wildcards, so
-they cannot fire on unrelated code, and each has an env kill-switch.
+a fast path cannot fire on unrelated code, and each has an env kill-switch (which
+is also how they get measured).
 
 | loop | what it is | measured |
 |---|---|---|
-| `vlineasm4` (0x6321f3) | 4-column texture mapper, 13,200 iters/frame | **+41%** (interleaved A/B) |
-| 8bpp→32bpp blit (0x519f87) | `videoNextPage`'s surface conversion, ~12,800 iters/frame | **+11.7%** (interleaved A/B, quiet machine) |
-| sprite-timer walk (0x5196c0) | per-frame `videoNextPage` bookkeeping, 16,650 iters/frame | **+10%** |
+| `msvcrt` memmove/memcpy/memset | Wine's own CRT, resolved from the PEB | 52 → 66 fps |
+| `vlineasm4` (0x6321f3) | 4-column texture mapper, ~15,500 iters/frame | +41% |
+| `mvlineasm4` (0x6325a0) | **masked** 4-column mapper, ~17,000 iters/frame | +38–50% |
+| `mhlineskipmodify` (0x632aa9) | masked **horizontal** mapper (floors/ceilings) | +9.7% |
+| 8bpp→32bpp span (0x519a41) | the whole `videoNextPage` conversion, 128k px/frame | +50% |
+| …then skipped entirely | nothing on our path reads the converted surface | +3.7% |
+| libdivide gen (0x401e60) | memoised magic-number generator, 78% hit rate | +15% |
+| sprite-timer walk (0x5196c0) | per-frame `videoNextPage` bookkeeping | +10% |
 
-The interesting part: **the self-modifying code that blocks a block JIT is what
-makes this easy.** The engine patches shift counts, fixed-point steps and every
-texture/palette/framebuffer displacement straight into the instruction stream
-before each call (they read as `0x88` filler on disk). A JIT would have to
-recompile constantly; here we just re-read the immediates from the code bytes on
-entry.  Correctness is checked by comparing captured frame hashes against a
-reference build with the fast path disabled — several frames match bit-exactly.
+End to end, with every switch above flipped off vs on **in the same build,
+interleaved, at matched load** (mips within 7% across all four runs), on the same
+scripted walk through E1L1:
 
-**Where it stands now: the profile is FLAT.** After these, ~79% of execution is
-diffuse across thousands of addresses. The largest identifiable block left is
-`mvlineasm4` (the *masked* texture mapper) at ~12-14%, and it is much nastier
-than its sibling — the transparency mask is accumulated in the low byte of a
-register that is simultaneously a live texture coordinate (`adc %dl,%dl` while
-`edx` also steps), the store is a 16-way computed jump through a table of masked
-variants, and the whole thing is a nested loop. Past that, only a decoded-block
-JIT would move the number.
+| | fps | guest instructions per frame |
+|---|---|---|
+| all off | 47 | 2048 / 2066 |
+| all on | 163 / 155 | 622 / 626 |
+
+**3.4× the frame rate, 70% fewer interpreted instructions per frame.**
+
+**The self-modifying code that blocks a block JIT is what makes this easy.** The
+engine patches shift counts, fixed-point steps and every texture/palette/frame
+displacement straight into the instruction stream before each call (they read as
+`0x88` filler on disk). A JIT would have to recompile constantly; we just re-read
+the immediates from the code bytes on entry.
+
+Three techniques worth reusing:
+
+- **Decline and fall through.** A hook that returns 0 from `nat_call` leaves the
+  guest to run its own code. That is how `SDL_PollEvent` is intercepted for only
+  the events we synthesise, how a fast path bails when its preconditions do not
+  hold, and how every kill-switch works.
+- **Cache instead of reimplement.** For libdivide the guest computes every value
+  we store (a miss runs the real generator through a nested `run()`), so a cached
+  divider is by construction the one it would have produced. Reimplementing it
+  would have been worth ~3% more and risked silently skewing the renderer's
+  perspective maths.
+- **Verify against the guest, not against yourself.** Where the output is not
+  visible on screen, check it another way: `tests-spanequiv.c` diffs the surface
+  conversion's two-loop original against the merged loop over 20000 randomised
+  cases, and `WASM_LIBDIV_VERIFY=1` runs the real generator on every cache hit
+  (706,772 checked, zero mismatches). Where it *is* visible, a full-canvas pixel
+  diff against a run with the fast path disabled is the strongest check —
+  `mvlineasm4` and `mhlineskipmodify` are both **0 differing pixels** over
+  1022×640.
+
+**Where it stands now: the profile is genuinely flat.** What is left is real
+engine work spread across large functions — `wallscan`, `maskwallscan`,
+`classicDrawSprite`, `prepwall` — none of them loop-shaped enough to replace, and
+the interpreter's own dispatch is already tuned (the two-byte `0f` opcodes that
+matter are all inlined in `run()`). Past this, only a decoded-block cache or JIT
+would move the number.
 
 ### Profiling the guest
 
@@ -85,13 +118,38 @@ result; guessing would not have.  The stride is **jittered** and the sampler is
 compile-time gated (`PROFILE=1`), so production builds pay nothing.
 
 It prints `PROF TOTAL <n> dropped <n>` per window, and **percentages must be taken
-against that total, not against the listed lines** — the dump only lists the top
-60 addresses.  That detail matters: computing shares against the *listed* subset
-made every tight loop look dominant, because a 35-instruction loop fills the whole
-list while genuinely diffuse code (thousands of addresses, a few samples each)
-never appears at all.  It reported one loop at 96% of the frame that a direct
-counter put at 14%.  Cross-check any hot-loop claim with `WASM_COUNT_ADDR=<hex>`,
-which counts executions of a single guest address and cost nothing to trust.
+against that total, not against the listed lines**.  It now dumps *every* occupied
+slot rather than a top-60, which matters more than it sounds: computing shares
+against a listed subset made every tight loop look dominant, because one loop
+fills the whole list while diffuse code (thousands of addresses, a few samples
+each) never appears at all.  That reported one loop at 96% of the frame which a
+direct counter put at 14%.
+
+**This sampler has now overstated a target twice.**  The second time it put the
+audio mixer at 6.2% of the frame where two independent counters both said 1.8%.
+The cause was the *jitter* on the sampling stride: the stride is jittered
+precisely because a fixed period aliases against periodic work, but the jitter
+came from `lcg % 50000` — the LOW bits of an LCG, whose periods are tiny (bit 0
+alternates, bit 1 has period 4…).  The "random" stride was itself periodic and
+still aliased.  It now takes the high bits, which roughly halved the error on the
+one function whose true cost is known exactly.
+
+So: **confirm any profile claim with `WASM_COUNT_ADDR=<hex>` before building
+anything on it.**  It counts executions of one guest address; multiply by the
+instructions in the loop body and compare against `kinsn/frame`.  Doing that
+avoided writing a native audio mixer worth 1.8%, and correctly sized
+`mhlineskipmodify` at 4.5% when the sampler claimed 7.2%.
+
+Two more measurement rules learned the hard way here:
+
+- **`kinsn/frame` (from `WASM_TPUT=1`), not fps, is the load-independent metric.**
+  Background load on this machine swung 2× mid-session; fps followed it and
+  inverted an A/B result. `mips` differing between two arms is the tell that a
+  pair is polluted — discard it, don't average it. (One such pair was caused by
+  three orphaned test processes of *my own* spinning a core each.)
+- **fps is still the thing to report**, because work removed from *native* code
+  never shows in `kinsn/frame` at all — skipping the surface conversion is +3.7%
+  fps at byte-identical instruction counts.
 
 - **THE governing constraint: `run()` is register-pressure bound.**  It was a
   **76KB single wasm function — 90% of the whole module** — far past the size
