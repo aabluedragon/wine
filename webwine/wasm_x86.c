@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1126,11 +1126,136 @@ static void nat_arm_surfspan( void )
     else fprintf( stderr, "wasm_x86: surface span skeleton differs at %08x - left interpreted\n", va );
 }
 
+/* ---- memoise libdivide's divider generator --------------------------------
+ *
+ * libdivide_internal_s64_gen(d, branchfree) turns a divisor into a magic
+ * number, and after the two texture mappers went native it was the single
+ * biggest cost left: ~479 calls a frame at ~278 interpreted instructions each,
+ * 16% of the frame (12.7% in the generator, 3.6% in the __udivmoddi4 it calls -
+ * a 64-bit division on a 32-bit guest is a long shift-subtract loop).
+ *
+ * It is a pure function, so it can be cached - but only if the divisors repeat.
+ * A probe that simulated this exact cache in-place (declining every call, only
+ * looking) measured a 78.5% hit rate over 2.0M calls, so they do.
+ *
+ * The tempting alternative was to reimplement the generator natively and skip
+ * it entirely.  Deliberately not done: a magic number that is subtly wrong does
+ * not crash, it quietly skews the renderer's perspective arithmetic, and
+ * validating a libdivide implementation means validating its `do` side too.
+ * Here the guest computes every value we cache, so a cached divider is by
+ * construction exactly the one it would have produced; the cache can only be
+ * wrong about WHICH divisor a value belongs to, and that is a plain key compare.
+ *
+ * Misses run the real function through a nested run() and keep the result -
+ * hence the recursion guard, since the nested run re-enters at this same
+ * address.  Inside another guest call (the audio mixer) nesting is refused, and
+ * we simply decline and let the interpreter do it.
+ */
+#define ND_LIBDIV     0x401e60u
+#define LD_SETS 1024
+#define LD_WAYS 4
+static const uint8_t nd_libdiv_code[] = {
+    0x55,                       /* push %ebp                */
+    0x89,0xe5,                  /* mov  %esp,%ebp           */
+    0x57,                       /* push %edi                */
+    0x89,0xcf,                  /* mov  %ecx,%edi           */
+    0x56,                       /* push %esi                */
+    0x53,                       /* push %ebx                */
+    0x81,0xec,0x8c,0x00,0x00,0x00, /* sub $0x8c,%esp        */
+    0x09,0xd7,                  /* or   %edx,%edi   (d == 0?) */
+    0x89,0x45,0xd4,             /* mov  %eax,-0x2c(%ebp)  (the sret pointer) */
+    0x89,0x4d,0xd0              /* mov  %ecx,-0x30(%ebp)  (d, high word)     */
+};
+struct ld_ent { uint64_t key; uint32_t lo, hi; uint8_t more, used; };
+static struct ld_ent g_ld[LD_SETS][LD_WAYS];
+static uint64_t g_ld_calls, g_ld_hits;
+static int g_ld_filling, g_ld_verify;
+static uint64_t g_ld_ok, g_ld_bad;
+
+static int nat_libdivide( struct x86cpu *c )
+{
+    uint32_t esp  = c->regs[ESP];
+    uint32_t sret = c->regs[EAX];
+    uint32_t bf, h;
+    uint64_t key;
+    int w;
+
+    if (g_ld_filling) return 0;                  /* the nested run re-enters here */
+    bf  = rd32( esp + 4 );                       /* branchfree: the one stack arg */
+    key = ((((uint64_t)c->regs[ECX] << 32) | c->regs[EDX]) << 1) | (bf != 0);
+    h   = (uint32_t)((key * 0x9e3779b97f4a7c15ull) >> 54) & (LD_SETS - 1);
+
+    g_ld_calls++;
+    for (w = 0; w < LD_WAYS; w++)
+    {
+        struct ld_ent *e = &g_ld[h][w];
+        if (e->used && e->key == key)
+        {
+            if (g_ld_verify)
+            {   /* differential check: run the real generator over the same
+                 * arguments and compare.  This tests the things a wrong cache
+                 * would get wrong - the key, the branchfree argument's location
+                 * and the struct offsets - against the guest itself. */
+                uint32_t vlo, vhi; uint8_t vmore; int ok;
+                g_ld_filling = 1;
+                ok = call_guest_cdecl( c, ND_LIBDIV + (uint32_t)nd_slide, 1, &bf, esp );
+                g_ld_filling = 0;
+                if (ok)
+                {
+                    vlo = rd32( sret ); vhi = rd32( sret + 4 ); vmore = rd8( sret + 8 );
+                    if (vlo != e->lo || vhi != e->hi || vmore != e->more)
+                    {
+                        if (g_ld_bad++ < 8)
+                            fprintf( stderr, "wasm_x86: LIBDIV MISMATCH d=%08x%08x bf=%u "
+                                     "cached %08x%08x/%02x real %08x%08x/%02x\n",
+                                     c->regs[ECX], c->regs[EDX], bf,
+                                     e->hi, e->lo, e->more, vhi, vlo, vmore );
+                    }
+                    else g_ld_ok++;
+                }
+            }
+            wr32( sret, e->lo ); wr32( sret + 4, e->hi ); wr8( sret + 8, e->more );
+            if (w) { struct ld_ent t = *e; g_ld[h][w] = g_ld[h][w-1]; g_ld[h][w-1] = t; }
+            g_ld_hits++;
+            goto ret_to_caller;
+        }
+    }
+    {   /* miss: let the real generator run, then remember what it produced */
+        int ok;
+        g_ld_filling = 1;
+        ok = call_guest_cdecl( c, ND_LIBDIV + (uint32_t)nd_slide, 1, &bf, esp );
+        g_ld_filling = 0;
+        if (!ok) return 0;                       /* already inside a guest call */
+        for (w = LD_WAYS - 1; w > 0; w--) g_ld[h][w] = g_ld[h][w-1];
+        g_ld[h][0].key  = key;
+        g_ld[h][0].lo   = rd32( sret );
+        g_ld[h][0].hi   = rd32( sret + 4 );
+        g_ld[h][0].more = rd8 ( sret + 8 );
+        g_ld[h][0].used = 1;
+    }
+ret_to_caller:
+    c->regs[EAX] = sret;                         /* the generator returns the sret ptr */
+    c->regs[ESP] = esp + 4;                      /* pop the return address */
+    c->eip = rd32( esp );
+    return 1;
+}
+
+static void nat_arm_libdivide( void )
+{
+    uint32_t va = ND_LIBDIV + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_libdiv_code); i++)
+        if (rd8( va + i ) != nd_libdiv_code[i])
+        { fprintf( stderr, "wasm_x86: libdivide gen differs at %08x - left interpreted\n", va ); return; }
+    nat_register( va, NAT_LIBDIV, "libdivide gen cache" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
+    if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
     switch (kind)
@@ -2368,6 +2493,8 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
+                          g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
+                          if (!getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
@@ -2421,7 +2548,7 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f sb=%.0f/%.0f kinsn/frame=%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
@@ -2432,6 +2559,8 @@ static void run( struct x86cpu *c )
                              fps > 0 ? (double)(g_mv_iters - tp_last_mvi) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_calls - tp_last_sbc) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_iters - tp_last_sbi) / fps : 0.0,
+                             (unsigned long long)g_ld_hits, (unsigned long long)g_ld_calls,
+                             (unsigned long long)g_ld_ok, (unsigned long long)g_ld_bad,
                              fps > 0 ? (double)(g_total_insns - tp_last_insns) / fps / 1000.0 : 0.0 );
                     tp_last_sbc = g_sb_calls; tp_last_sbi = g_sb_iters;
                     tp_last_mvc = g_mv_calls; tp_last_mvi = g_mv_iters;
