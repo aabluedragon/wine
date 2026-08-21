@@ -205,8 +205,9 @@ static const char *prof_module( uint32_t va )
  * so it must not get more expensive than that). */
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
-       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE };
+       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
+static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 #define NAT_SLOTS 256
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
@@ -554,9 +555,130 @@ static void nat_arm_audio( void )
     g_aud.armed = (ok == sizeof(t)/sizeof(t[0]));
 }
 
+/* ---- netduke32's 4-column texture mapper, run natively ----------------------
+ *
+ * `vlineasm4` (0x6321f3..0x63226a) is the Build engine's classic-renderer inner
+ * loop: it walks four vertical spans at once, fetching a texel per column,
+ * palettising it, packing four pixels into EAX and storing them as one dword.
+ * A direct execution counter puts it at ~13,200 iterations per frame - about a
+ * quarter of every guest instruction we interpret - which makes it the single
+ * biggest remaining cost in the frame.
+ *
+ * It is also SELF-MODIFYING: the engine patches the shift counts, the fixed-point
+ * step values and every texture/palette/framebuffer displacement directly into
+ * the instruction stream before each call (they read as 0x88 filler on disk).
+ * That is exactly why a block JIT cannot compile it once and reuse it - and why
+ * running it natively here is easy by comparison: we simply read the current
+ * immediates out of the code bytes on entry and interpret nothing.
+ *
+ * Safety: the OPCODE skeleton is verified byte-for-byte (only the patched
+ * immediate fields are wildcards), so this cannot fire on some other code that
+ * happens to live at this address; anything unexpected falls back to the
+ * interpreter.  Memory is touched exactly as the guest instructions would.
+ */
+#define ND_VLINE 0x6321f3u
+#define ND_VLINE_LEN 0x77u
+
+/* offset -> number of wildcard (patched) bytes; everything else must match */
+static const struct { uint16_t off; uint8_t len; } nd_vline_imm[] = {
+    { 0x02, 1 }, { 0x07, 4 }, { 0x0d, 4 }, { 0x13, 4 }, { 0x1a, 4 }, { 0x21, 4 },
+    { 0x29, 1 }, { 0x2c, 4 }, { 0x32, 4 }, { 0x3d, 4 }, { 0x43, 1 }, { 0x47, 4 },
+    { 0x4d, 1 }, { 0x51, 4 }, { 0x57, 4 }, { 0x5d, 4 }, { 0x63, 4 }, { 0x69, 4 },
+    { 0x6f, 4 },
+};
+static const uint8_t nd_vline_code[ND_VLINE_LEN] = {
+    0xc1,0xe9,0x00, 0x89,0xf3, 0x81,0xe3,0,0,0,0, 0x81,0xc2,0,0,0,0,
+    0x81,0xd6,0,0,0,0, 0x0f,0xb6,0x89,0,0,0,0, 0x0f,0xb6,0x9b,0,0,0,0,
+    0x89,0xe8, 0xc1,0xe8,0x00, 0x8a,0x89,0,0,0,0, 0x8a,0xab,0,0,0,0,
+    0x89,0xeb, 0xc1,0xe1,0x10, 0x81,0xe3,0,0,0,0, 0x80,0xc2,0x00,
+    0x0f,0xb6,0x80,0,0,0,0, 0x80,0xd6,0x00, 0x0f,0xb6,0x9b,0,0,0,0,
+    0x81,0xd5,0,0,0,0, 0x8a,0x88,0,0,0,0, 0x8a,0xab,0,0,0,0,
+    0x89,0x8f,0,0,0,0, 0x81,0xc7,0,0,0,0, 0x89,0xf1, 0x73,0x89
+};
+
+static int nd_vline_skeleton_ok( uint32_t va )
+{
+    uint8_t wild[ND_VLINE_LEN];
+    unsigned i, k;
+
+    memset( wild, 0, sizeof(wild) );
+    for (i = 0; i < sizeof(nd_vline_imm)/sizeof(nd_vline_imm[0]); i++)
+        for (k = 0; k < nd_vline_imm[i].len; k++) wild[nd_vline_imm[i].off + k] = 1;
+    for (i = 0; i < ND_VLINE_LEN; i++)
+        if (!wild[i] && rd8( va + i ) != nd_vline_code[i]) return 0;
+    return 1;
+}
+
+static int nat_vlineasm4( struct x86cpu *c )
+{
+    uint32_t b = ND_VLINE + (uint32_t)nd_slide;
+    /* current patched immediates - re-read every entry, since the engine rewrites
+     * them for each span it draws */
+    uint32_t sh1 = rd8 ( b + 0x02 ), sh2 = rd8 ( b + 0x29 );
+    uint32_t and1 = rd32( b + 0x07 ), and2 = rd32( b + 0x3d );
+    uint32_t stepd = rd32( b + 0x0d ), steps = rd32( b + 0x13 );
+    uint32_t tex1 = rd32( b + 0x1a ), tex2 = rd32( b + 0x21 );
+    uint32_t pal1 = rd32( b + 0x2c ), pal2 = rd32( b + 0x32 );
+    uint32_t incdl = rd8 ( b + 0x43 ), incdh = rd8 ( b + 0x4d );
+    uint32_t tex3 = rd32( b + 0x47 ), tex4 = rd32( b + 0x51 );
+    uint32_t stepp = rd32( b + 0x57 );
+    uint32_t pal3 = rd32( b + 0x5d ), pal4 = rd32( b + 0x63 );
+    uint32_t fbdisp = rd32( b + 0x69 ), fbstep = rd32( b + 0x6f );
+    uint32_t eax = c->regs[EAX], ebx = c->regs[EBX], ecx = c->regs[ECX];
+    uint32_t edx = c->regs[EDX], esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
+    uint32_t cf = 0, prev_edi;
+    uint64_t t;
+    unsigned guard = 0;
+
+    if (!fbstep) return 0;                 /* would never carry -> never terminate */
+
+    do {
+        ecx >>= sh1;
+        ebx = esi & and1;
+        t = (uint64_t)edx + stepd;              edx = (uint32_t)t; cf = (uint32_t)(t >> 32);
+        t = (uint64_t)esi + steps + cf;         esi = (uint32_t)t; cf = (uint32_t)(t >> 32);
+        ecx = rd8( ecx + tex1 );
+        ebx = rd8( ebx + tex2 );
+        eax = ebp >> sh2;
+        ecx = (ecx & 0xffffff00u) | rd8( ecx + pal1 );
+        ecx = (ecx & 0xffff00ffu) | ((uint32_t)rd8( ebx + pal2 ) << 8);
+        ebx = ebp & and2;
+        ecx <<= 16;
+        { uint32_t s = (edx & 0xff) + incdl;
+          edx = (edx & 0xffffff00u) | (s & 0xff); cf = s >> 8; }
+        eax = rd8( eax + tex3 );
+        { uint32_t s = ((edx >> 8) & 0xff) + incdh + cf;
+          edx = (edx & 0xffff00ffu) | ((s & 0xff) << 8); cf = s >> 8; }
+        ebx = rd8( ebx + tex4 );
+        t = (uint64_t)ebp + stepp + cf;         ebp = (uint32_t)t; cf = (uint32_t)(t >> 32);
+        ecx = (ecx & 0xffffff00u) | rd8( eax + pal3 );
+        ecx = (ecx & 0xffff00ffu) | ((uint32_t)rd8( ebx + pal4 ) << 8);
+        wr32( edi + fbdisp, ecx );
+        prev_edi = edi;
+        t = (uint64_t)edi + fbstep;             edi = (uint32_t)t; cf = (uint32_t)(t >> 32);
+        ecx = esi;
+        guard++;
+    } while (!cf && guard < (1u << 24));
+    g_vl_calls++; g_vl_iters += guard;
+
+    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = ecx;
+    c->regs[EDX] = edx; c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
+    set_lazy( c, K_ADD, prev_edi, fbstep, edi, 4 );      /* the add that ended it */
+    c->eip = b + ND_VLINE_LEN;
+    return 1;
+}
+
+static void nat_arm_vline( void )
+{
+    uint32_t va = ND_VLINE + (uint32_t)nd_slide;
+    if (nd_vline_skeleton_ok( va )) nat_register( va, NAT_VLINE, "vlineasm4" );
+    else fprintf( stderr, "wasm_x86: vlineasm4 skeleton differs at %08x - left interpreted\n", va );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
+    if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     switch (kind)
     {
     case NAT_SDL_OPEN:     return sdl_open_audio( c, 0 );
@@ -1766,11 +1888,20 @@ static void run( struct x86cpu *c )
                 if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
                           g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
                           nat_register( g_flip_addr, NAT_FLIP, "frame flip" );
-                          if (getenv( "WASM_COUNT_LOOP" ))
-                              nat_register( ND_AGELOOP + (uint32_t)nd_slide, NAT_COUNT, "loop probe" );
-                          else if (!getenv( "WASM_NO_AGELOOP" ))
+                          {   /* WASM_COUNT_ADDR=<hex> counts executions of any guest
+                               * address - the sampler over-attributes tight loops, so
+                               * confirm hot-loop claims with this before acting. */
+                              const char *ca = getenv( "WASM_COUNT_ADDR" );
+                              if (ca && *ca)
+                                  nat_register( (uint32_t)strtoul( ca, NULL, 0 ) + (uint32_t)nd_slide,
+                                                NAT_COUNT, "count probe" );
+                              else if (getenv( "WASM_COUNT_LOOP" ))
+                                  nat_register( ND_AGELOOP + (uint32_t)nd_slide, NAT_COUNT, "loop probe" );
+                          }
+                          if (!getenv( "WASM_NO_AGELOOP" ) && !getenv( "WASM_COUNT_LOOP" ))
                               nat_arm_ageloop();
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
+                          if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
@@ -1787,7 +1918,7 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
             if (tp_on)
@@ -1799,11 +1930,14 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
-                             (unsigned long long)(g_aud.cb_calls - tp_last_calls) );
+                             (unsigned long long)(g_aud.cb_calls - tp_last_calls),
+                             fps > 0 ? (double)(g_vl_calls - tp_last_vlc) / fps : 0.0,
+                             fps > 0 ? (double)(g_vl_iters - tp_last_vli) / fps : 0.0 );
+                    tp_last_vlc = g_vl_calls; tp_last_vli = g_vl_iters;
                     tp_last_hits = g_count_hits;
                     tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;
                     tp_last = now; tp_last_insns = g_total_insns; tp_last_flip = g_flip_count;
