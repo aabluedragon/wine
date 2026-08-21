@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1324,6 +1324,7 @@ static int nd_mhline_skeleton_ok( uint32_t va )
 }
 
 static uint64_t g_mh_calls, g_mh_iters;
+static int g_bt_left = 3;   /* WASM_BT: NULL-transfer backtraces before going quiet */
 
 static int nat_mhlineskip( struct x86cpu *c )
 {
@@ -1392,12 +1393,111 @@ static void nat_arm_mhline( void )
     else fprintf( stderr, "wasm_x86: mhlineskipmodify skeleton differs at %08x - left interpreted\n", t );
 }
 
+/* ---- there is no OpenGL here, so nothing is cached as "GL state is set" ----
+ *
+ * Changing the resolution from the in-game menu killed the session: the guest
+ * called through a NULL function pointer and the interpreter ended the thread,
+ * which on the page just looks like a freeze.  The log says why:
+ *   "Failed loading OpenGL driver: ... OPENGL32.DLL: Module not found.;
+ *    all OpenGL modes are unavailable."
+ * Every GL entry point is NULL, and applying a video mode walks the engine's GL
+ * state teardown even though the renderer is the software one.
+ *
+ * The engine caches "which GL capabilities are currently enabled" in a set of
+ * inthash tables, and EVERY one of those teardown calls is gated on a lookup:
+ *      if (inthash_find(cache, GL_BLEND)) { glDisable(GL_BLEND); ... }
+ * There are ~100 such sites (212 references to the table array), so patching
+ * call sites one at a time is not a fix.  Gating the lookup is: with no GL, no
+ * capability can be enabled, so a lookup in THAT cache must miss, and every
+ * dependent GL call is skipped by the guest's own branch.
+ *
+ * Deliberately narrow: only lookups in the 16 GL state tables are answered, and
+ * only while the GL entry points really are NULL.  inthash_find is a general
+ * utility used for other tables (sound, textures), and those must behave
+ * normally - so anything else declines and runs the real function.
+ */
+#define ND_INTHASH_FIND 0x52a6a0u
+#define ND_GLSTATE_TAB  0x00e167b8u   /* 16 x 16-byte inthash_t, one per texunit */
+#define ND_GLSTATE_LEN  0x100u
+#define ND_GLPROC_PROBE 0x00e16740u   /* one GL entry point: NULL => no GL at all */
+static const uint8_t nd_inthash_code[] = {
+    0x55,                       /* push %ebp        */
+    0x89,0xe5,                  /* mov  %esp,%ebp   */
+    0x57,                       /* push %edi        */
+    0x89,0xc7,                  /* mov  %eax,%edi   (arg1: the table)  */
+    0x56,                       /* push %esi        */
+    0x89,0xd6,                  /* mov  %edx,%esi   (arg2: the key)    */
+    0x53,                       /* push %ebx        */
+    0x83,0xec,0x3c              /* sub  $0x3c,%esp  */
+};
+
+static int nat_inthash_find( struct x86cpu *c )
+{
+    uint32_t tab = c->regs[EAX];                     /* register args */
+    uint32_t base = ND_GLSTATE_TAB + (uint32_t)nd_slide;
+    uint32_t esp = c->regs[ESP];
+
+    if (tab < base || tab >= base + ND_GLSTATE_LEN) return 0;      /* not a GL table */
+    if (rd32( ND_GLPROC_PROBE + (uint32_t)nd_slide )) return 0;    /* a real GL: run it */
+    c->regs[EAX] = 0;                                /* "not found" */
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_inthash( void )
+{
+    uint32_t b = ND_INTHASH_FIND + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_inthash_code); i++)
+        if (rd8( b + i ) != nd_inthash_code[i])
+        { fprintf( stderr, "wasm_x86: inthash_find differs at %08x - left alone\n", b ); return; }
+    nat_register( b, NAT_GLSTATE, "GL state cache (no GL)" );
+}
+
+/* The sampler-object wrapper is NOT gated on the state cache above, so it needs
+ * its own no-op: videoSetGameMode -> buildgl_resetSamplerObjects walks all 16
+ * texture units and this wrapper's fallback branch (the one for hardware with no
+ * sampler objects) sets the parameters on the bound texture directly.  With no
+ * GL there is no bound texture and nothing to set.  Args arrive in registers,
+ * so returning is just popping the return address. */
+#define ND_GLSAMPLER      0x529500u
+static const uint8_t nd_glsampler_code[] = {
+    0x55,                       /* push %ebp                      */
+    0x89,0xe5,                  /* mov  %esp,%ebp                 */
+    0x83,0xec,0x18,             /* sub  $0x18,%esp                */
+    0xf6,0x05,0,0,0,0,0x08,     /* testb $0x8,<glinfo flags>      */
+    0x74,0x71                   /* je   <no-sampler-objects path> */
+};
+
+static int nat_glsampler( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP];
+    if (rd32( ND_GLPROC_PROBE + (uint32_t)nd_slide )) return 0;   /* a real GL: run it */
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_glsampler( void )
+{
+    uint32_t b = ND_GLSAMPLER + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_glsampler_code); i++)
+        if (i >= 8 && i <= 11) continue;                          /* the flags address */
+        else if (rd8( b + i ) != nd_glsampler_code[i])
+        { fprintf( stderr, "wasm_x86: buildgl_bindSamplerObject differs at %08x - left alone\n", b ); return; }
+    nat_register( b, NAT_GLSAMPLER, "buildgl sampler (no GL)" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
+    if (kind == NAT_GLSTATE) return nat_inthash_find( c );
+    if (kind == NAT_GLSAMPLER) return nat_glsampler( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
@@ -2640,6 +2740,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
+                          if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
@@ -2743,7 +2844,33 @@ static void run( struct x86cpu *c )
                          "(esp=%08x [esp]=%08x [esp+4]=%08x eax=%08x ebx=%08x ecx=%08x edx=%08x)\n",
                          last_eip, c->regs[ESP], rd32(c->regs[ESP]), rd32(c->regs[ESP]+4),
                          c->regs[EAX], c->regs[EBX], c->regs[ECX], c->regs[EDX] );
-            if (!wasm_x86_dispatch( c, c->eip )) { g_total_insns += idelta; return; }   /* RUN_RETURN */
+            if (!wasm_x86_dispatch( c, c->eip ))
+            {   /* Only the FATAL case gets a backtrace: transfers to NULL are
+                 * routine here and mostly handled above, so an unconditional
+                 * dump floods the log relay badly enough to stall the boot. */
+                if (g_bt_left > 0 && getenv( "WASM_BT" ))
+                {   /* Walk the %ebp chain: a call through a NULL pointer says nothing
+                     * about who made it, and "the game froze" is all the page shows.
+                     * Map the return addresses with the exe's symbols
+                     * (VA = symbol value + 0x401000).
+                     * OFF by default and hard-capped: reaching here is ROUTINE - the
+                     * caller re-enters run() and carries on - so an unconditional dump
+                     * floods the log relay badly enough to stall the boot.  Learned
+                     * twice; hence both the env gate and the counter. */
+                    uint32_t bp = c->regs[EBP];
+                    g_bt_left--;
+                    fprintf( stderr, "wasm_x86:   called from %08x\n", rd32( c->regs[ESP] ) );
+                    for (int f = 0; f < 12 && bp >= 0x10000 && bp < 0xfff00000u; f++)
+                    {
+                        uint32_t ret = rd32( bp + 4 ), next = rd32( bp );
+                        if (!ret) break;
+                        fprintf( stderr, "wasm_x86:   frame %2d ret %08x\n", f, ret );
+                        if (next <= bp) break;               /* chain must climb */
+                        bp = next;
+                    }
+                }
+                g_total_insns += idelta; return;   /* RUN_RETURN */
+            }
             continue;
         }
         uint32_t start = c->eip;

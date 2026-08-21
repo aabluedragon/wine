@@ -34,6 +34,7 @@ const ctx = cv.getContext('2d');
 const statusEl = document.getElementById('status');
 const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
+const beacon = new URLSearchParams(location.search).has('beacon');
 let lastW = 0, lastH = 0;
 let audioCtx = null, audioState = 'off';
 let locked = false;          // pointer lock (mouse capture) state
@@ -58,6 +59,11 @@ function tick() {
     const ttf = firstFrameT ? ((firstFrameT - startT) / 1000).toFixed(1) + 's' : '—';
     const res = lastW ? `${lastW}×${lastH} (${(lastW/lastH).toFixed(2)}:1)` : '—';
     statusEl.textContent = `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
+    /* ?beacon=1 reports the same line back through the server, whose access log
+       is then the only way to read a phone's state - iOS Safari has no console
+       you can reach without attaching the desktop Web Inspector by hand. */
+    if (beacon) fetch('/__beacon?' + encodeURIComponent(
+      `fps=${fps.toFixed(1)} res=${res} frames=${frames} ttf=${ttf} sab=${!!ring} coi=${self.crossOriginIsolated} keys=${keysSent} mouse=${mouseSent} touch=${touchSeen} audio=${audioState} head=${ring?Atomics.load(ring,0):-1} tail=${ring?Atomics.load(ring,1):-1}`)).catch(() => {});
   }
   requestAnimationFrame(tick);
 }
@@ -133,6 +139,10 @@ const KEYMAP = {
 };
 
 let keysSent = 0, mouseSent = 0;
+let touchSeen = 0;
+/* Diagnostic only: a touch device delivers no keys at all, and Safari's emulated
+   mouse events fire only on tap - counting raw touches tells them apart. */
+addEventListener('touchstart', () => { touchSeen++; }, {passive: true});
 function noteInput() {
   inputEl.textContent = ring
     ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}   |   mouse: ${locked ? 'CAPTURED (Esc to release)' : 'click canvas to capture'}`
@@ -232,6 +242,11 @@ worker.onmessage = (e) => {
   } else if (m.type === 'log') {
     const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
     logEl.textContent += m.line + '\n';
+      /* With ?beacon=1, push the lines that matter to the server too: its access
+         log is the only way to read a phone's diagnostics, and on desktop it
+         survives a renderer too busy to answer Runtime.evaluate. */
+      if (beacon && /wasm_x86:|GFX\||ERR\||FATAL/.test(m.line))
+        fetch('/__log?' + encodeURIComponent(m.line.slice(0, 300))).catch(() => {});
     if (logEl.textContent.length > 60000) logEl.textContent = logEl.textContent.slice(-40000);
     if (atBottom) logEl.scrollTop = logEl.scrollHeight;
   }
