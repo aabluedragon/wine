@@ -58,9 +58,10 @@ is also how they get measured).
 | `vlineasm4` (0x6321f3) | 4-column texture mapper, ~15,500 iters/frame | +41% |
 | `mvlineasm4` (0x6325a0) | **masked** 4-column mapper, ~17,000 iters/frame | +38–50% |
 | `mhlineskipmodify` (0x632aa9) | masked **horizontal** mapper (floors/ceilings) | +9.7% |
+| `vlineasm1` (0x631cf7) | single-column mapper, 1189 iters/frame | ~1.4% (counter) |
 | 8bpp→32bpp span (0x519a41) | the whole `videoNextPage` conversion, 128k px/frame | +50% |
 | …then skipped entirely | nothing on our path reads the converted surface | +3.7% |
-| libdivide gen (0x401e60) | memoised magic-number generator, 78% hit rate | +15% |
+| libdivide gen (0x401e60) | memoised magic-number generator, 85% hit rate | +15% |
 | sprite-timer walk (0x5196c0) | per-frame `videoNextPage` bookkeeping | +10% |
 
 End to end, with every switch above flipped off vs on **in the same build,
@@ -99,6 +100,17 @@ Three techniques worth reusing:
   diff against a run with the fast path disabled is the strongest check —
   `mvlineasm4` and `mhlineskipmodify` are both **0 differing pixels** over
   1022×640.
+
+**No OpenGL here, and the engine does not always believe it.**  `OPENGL32.DLL`
+does not load, so every GL entry point is NULL — and applying a video mode still
+walks the engine's GL state teardown even with the software renderer.  Two
+intercepts keep that from calling through a NULL pointer (which ends the guest
+thread and looks exactly like a freeze).  The second is the interesting one: the
+engine gates every teardown call on `if (inthash_find(cache, CAP)) glDisable(CAP)`
+and there are ~100 such sites, so the fix gates the **lookup** — with no GL
+nothing can be enabled, the lookup must miss, and the guest's own branch skips
+them all.  Scoped to the 16 GL state tables only; every other `inthash_find` runs
+untouched.
 
 **Where it stands now: the profile is genuinely flat.** What is left is real
 engine work spread across large functions — `wallscan`, `maskwallscan`,
