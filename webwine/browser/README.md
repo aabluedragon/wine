@@ -173,6 +173,22 @@ Two more measurement rules learned the hard way here:
     `run_x87()` (x87), `run_sse()` (SSE/MMX + the bt/cmpxchg/xadd tail),
     `run_cold()` (grp3 mul/div + string ops); none appear in the top-16 opcode
     histogram — took `run()` **76.5KB → 45.7KB** and flipped the opt optimum.
+  - **…but check the LINKED module, not the object file.**  `wasm-func-sizes.py`
+    measures real code bytes.  `run()` is **79.5KB in the linked wasm** — larger
+    than it started — because the C `noinline` attribute does not survive into
+    wasm and **Binaryen's own inliner (`emcc -O2` at link time) pulls every
+    single-caller function straight back in**.  `-sINLINING_LIMIT` will not help:
+    it is documented as LLVM-only, *"does not affect the inlining policy in
+    Binaryen."*
+  - **Forcing the split back apart is a LOSS — measured, then reverted.**  Calling
+    the cold blocks through `volatile` function pointers is something no inliner
+    can see through, and it does work: `run()` **79.5KB → 49.1KB**, with
+    `run_sse` 20.1KB, `run_x87` 7.6KB, `run_cold` 8.7KB standing on their own.
+    It was **~8% slower** (mips 101.7 vs 110.1 on the one interleaved pair whose
+    load matched).  The reason is that the premise was wrong: `run_cold` also
+    handles **shifts**, and `c1` is 217M in the opcode histogram, so it is not
+    cold at all and every shift paid for an indirect call.  Size is a proxy, not
+    the goal — do not chase it without measuring.
   - **What does NOT work is anything that adds live values**, even when it removes
     real memory traffic.  Measured and rejected: pointer-out `decode_modrm`
     (**−7%**), a packed-u64 modrm return that made both decode structs pure wasm
