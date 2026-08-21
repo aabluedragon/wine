@@ -169,6 +169,50 @@ which counts executions of a single guest address and cost nothing to trust.
   `wasm_x86.o` isolate the interpreter and are much faster than a full rebuild.
 
 
+## Input
+
+Keyboard and mouse are delivered from the page through a SharedArrayBuffer ring
+(the worker never returns to its event loop, so postMessage cannot reach it).
+`wasm_drain_browser_input()` at the top of `NtUserPeekMessage` turns ring records
+into window messages: 1=keydown 2=keyup 3=absolute move 4/5=button down/up
+6=relative motion.
+
+**Mouselook needs pointer lock and a synthetic SDL event — window messages are
+not enough.** Two facts force this:
+
+- Only under **pointer lock** does the browser report unbounded
+  `movementX/movementY`; unlocked, the cursor stops at the window edge and turning
+  stops with it. Clicking the canvas locks, Esc releases, and the status line
+  says which state you are in.
+- The game **never polls mouse state** — `SDL_GetRelativeMouseState` has *zero*
+  call sites in the exe. It calls `SDL_SetRelativeMouseMode` and then reads
+  `xrel`/`yrel` out of **`SDL_MOUSEMOTION` events**. Real SDL answers relative
+  mode by switching its Windows backend to **raw input (`WM_INPUT`)**, which we do
+  not deliver — so no amount of `WM_MOUSEMOVE` will ever drive mouselook.
+
+So `SDL_SetRelativeMouseMode` is accepted (returns success; the game hides its
+cursor and switches to `xrel`/`yrel`) and `SDL_PollEvent` is intercepted to inject
+a synthetic `SDL_MouseMotionEvent` built from the pointer-lock deltas. The
+interception is **partial on purpose**: with no delta pending the hook returns 0
+from `nat_call`, so the *real* `SDL_PollEvent` runs and keys, buttons and quit are
+untouched. (That "decline and fall through" is the general recipe for hooking one
+case of a function.) The struct layout came from the exe's own **DWARF** — it
+ships `.debug_info` — not from guessing: 36 bytes, `type@0 timestamp@4
+windowID@8 which@12 state@16 x@20 y@24 xrel@28 yrel@32`, `SDL_MOUSEMOTION` 1024.
+`WASM_NO_MOUSE=1` disables the whole path.
+
+**Aspect ratio.** The canvas display size is computed from the frame's real
+dimensions with one scale factor on both axes, fitted into a 1024x768 box — 320x200
+renders as 1024x640. It was previously hard-coded 4:3 against an 8:5 framebuffer,
+i.e. stretched vertically; the status line now prints the ratio so a regression is
+visible.
+
+**JS trap, hit twice:** `noteInput()` runs before the page finishes evaluating, so
+any `let` it touches must be declared *above* it. A temporal-dead-zone throw kills
+the whole page script silently — blank page, empty log, zero frames, and nothing
+that points at input.
+
+
 ## Audio
 
 Sound effects work; **music is off on purpose** (see below).
