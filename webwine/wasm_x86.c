@@ -136,16 +136,18 @@ static uint32_t g_prof_eip[PROF_SLOTS];
 static uint32_t g_prof_cnt[PROF_SLOTS];
 static int g_prof_on = 0;
 static int g_prof_countdown = 1;
+static uint64_t g_prof_total, g_prof_dropped;   /* true totals: the table + top-N list only show the peaks */
 static void prof_sample( uint32_t eip )
 {
     uint32_t h = (eip * 2654435761u) >> 20;      /* fibonacci hash -> 12 bits */
+    g_prof_total++;
     for (int i = 0; i < 8; i++)                  /* short linear probe */
     {
         uint32_t s = (h + i) & (PROF_SLOTS - 1);
         if (g_prof_cnt[s] == 0) { g_prof_eip[s] = eip; g_prof_cnt[s] = 1; return; }
         if (g_prof_eip[s] == eip) { g_prof_cnt[s]++; return; }
     }
-    /* table pressure: drop the sample rather than evict (keeps counts honest) */
+    g_prof_dropped++;   /* table pressure: drop rather than evict */
 }
 /* Identify which PE module an address belongs to: scan down for the MZ/PE
  * header (modules are 64K-aligned) and read the export directory's name.  Used
@@ -776,7 +778,7 @@ static int nat_call( struct x86cpu *c, int kind )
 
 static void prof_dump( void )
 {
-    for (int top = 0; top < 30; top++)
+    for (int top = 0; top < 60; top++)
     {
         uint32_t best = 0, bi = 0;
         for (int i = 0; i < PROF_SLOTS; i++)
@@ -788,8 +790,11 @@ static void prof_dump( void )
             fprintf( stderr, "PROF %08x %u %s\n", g_prof_eip[bi], best, prof_module( g_prof_eip[bi] ) );
         g_prof_cnt[bi] = 0;   /* consumed */
     }
+    fprintf( stderr, "PROF TOTAL %llu dropped %llu\n",
+             (unsigned long long)g_prof_total, (unsigned long long)g_prof_dropped );
     fprintf( stderr, "PROF ---\n" );
     memset( g_prof_cnt, 0, sizeof(g_prof_cnt) );
+    g_prof_total = 0; g_prof_dropped = 0;
 }
 
 static void wasm_dump_frame( struct x86cpu *c )

@@ -54,11 +54,14 @@ symbols (`VA = symbol value + 0x401000`).  This is what found the memmove
 result; guessing would not have.  The stride is **jittered** and the sampler is
 compile-time gated (`PROFILE=1`), so production builds pay nothing.
 
-**Do not trust PROF percentages for very tight loops.**  It reported the engine's
-sprite-timer loop at 29-37% of the frame; a direct execution counter
-(`WASM_COUNT_LOOP`) measured exactly 16,650 iterations/frame — ~6% — and running
-that loop natively gained ~10% wall, not 37%.  Confirm any hot-loop claim with a
-counter before acting on it.
+It prints `PROF TOTAL <n> dropped <n>` per window, and **percentages must be taken
+against that total, not against the listed lines** — the dump only lists the top
+60 addresses.  That detail matters: computing shares against the *listed* subset
+made every tight loop look dominant, because a 35-instruction loop fills the whole
+list while genuinely diffuse code (thousands of addresses, a few samples each)
+never appears at all.  It reported one loop at 96% of the frame that a direct
+counter put at 14%.  Cross-check any hot-loop claim with `WASM_COUNT_ADDR=<hex>`,
+which counts executions of a single guest address and cost nothing to trust.
 
 - **THE governing constraint: `run()` is register-pressure bound.**  It was a
   **76KB single wasm function — 90% of the whole module** — far past the size
