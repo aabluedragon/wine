@@ -25,6 +25,12 @@ Module['preRun'].push(function () {
      because opening a real device would need an audio thread we do not have. */
   E.SDL_AUDIODRIVER = 'dummy';
 
+  /* Anything uppercase in the page URL's query string lands in the guest env
+     (?WASM_PROF=1, ?WASM_NO_MOUSE=1, ...).  Lets one built bundle be A/B'd
+     without a rebuild, which is the only way to compare fairly on a machine
+     whose background load drifts between builds. */
+  try { var X = self.__wwEnv || {}; for (var k in X) E[k] = X[k]; } catch (e) {}
+
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }
   function sym(t, l) { try { FS.symlink(t, l); } catch (e) {} }
   mkdirp('/prefix/dosdevices');

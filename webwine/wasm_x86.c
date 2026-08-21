@@ -208,10 +208,11 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
+static uint64_t g_mv_calls, g_mv_iters;   /* native mvlineasm4: entries and loop iterations */
 #define NAT_SLOTS 256
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
@@ -679,6 +680,193 @@ static void nat_arm_vline( void )
     else fprintf( stderr, "wasm_x86: vlineasm4 skeleton differs at %08x - left interpreted\n", va );
 }
 
+/* ---- mvlineasm4: the masked (transparent) 4-column texture mapper ----------
+ *
+ * The largest single cost left in gameplay - a sampled in-level profile puts
+ * ~32% of ALL samples inside this one loop.  It is vlineasm4's masked sibling:
+ * sprites, see-through walls and the player's weapon all go through it, so it
+ * dominates exactly when vlineasm4 does not.
+ *
+ * Shape of Ken Silverman's asm (immediates patched per call by the C prologue):
+ *
+ *   beginmvlineasm4:   dec %cl / je endmvlineasm4          <- inner counter
+ *   beginmvlineasm42:  for each of 4 columns: index = acc >> shift,
+ *                      texel = tex[index], acc += step,
+ *                      CF = (texel != 255), mask = mask*2 + CF,
+ *                      pixel = shade[texel]
+ *   fixchain2mb:       edi += bytesperline; jmp mvcase[mask]
+ *   mvcase<mask>:      store only the opaque bytes; jmp beginmvlineasm4
+ *   endmvlineasm4:     decb <counter> / jne beginmvlineasm42  <- outer counter
+ *
+ * The count is split across two 8-bit counters so the inner test can be a
+ * one-byte `dec`, and two registers do double duty to free up a register:
+ * %cl IS the low byte of %ecx's texture accumulator, and %dl IS the low byte of
+ * %edx's.  That only works because the prologue zeroes the low byte of those
+ * two steps (`xor %al,%al` before patching them in) and because the shifts
+ * discard the low byte again.  We verify both rather than trust them, and fall
+ * back to the interpreter if either fails - a wrong assumption here would
+ * corrupt texture coordinates, which is far harder to spot than a crash.
+ *
+ * We run the whole two-level nest natively and re-enter the guest at
+ * endmvlineasm4 with the outer counter still at its last value, so the guest
+ * performs its own final `decb` - which means we never have to synthesise the
+ * flags it leaves behind.
+ */
+#define ND_MVLINE     0x6325a0u
+#define ND_MVLINE_LEN 0x90u
+#define ND_MVCOUNT    0x00e18f88u    /* the outer counter (a shared scratch global) */
+
+/* offset -> number of patched (wildcard) bytes; everything else must match */
+static const struct { uint16_t off; uint8_t len; } nd_mvline_imm[] = {
+    { 0x0e, 1 }, { 0x11, 1 }, { 0x14, 4 }, { 0x1a, 4 }, { 0x21, 4 }, { 0x28, 4 },
+    { 0x37, 4 }, { 0x3d, 4 }, { 0x45, 1 }, { 0x4c, 4 }, { 0x56, 4 }, { 0x5c, 4 },
+    { 0x64, 1 }, { 0x67, 4 }, { 0x6e, 4 }, { 0x78, 4 }, { 0x83, 4 }, { 0x8a, 4 },
+};
+static const uint8_t nd_mvline_code[ND_MVLINE_LEN] = {
+    0xfe,0xc9,0x0f,0x84,0x88,0x00,0x00,0x00,0x89,0xe8,0x89,0xf3,
+    0xc1,0xe8,0x20,0xc1,0xeb,0x20,0x81,0xc5,0x88,0x88,0x88,0x88,
+    0x81,0xc6,0x88,0x88,0x88,0x88,0x0f,0xb6,0x80,0x88,0x88,0x88,
+    0x88,0x0f,0xb6,0x9b,0x88,0x88,0x88,0x88,0x3c,0xff,0x10,0xd2,
+    0x80,0xfb,0xff,0x10,0xd2,0x8a,0x9b,0x88,0x88,0x88,0x88,0x8a,
+    0xb8,0x88,0x88,0x88,0x88,0x89,0xd0,0xc1,0xe8,0x20,0xc1,0xe3,
+    0x10,0x0f,0xb6,0x80,0x88,0x88,0x88,0x88,0x3c,0xff,0x10,0xd2,
+    0x81,0xc2,0x88,0x88,0x88,0x88,0x8a,0xb8,0x88,0x88,0x88,0x88,
+    0x89,0xc8,0xc1,0xe8,0x20,0x81,0xc1,0x88,0x88,0x88,0x88,0x0f,
+    0xb6,0x80,0x88,0x88,0x88,0x88,0x3c,0xff,0x10,0xd2,0x8a,0x98,
+    0x88,0x88,0x88,0x88,0xc0,0xe2,0x04,0x31,0xc0,0x81,0xc7,0x40,
+    0x01,0x00,0x00,0x88,0xd0,0x05,0x60,0x26,0x63,0x00,0xff,0xe0,
+};
+static const uint8_t nd_mvcase_code[256] = {
+    0xe9,0x3b,0xff,0xff,0xff,0x90,0x90,0x90,0x90,0x90,0x90,0x90,
+    0x90,0x90,0x90,0x90,0x88,0x1f,0xe9,0x29,0xff,0xff,0xff,0x90,
+    0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x88,0x7f,0x01,0xe9,
+    0x18,0xff,0xff,0xff,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,
+    0x66,0x89,0x1f,0xe9,0x08,0xff,0xff,0xff,0x90,0x90,0x90,0x90,
+    0x90,0x90,0x90,0x90,0xc1,0xeb,0x10,0x88,0x5f,0x02,0xe9,0xf5,
+    0xfe,0xff,0xff,0x90,0x90,0x90,0x90,0x90,0x88,0x1f,0xc1,0xeb,
+    0x10,0x88,0x5f,0x02,0xe9,0xe3,0xfe,0xff,0xff,0x90,0x90,0x90,
+    0xc1,0xeb,0x08,0x66,0x89,0x5f,0x01,0xe9,0xd4,0xfe,0xff,0xff,
+    0x90,0x90,0x90,0x90,0x66,0x89,0x1f,0xc1,0xeb,0x10,0x88,0x5f,
+    0x02,0xe9,0xc2,0xfe,0xff,0xff,0x90,0x90,0xc1,0xeb,0x10,0x88,
+    0x7f,0x03,0xe9,0xb5,0xfe,0xff,0xff,0x90,0x90,0x90,0x90,0x90,
+    0x88,0x1f,0xc1,0xeb,0x10,0x88,0x7f,0x03,0xe9,0xa3,0xfe,0xff,
+    0xff,0x90,0x90,0x90,0x88,0x7f,0x01,0xc1,0xeb,0x10,0x88,0x7f,
+    0x03,0xe9,0x92,0xfe,0xff,0xff,0x90,0x90,0x66,0x89,0x1f,0xc1,
+    0xeb,0x10,0x88,0x7f,0x03,0xe9,0x82,0xfe,0xff,0xff,0x90,0x90,
+    0xc1,0xeb,0x10,0x66,0x89,0x5f,0x02,0xe9,0x74,0xfe,0xff,0xff,
+    0x90,0x90,0x90,0x90,0x88,0x1f,0xc1,0xeb,0x10,0x66,0x89,0x5f,
+    0x02,0xe9,0x62,0xfe,0xff,0xff,0x90,0x90,0x88,0x7f,0x01,0xc1,
+    0xeb,0x10,0x66,0x89,0x5f,0x02,0xe9,0x51,0xfe,0xff,0xff,0x90,
+    0x89,0x1f,0xe9,0x49,0xfe,0xff,0xff,0x90,0x90,0x90,0x90,0x90,
+    0x90,0x90,0x90,0x90,
+};
+
+/* How each store case leaves %ebx: the cases that reach bytes 2/3 shift it down
+ * first, and the caller can observe that, so reproduce it exactly. */
+static const uint8_t nd_mvcase_shift[16] = {
+    0, 0, 0, 0, 16, 16, 8, 16, 16, 16, 16, 16, 16, 16, 16, 0
+};
+
+static int nd_mvline_skeleton_ok( uint32_t va, uint32_t *casebase )
+{
+    uint8_t wild[ND_MVLINE_LEN];
+    unsigned i, k;
+    uint32_t cb;
+
+    memset( wild, 0, sizeof(wild) );
+    for (i = 0; i < sizeof(nd_mvline_imm)/sizeof(nd_mvline_imm[0]); i++)
+        for (k = 0; k < nd_mvline_imm[i].len; k++) wild[nd_mvline_imm[i].off + k] = 1;
+    for (i = 0; i < ND_MVLINE_LEN; i++)
+        if (!wild[i] && rd8( va + i ) != nd_mvline_code[i]) return 0;
+    /* the 16 store cases are ordinary code that is never patched, and their
+     * jumps back are relative - so the whole table must match byte for byte */
+    cb = rd32( va + 0x8a );
+    /* the table lives a few dozen bytes past the loop; refuse anything else
+     * rather than read 256 bytes through a pointer we decoded wrong */
+    if (cb < va || cb - va > 0x400) return 0;
+    for (i = 0; i < 256; i++)
+        if (rd8( cb + i ) != nd_mvcase_code[i]) return 0;
+    *casebase = cb;
+    return 1;
+}
+
+static int nat_mvlineasm4( struct x86cpu *c )
+{
+    uint32_t b = ND_MVLINE + (uint32_t)nd_slide;
+    uint32_t s16 = rd8 ( b + 0x0e ), s15 = rd8 ( b + 0x11 );
+    uint32_t s14 = rd8 ( b + 0x45 ), s13 = rd8 ( b + 0x64 );
+    uint32_t a12 = rd32( b + 0x14 ), a9 = rd32( b + 0x1a );
+    uint32_t a6  = rd32( b + 0x56 ), a3 = rd32( b + 0x67 );
+    const uint8_t *t3 = (const uint8_t *)(uintptr_t)rd32( b + 0x21 );   /* %ebp column */
+    const uint8_t *t2 = (const uint8_t *)(uintptr_t)rd32( b + 0x28 );   /* %esi column */
+    const uint8_t *t1 = (const uint8_t *)(uintptr_t)rd32( b + 0x4c );   /* %edx column */
+    const uint8_t *t0 = (const uint8_t *)(uintptr_t)rd32( b + 0x6e );   /* %ecx column */
+    const uint8_t *p3 = (const uint8_t *)(uintptr_t)rd32( b + 0x3d );
+    const uint8_t *p2 = (const uint8_t *)(uintptr_t)rd32( b + 0x37 );
+    const uint8_t *p1 = (const uint8_t *)(uintptr_t)rd32( b + 0x5c );
+    const uint8_t *p0 = (const uint8_t *)(uintptr_t)rd32( b + 0x78 );
+    uint32_t bpl = rd32( b + 0x83 ), cbase = rd32( b + 0x8a );
+    uint32_t cnt = ND_MVCOUNT + (uint32_t)nd_slide;
+    uint32_t eax = c->regs[EAX], ebx = c->regs[EBX], ecx = c->regs[ECX];
+    uint32_t edx = c->regs[EDX], esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
+    uint32_t cl = ecx & 0xff, dl = edx & 0xff, mem = rd8( cnt );
+    unsigned iters = 0;
+
+    /* the two shared registers only work if the steps leave the low byte alone
+     * and the shifts throw it away again */
+    if ((a3 & 0xff) || (a6 & 0xff)) return 0;
+    if (s13 < 8 || s13 > 31 || s14 < 8 || s14 > 31 || s15 > 31 || s16 > 31) return 0;
+
+    for (;;)
+    {
+        uint32_t x0, x1, x2, x3, mask;
+
+        cl = (cl - 1) & 0xff;
+        if (!cl)
+        {
+            if (((mem - 1) & 0xff) == 0) break;   /* leave the last dec to the guest */
+            mem = (mem - 1) & 0xff;
+        }
+        x3 = t3[ ebp >> s16 ];  ebp += a12;
+        x2 = t2[ esi >> s15 ];  esi += a9;
+        x1 = t1[ edx >> s14 ];  edx += a6;
+        x0 = t0[ ecx >> s13 ];  ecx += a3;
+        mask = (uint32_t)(x3 != 0xff) << 3 | (uint32_t)(x2 != 0xff) << 2 |
+               (uint32_t)(x1 != 0xff) << 1 | (uint32_t)(x0 != 0xff);
+        ebx = (uint32_t)p0[x0] | (uint32_t)p1[x1] << 8 |
+              (uint32_t)p2[x2] << 16 | (uint32_t)p3[x3] << 24;
+        edi += bpl;
+        if (mask)
+        {
+            uint8_t *d = (uint8_t *)(uintptr_t)edi;
+            if (mask & 1) d[0] = (uint8_t)ebx;
+            if (mask & 2) d[1] = (uint8_t)(ebx >> 8);
+            if (mask & 4) d[2] = (uint8_t)(ebx >> 16);
+            if (mask & 8) d[3] = (uint8_t)(ebx >> 24);
+        }
+        dl = (mask << 4) & 0xff;              /* what `shl $0x4,%dl` leaves */
+        eax = cbase + dl;                     /* what the case dispatch leaves */
+        ebx >>= nd_mvcase_shift[mask];        /* what the taken case leaves */
+        iters++;
+    }
+    g_mv_calls++; g_mv_iters += iters;
+
+    wr8( cnt, (uint8_t)mem );                 /* the guest's own decb takes it to 0 */
+    c->regs[EAX] = eax; c->regs[EBX] = ebx;
+    c->regs[ECX] = (ecx & 0xffffff00u) | cl;  /* %cl is spent */
+    c->regs[EDX] = (edx & 0xffffff00u) | dl;
+    c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
+    c->eip = b + ND_MVLINE_LEN;               /* endmvlineasm4 */
+    return 1;
+}
+
+static void nat_arm_mvline( void )
+{
+    uint32_t va = ND_MVLINE + (uint32_t)nd_slide, cb = 0;
+    if (nd_mvline_skeleton_ok( va, &cb )) nat_register( va, NAT_MVLINE, "mvlineasm4" );
+    else fprintf( stderr, "wasm_x86: mvlineasm4 skeleton differs at %08x - left interpreted\n", va );
+}
+
 /* ---- 8-bpp -> 32-bpp surface blit, run natively -----------------------------
  *
  * videoNextPage's inner conversion loop (0x519f87): read a 16-bit pair from the
@@ -814,6 +1002,7 @@ static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
+    if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
     switch (kind)
     {
@@ -2044,6 +2233,7 @@ static void run( struct x86cpu *c )
                               nat_arm_ageloop();
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
+                          if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
@@ -2086,7 +2276,7 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
             if (tp_on)
@@ -2098,17 +2288,20 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f sb=%.0f/%.0f kinsn/frame=%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f sb=%.0f/%.0f kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
                              (unsigned long long)(g_aud.cb_calls - tp_last_calls),
                              fps > 0 ? (double)(g_vl_calls - tp_last_vlc) / fps : 0.0,
                              fps > 0 ? (double)(g_vl_iters - tp_last_vli) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv_calls - tp_last_mvc) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv_iters - tp_last_mvi) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_calls - tp_last_sbc) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_iters - tp_last_sbi) / fps : 0.0,
                              fps > 0 ? (double)(g_total_insns - tp_last_insns) / fps / 1000.0 : 0.0 );
                     tp_last_sbc = g_sb_calls; tp_last_sbi = g_sb_iters;
+                    tp_last_mvc = g_mv_calls; tp_last_mvi = g_mv_iters;
                     tp_last_vlc = g_vl_calls; tp_last_vli = g_vl_iters;
                     tp_last_hits = g_count_hits;
                     tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;

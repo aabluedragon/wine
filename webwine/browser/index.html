@@ -206,9 +206,18 @@ addEventListener('pointerdown', resumeAudio, true);
 addEventListener('keydown', resumeAudio, true);
 
 const worker = new Worker('worker.js');
+/* A wasm trap kills the worker with no output at all - the page just sits at
+   'frames: 0' forever, which reads exactly like a slow boot.  Say so instead. */
+worker.onerror = e => {
+  const msg = 'worker died: ' + (e.message || 'wasm trap') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : '');
+  logEl.textContent += msg + '\n';
+  statusEl.textContent = msg;
+};
 // Hand over the ring BEFORE the module boots - once it starts interpreting, the
 // worker never services messages again.
-worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP });
+const wwEnv = {};
+for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*$/.test(k)) wwEnv[k] = v;
+worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP, env: wwEnv });
 
 worker.onmessage = (e) => {
   const m = e.data;

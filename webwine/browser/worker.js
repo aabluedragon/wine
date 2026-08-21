@@ -7,6 +7,7 @@
 // returns to its event loop and can never receive another message.
 self.onmessage = function (e) {
   if (!e.data || e.data.type !== 'input') return;
+  if (e.data.env) self.__wwEnv = e.data.env;   // uppercase query-string params -> guest env
   if (e.data.ring) self.__wwInput = e.data.ring;   // Int32Array over a SharedArrayBuffer
   if (e.data.audio) {                              // PCM ring drained by the AudioWorklet
     self.__wwAudio = {
