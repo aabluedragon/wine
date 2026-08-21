@@ -205,9 +205,10 @@ static const char *prof_module( uint32_t va )
  * so it must not get more expensive than that). */
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
-       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE };
+       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
+static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
 #define NAT_SLOTS 256
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
@@ -675,10 +676,77 @@ static void nat_arm_vline( void )
     else fprintf( stderr, "wasm_x86: vlineasm4 skeleton differs at %08x - left interpreted\n", va );
 }
 
+/* ---- 8-bpp -> 32-bpp surface blit, run natively -----------------------------
+ *
+ * videoNextPage's inner conversion loop (0x519f87): read a 16-bit pair from the
+ * 8-bpp frame, map it through a byte table, look the result up in a 32-bit
+ * palette and store one output pixel.  Seven instructions per pixel over the
+ * whole frame, which after vlineasm4 went native is the biggest thing left.
+ *
+ * Note this work is pure overhead FOR US - we present by reading `frameplace`
+ * (the 8-bpp buffer) and palettising it ourselves - but the game still owes SDL
+ * a converted surface, so rather than skip its output we just stop interpreting
+ * it.  Same self-validating pattern as vlineasm4: the only non-fixed field is
+ * the absolute palette address, which is read from the instruction. */
+#define ND_SURFBLIT 0x519f87u
+#define ND_SURFBLIT_LEN 27u
+static const uint8_t nd_surfblit_code[ND_SURFBLIT_LEN] = {
+    0x0f,0xb7,0x16,             /* movzwl (%esi),%edx            */
+    0x83,0xc0,0x04,             /* add    $0x4,%eax              */
+    0x83,0xc6,0x02,             /* add    $0x2,%esi              */
+    0x0f,0xb6,0x14,0x17,        /* movzbl (%edi,%edx,1),%edx     */
+    0x8b,0x14,0x95,0,0,0,0,     /* mov    PAL(,%edx,4),%edx      */
+    0x89,0x50,0xfc,             /* mov    %edx,-0x4(%eax)        */
+    0x39,0xd8,                  /* cmp    %ebx,%eax              */
+    0x72,0xe5                   /* jb     loop                   */
+};
+
+static int nat_surfblit( struct x86cpu *c )
+{
+    uint32_t b = ND_SURFBLIT + (uint32_t)nd_slide;
+    uint32_t pal = rd32( b + 16 );                 /* absolute palette base */
+    uint32_t eax = c->regs[EAX], ebx = c->regs[EBX];
+    uint32_t esi = c->regs[ESI], edi = c->regs[EDI], edx;
+    unsigned guard = 0;
+
+    do {
+        edx = rd16( esi );
+        eax += 4;
+        esi += 2;
+        edx = rd8( edi + edx );
+        edx = rd32( pal + edx * 4 );
+        wr32( eax - 4, edx );
+        guard++;
+    } while (eax < ebx && guard < (1u << 24));
+    g_sb_calls++; g_sb_iters += guard;
+
+    c->regs[EAX] = eax; c->regs[ESI] = esi; c->regs[EDX] = edx;
+    set_lazy( c, K_SUB, eax, ebx, eax - ebx, 4 );  /* the cmp that ended it */
+    c->eip = b + ND_SURFBLIT_LEN;
+    return 1;
+}
+
+static void nat_arm_surfblit( void )
+{
+    uint32_t va = ND_SURFBLIT + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < ND_SURFBLIT_LEN; i++)
+    {
+        if (i >= 16 && i < 20) continue;           /* palette address: wildcard */
+        if (rd8( va + i ) != nd_surfblit_code[i] )
+        {
+            fprintf( stderr, "wasm_x86: surface-blit skeleton differs at %08x - left interpreted\n", va );
+            return;
+        }
+    }
+    nat_register( va, NAT_SURFBLIT, "surface blit" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
+    if (kind == NAT_SURFBLIT) return nat_surfblit( c );
     switch (kind)
     {
     case NAT_SDL_OPEN:     return sdl_open_audio( c, 0 );
@@ -1902,6 +1970,7 @@ static void run( struct x86cpu *c )
                               nat_arm_ageloop();
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
+                          if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
@@ -1918,7 +1987,7 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
                                g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
             if (tp_on)
@@ -1930,13 +1999,17 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f sb=%.0f/%.0f kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
                              (unsigned long long)(g_aud.cb_calls - tp_last_calls),
                              fps > 0 ? (double)(g_vl_calls - tp_last_vlc) / fps : 0.0,
-                             fps > 0 ? (double)(g_vl_iters - tp_last_vli) / fps : 0.0 );
+                             fps > 0 ? (double)(g_vl_iters - tp_last_vli) / fps : 0.0,
+                             fps > 0 ? (double)(g_sb_calls - tp_last_sbc) / fps : 0.0,
+                             fps > 0 ? (double)(g_sb_iters - tp_last_sbi) / fps : 0.0,
+                             fps > 0 ? (double)(g_total_insns - tp_last_insns) / fps / 1000.0 : 0.0 );
+                    tp_last_sbc = g_sb_calls; tp_last_sbi = g_sb_iters;
                     tp_last_vlc = g_vl_calls; tp_last_vli = g_vl_iters;
                     tp_last_hits = g_count_hits;
                     tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;
