@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1 };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1165,7 +1165,7 @@ static void nat_arm_surfspan( void )
  * we simply decline and let the interpreter do it.
  */
 #define ND_LIBDIV     0x401e60u
-#define LD_SETS 1024
+#define LD_SETS 4096
 #define LD_WAYS 4
 static const uint8_t nd_libdiv_code[] = {
     0x55,                       /* push %ebp                */
@@ -1196,7 +1196,7 @@ static int nat_libdivide( struct x86cpu *c )
     if (g_ld_filling) return 0;                  /* the nested run re-enters here */
     bf  = rd32( esp + 4 );                       /* branchfree: the one stack arg */
     key = ((((uint64_t)c->regs[ECX] << 32) | c->regs[EDX]) << 1) | (bf != 0);
-    h   = (uint32_t)((key * 0x9e3779b97f4a7c15ull) >> 54) & (LD_SETS - 1);
+    h   = (uint32_t)((key * 0x9e3779b97f4a7c15ull) >> 52) & (LD_SETS - 1);
 
     g_ld_calls++;
     for (w = 0; w < LD_WAYS; w++)
@@ -1490,12 +1490,83 @@ static void nat_arm_glsampler( void )
     nat_register( b, NAT_GLSAMPLER, "buildgl sampler (no GL)" );
 }
 
+/* ---- vlineasm1: the single-column texture mapper ---------------------------
+ *
+ * The last self-modifying mapper, and the simplest: one pixel per iteration in
+ * eight instructions, with the texture and shade table already in registers so
+ * only two fields are patched (the shift and the bytes-per-line step).
+ *
+ * A direct counter puts it at 1189 iterations a frame x 8 instructions = 1.4% of
+ * the frame.  The sampler said 2.07%; the counter is the one to believe.
+ *
+ * Exit is easy: the epilogue pops ebp/edi/esi/edx/ecx/ebx, but it reads %edx
+ * into %eax first (that is the return value), so %edx is the one register that
+ * has to be right.
+ */
+#define ND_VLINE1     0x631cf7u    /* beginvline */
+#define ND_VLINE1_LEN 0x1au
+static const uint8_t nd_vline1_code[ND_VLINE1_LEN] = {
+    0x89,0xd3,                  /* mov    %edx,%ebx              */
+    0xc1,0xeb,0x00,             /* shr    $S,%ebx        (mach3a) */
+    0x81,0xc7,0,0,0,0,          /* add    $BPL,%edi  (fixchain1b) */
+    0x0f,0xb6,0x1c,0x1e,        /* movzbl (%esi,%ebx,1),%ebx     */
+    0x01,0xc2,                  /* add    %eax,%edx              */
+    0x49,                       /* dec    %ecx                   */
+    0x8a,0x5c,0x1d,0x00,        /* mov    0x0(%ebp,%ebx,1),%bl   */
+    0x88,0x1f,                  /* mov    %bl,(%edi)             */
+    0x75,0xe6                   /* jne    beginvline             */
+};
+
+static uint64_t g_v1_calls, g_v1_iters;
+
+static int nat_vlineasm1( struct x86cpu *c )
+{
+    uint32_t b   = ND_VLINE1 + (uint32_t)nd_slide;
+    uint32_t sh  = rd8 ( b + 0x04 ) & 31;
+    uint32_t bpl = rd32( b + 0x07 );
+    uint32_t eax = c->regs[EAX], ebx = c->regs[EBX], ecx = c->regs[ECX];
+    uint32_t edx = c->regs[EDX], esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
+    unsigned n = 0;
+
+    if (!ecx) return 0;      /* would wrap to 4G iterations - let the guest have it */
+
+    do {
+        ebx = edx >> sh;
+        edi += bpl;
+        ebx = rd8( esi + ebx );          /* texel */
+        edx += eax;                      /* texture position += step */
+        ecx--;
+        ebx = rd8( ebp + ebx );          /* shade; only %bl is written, and the
+                                          * movzbl above left the top bytes zero */
+        wr8( edi, (uint8_t)ebx );
+        n++;
+    } while (ecx);
+    g_v1_calls++; g_v1_iters += n;
+
+    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = ecx;
+    c->regs[EDX] = edx; c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
+    c->eip = b + ND_VLINE1_LEN;          /* the pop %ebp after the loop */
+    return 1;
+}
+
+static void nat_arm_vline1( void )
+{
+    uint32_t b = ND_VLINE1 + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < ND_VLINE1_LEN; i++)
+        if (i == 0x04 || (i >= 0x07 && i <= 0x0a)) continue;   /* the patched fields */
+        else if (rd8( b + i ) != nd_vline1_code[i])
+        { fprintf( stderr, "wasm_x86: vlineasm1 skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_VLINE1, "vlineasm1" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
+    if (kind == NAT_VLINE1)  return nat_vlineasm1( c );
     if (kind == NAT_GLSTATE) return nat_inthash_find( c );
     if (kind == NAT_GLSAMPLER) return nat_glsampler( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
@@ -2740,6 +2811,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
+                          if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
