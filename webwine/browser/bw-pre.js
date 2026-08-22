@@ -50,6 +50,11 @@ Module['preRun'].push(function () {
      whose background load drifts between builds. */
   try { var X = self.__wwEnv || {}; for (var k in X) E[k] = X[k]; } catch (e) {}
 
+  /* ?WW_ARGS=a,b,c appends command line arguments for the game, so a session can
+     start where you want it (-map E1L1.MAP) instead of being driven through the
+     menus - booting takes long enough that it matters when iterating. */
+  if (E.WW_ARGS) Module['arguments'] = Module['arguments'].concat(E.WW_ARGS.split(','));
+
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }
   function sym(t, l) { try { FS.symlink(t, l); } catch (e) {} }
   mkdirp('/prefix/dosdevices');
