@@ -1291,6 +1291,13 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
             GL_ARB_framebuffer_object, GL_ARB_texture_storage,
             GL_ARB_instanced_arrays, GL_ARB_draw_instanced,
             GL_ARB_sync,
+            /* ES 3.0 takes non-power-of-two textures in core, with the wrap
+             * modes and mipmapping ES 2.0 withheld.  An application that misses
+             * this does not fall back to something slower, it packs its own
+             * atlases and emulates the addressing in a shader - and then every
+             * sprite is sampled a little outside the region it was given and
+             * comes out with its right-hand columns missing. */
+            GL_ARB_texture_non_power_of_two,
         };
         for (i = 0; i < ARRAY_SIZE(es3_core); i++) client->extensions[es3_core[i]] = TRUE;
     }

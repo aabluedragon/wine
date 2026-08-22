@@ -207,14 +207,57 @@ int webwine_gl_active;
 EM_JS(void, webwine_gl_present_js, (void), {
   var c = Module['canvas'];
   if (!c || !c.transferToImageBitmap) return;
+  /* Back-pressure.  The interpreter can finish frames several times faster than
+     the page can draw them, and every one posted is an ImageBitmap holding a GPU
+     surface; with nothing to stop it the main thread's queue grows until the
+     bitmaps stop arriving intact and the canvas goes blank.  The page counts
+     what it has drawn in the shared control block, so drop a frame rather than
+     queue a third one - a frame the display will never show is pure waste. */
+  var d = self.__wwCtl;
+  if (d && Atomics.load(d, 3) - Atomics.load(d, 2) >= 2) return;
+  /* WASM_GLPIX=1: sample the middle of the framebuffer before the transfer, so a
+     blank picture can be blamed on the rendering or on the transfer. */
+  if (Module.__glpix && (Module.__glpixN = (Module.__glpixN|0) + 1) % 300 === 1) {
+    try {
+      var gl = Module['ctx'], px = new Uint8Array(4), out = '', k;
+      var pts = [[c.width>>1, c.height>>1], [c.width>>2, c.height>>1], [c.width>>1, c.height>>2], [4, 4]];
+      for (k = 0; k < pts.length; k++) {
+        gl.readPixels(pts[k][0], pts[k][1], 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        out += ' ' + pts[k][0] + ',' + pts[k][1] + '=' + px[0] + '/' + px[1] + '/' + px[2] + '/' + px[3];
+      }
+      var cm = gl.getParameter(gl.COLOR_WRITEMASK) || [], cc = gl.getParameter(gl.COLOR_CLEAR_VALUE) || [];
+      var at = gl.getContextAttributes ? (gl.getContextAttributes() || {}) : {};
+      postMessage({ type: 'log', line: 'wasm_x86: glpix' + out + ' lost=' + gl.isContextLost() +
+                                       ' err=' + gl.getError() + ' mask=' + cm.join(',') +
+                                       ' clear=' + cc.join(',') + ' pdb=' + at.preserveDrawingBuffer +
+                                       ' blend=' + gl.isEnabled(gl.BLEND) +
+                                       ' scis=' + gl.isEnabled(gl.SCISSOR_TEST) });
+    } catch (e) { postMessage({ type: 'log', line: 'wasm_x86: glpix failed ' + e }); }
+  }
   var bmp = c.transferToImageBitmap();
+  if (d) Atomics.add(d, 3, 1);
   postMessage({ type: 'glframe', w: c.width, h: c.height, bmp: bmp }, [bmp]);
 });
 EM_JS(void, webwine_gl_resize, (int w, int h), {
   var c = Module['canvas'];
   if (c && (c.width !== w || c.height !== h)) { c.width = w; c.height = h; }
 });
-void webwine_gl_present( void ) { webwine_gl_active = 8; webwine_gl_present_js(); }
+void webwine_gl_present( void )
+{
+    /* WASM_NO_GLPRESENT=1 keeps the 8-bpp frameplace present in charge even when
+     * the game is drawing through GL.  The engine blits its classic 8-bit buffer
+     * with a GL shader too, so both renderers normally share this path; this is
+     * how you tell a picture the engine drew from one the GL present mangled. */
+    static int off = -1;
+    if (off == -1)
+    {
+        off = getenv( "WASM_NO_GLPRESENT" ) ? 1 : 0;
+        if (getenv( "WASM_GLPIX" )) emscripten_run_script( "Module.__glpix = 1;" );
+    }
+    if (off) return;
+    webwine_gl_active = 8;
+    webwine_gl_present_js();
+}
 #else
 void webwine_gl_present( void ) {}
 void webwine_gl_resize( int w, int h ) { (void)w; (void)h; }
@@ -254,7 +297,7 @@ EM_JS(int, webwine_poll_input, (int *ev), {
  * and it reports it in the ?beacon=1 line.  Gated on WASM_DIAG because it costs
  * a JS call per unix call. */
 EM_JS(void, webwine_diag, (int a, int b), {
-  var d = self.__wwDiag;
+  var d = self.__wwCtl;
   if (d) { d[0] = a; d[1] = b; }
 });
 

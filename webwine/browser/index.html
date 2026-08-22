@@ -63,7 +63,7 @@ function tick() {
        is then the only way to read a phone's state - iOS Safari has no console
        you can reach without attaching the desktop Web Inspector by hand. */
     if (beacon) fetch('/__beacon?' + encodeURIComponent(
-      `fps=${fps.toFixed(1)} res=${res} frames=${frames} ttf=${ttf} sab=${!!ring} coi=${self.crossOriginIsolated} keys=${keysSent} mouse=${mouseSent} touch=${touchSeen} audio=${audioState} head=${ring?Atomics.load(ring,0):-1} tail=${ring?Atomics.load(ring,1):-1} ucall=${diag?diag[0]:-1}/${diag?(diag[1]>>>0).toString(16):'-'}`)).catch(() => {});
+      `fps=${fps.toFixed(1)} res=${res} frames=${frames} ttf=${ttf} sab=${!!ring} coi=${self.crossOriginIsolated} keys=${keysSent} mouse=${mouseSent} touch=${touchSeen} audio=${audioState} head=${ring?Atomics.load(ring,0):-1} tail=${ring?Atomics.load(ring,1):-1} ucall=${ctl?ctl[0]:-1}/${ctl?(ctl[1]>>>0).toString(16):'-'}`)).catch(() => {});
   }
   requestAnimationFrame(tick);
 }
@@ -92,10 +92,15 @@ try {
   if (ring) audioSab = new SharedArrayBuffer(8 + AUDIO_CAP * 2 * 4);
 } catch (e) {}
 
-/* Two ints the worker writes the native call it is inside into; see
-   webwine_diag in ../wasm_ipc.c.  Only meaningful with ?WASM_DIAG=1. */
-let diag = null;
-try { if (ring) diag = new Int32Array(new SharedArrayBuffer(16)); } catch (e) {}
+/* Shared control block, four ints:
+     [0],[1] the native call the worker is inside (?WASM_DIAG=1, see webwine_diag)
+     [2]     GL frames this page has drawn      (we write)
+     [3]     GL frames the worker has posted    (it writes)
+   [2]/[3] are the back-pressure the GL present needs: the worker can finish
+   frames much faster than we can draw them, and each one in flight pins a GPU
+   surface. */
+let ctl = null;
+try { if (ring) ctl = new Int32Array(new SharedArrayBuffer(16)); } catch (e) {}
 
 function push(type, a, b, c) {
   if (!ring) return;
@@ -236,7 +241,7 @@ worker.onerror = e => {
 const wwEnv = {};
 for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*$/.test(k)) wwEnv[k] = v;
 worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP,
-                     diag: diag ? diag.buffer : null, env: wwEnv });
+                     ctl: ctl ? ctl.buffer : null, env: wwEnv });
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -256,6 +261,7 @@ worker.onmessage = (e) => {
     lastW = m.w; lastH = m.h;
     ctx.drawImage(m.bmp, 0, 0);
     m.bmp.close();
+    if (ctl) Atomics.add(ctl, 2, 1);   /* let the worker post the next one */
     frames++;
   } else if (m.type === 'audio') {
     startAudio(m.freq, m.channels);

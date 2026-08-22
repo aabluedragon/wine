@@ -1661,6 +1661,27 @@ static void wasm_dump_frame( struct x86cpu *c )
         lut[i] = (uint32_t)rd8( pe ) | ((uint32_t)rd8( pe+1 ) << 8) |
                  ((uint32_t)rd8( pe+2 ) << 16) | 0xff000000u;
     }
+
+    /* WASM_FRAMESTAT=1: once a second, say what the frame is actually made of -
+     * the commonest palette index and how many palette entries are pure white.
+     * A blank screen is either the pixels or the palette and the picture alone
+     * cannot tell you which. */
+    { static int on = -1; static unsigned n;
+      if (on == -1) on = getenv( "WASM_FRAMESTAT" ) ? 1 : 0;
+      if (on && (n++ % 300) == 0)
+      {
+          unsigned hist[256] = {0}, white = 0, top = 0;
+          for (int y = 0; y < h; y += 4)
+              for (int x = 0; x < w; x += 4) hist[ rd8( fp + (uint32_t)y * (uint32_t)bpl + x ) ]++;
+          for (int i = 0; i < 256; i++)
+          {
+              if (hist[i] > hist[top]) top = i;
+              if ((lut[i] & 0xffffff) == 0xffffff) white++;
+          }
+          fprintf( stderr, "wasm_x86: framestat %dx%d top index %u (%u%%) pal[%u]=%06x pal[0]=%06x white entries %u\n",
+                   w, h, top, hist[top] * 100 / (unsigned)(((h+3)/4) * ((w+3)/4)),
+                   top, lut[top] & 0xffffff, lut[0] & 0xffffff, white );
+      } }
     static uint32_t *fb;
     static size_t fb_px;
     if (npix > fb_px)

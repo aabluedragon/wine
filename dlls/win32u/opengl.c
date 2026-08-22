@@ -2997,7 +2997,9 @@ static struct ffp_stack *ffp_current_stack( struct ffp_state *state )
     switch (state->mode)
     {
     case GL_PROJECTION: return &state->projection;
-    case GL_TEXTURE:    return &state->texture[state->active_texture];
+    /* glMatrixMode( GL_TEXTURE ) works on the unit glActiveTexture selected,
+     * not the one glClientActiveTexture did - they are separate state. */
+    case GL_TEXTURE:    return &state->texture[state->server_texture];
     default:            return &state->modelview;
     }
 }

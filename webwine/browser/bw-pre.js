@@ -8,7 +8,18 @@ Module['arguments'] = ['c:\\netduke32.exe'];
    this worker is inside the interpreter for the whole session and never does -
    whereas transferToImageBitmap() on a worker-owned one hands the finished
    picture straight to the page (see webwine_gl_present in ../wasm_ipc.c). */
-try { Module['canvas'] = new OffscreenCanvas(640, 400); } catch (e) {}
+try {
+  Module['canvas'] = new OffscreenCanvas(640, 400);
+  /* Make the context HERE rather than leaving it to emscripten's EGL, because
+     the one attribute that matters is not reachable through EGL:
+     preserveDrawingBuffer.  transferToImageBitmap() resets the drawing buffer,
+     and the engine does not redraw every pixel of every frame - once it settles
+     on a static screen it stops drawing entirely and what we captured would be
+     the reset value, a transparent frame.  A second getContext() returns this
+     same context and ignores its attributes, so emscripten picks this one up. */
+  Module['canvas'].getContext('webgl2', { alpha: false, depth: true, stencil: true,
+                                          antialias: false, preserveDrawingBuffer: true });
+} catch (e) {}
 
 Module['print'] = function (t) { try { postMessage({ type: 'log', line: t }); } catch (e) {} };
 Module['printErr'] = function (t) { try { postMessage({ type: 'log', line: t }); } catch (e) {} };
@@ -65,6 +76,9 @@ Module['onRuntimeInitialized'] = function () {
     var cfg = FS.readFile(f, { encoding: 'utf8' })
                 .replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
                 .replace(/^r_upscalefactor .*$/m, 'r_upscalefactor 1');
+    /* ?WW_NOIDX=1 turns off the engine's indexed-colour texture path, which is
+       what packs tiles into one big atlas and addresses them from uniforms. */
+    if ((self.__wwEnv || {}).WW_NOIDX) cfg += 'r_useindexedcolortextures 0\n';
     FS.writeFile(f, cfg);
   } catch (e) { err('wasm_x86: GL autoexec.cfg failed: ' + e); }
 };

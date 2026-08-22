@@ -23,7 +23,7 @@ self.onmessage = function (e) {
   if (!e.data || e.data.type !== 'input') return;
   if (e.data.env) self.__wwEnv = e.data.env;   // uppercase query-string params -> guest env
   if (e.data.ring) self.__wwInput = e.data.ring;   // Int32Array over a SharedArrayBuffer
-  if (e.data.diag) self.__wwDiag = new Int32Array(e.data.diag);  // native-call watchdog
+  if (e.data.ctl) self.__wwCtl = new Int32Array(e.data.ctl);   // watchdog + present back-pressure
   if (e.data.audio) {                              // PCM ring drained by the AudioWorklet
     self.__wwAudio = {
       idx:  new Int32Array(e.data.audio, 0, 2),
