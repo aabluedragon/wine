@@ -640,9 +640,25 @@ static GLubyte *filter_extensions( struct context *ctx, const char *str, const s
     size_t count, i, size = 1;
     char *ret, *p;
 
-    if (!(count = parse_extensions( str, extensions ))) return NULL;
-    extensions[count++] = WGL_EXT_extensions_string;
-    extensions[count++] = WGL_EXT_swap_control;
+    /* The legacy string has to name the same extensions glGetStringi does.
+     * Filtering the driver's own string cannot manage that: the entries ES 3.0
+     * has in core but only reports under their ES names - which
+     * make_context_current re-advertises under the ARB names an application
+     * looks for - are not in the driver's string at all, so an application that
+     * asks the old way is told they are missing.  netduke32 concludes
+     * non-power-of-two textures are unsupported and emits power-of-two texture
+     * coordinates for textures it has uploaded at their exact size, so every
+     * sprite samples a fraction of itself. */
+    if ((count = client->extension_count))
+    {
+        for (i = 0; i < count; i++) extensions[i] = client->extension_array[i];
+    }
+    else
+    {
+        if (!(count = parse_extensions( str, extensions ))) return NULL;
+        extensions[count++] = WGL_EXT_extensions_string;
+        extensions[count++] = WGL_EXT_swap_control;
+    }
 
     for (i = 0; i < count; i++)
     {
