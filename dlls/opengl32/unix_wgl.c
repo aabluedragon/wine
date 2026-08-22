@@ -885,6 +885,18 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
             body = glsl_replace( body, "gl_Color", vertex_stage ? "wine_Color" : "wine_FrontColor" );
         }
 
+        /* WASM_GLSL_TC=1: paint each fragment by where its texture coordinate
+         * lands instead of by the texture - red where s reaches 1, green where t
+         * does.  A sprite with no red band along its right edge is being given
+         * coordinates that stop short of its own texture. Diagnostic only. */
+        if (!vertex_stage && getenv( "WASM_GLSL_TC" ) && strstr( body, "gl_FragData[0] =" ))
+        {
+            compat = TRUE;
+            body = glsl_replace( body, "gl_FragData[0] =",
+                                 "gl_FragData[0] = vec4(wine_TexCoord[0].xy, 0.0, 1.0);"
+                                 " if (false) gl_FragData[0] =" );
+        }
+
         /* size the varying arrays to what is actually indexed */
         for (j = 0; j < 8; j++)
         {
