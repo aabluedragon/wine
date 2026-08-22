@@ -27,12 +27,14 @@ RSP="$NODEO/objs_bw.rsp"; : > "$RSP"
 echo "$NODEO/combined_main.o" >> "$RSP"; ls "$NODEO"/srv/*.o >> "$RSP"
 for so in dlls/ntdll/ntdll.so dlls/win32u/win32u.so dlls/ws2_32/ws2_32.so; do echo "$so" >> "$RSP"; done
 for o in wasm_cpu_bridge wasm_vm wasm_ipc_bw wasm_x86_bw; do echo "$NODEO/$o.o" >> "$RSP"; done
+for o in ogl_unix_thunks ogl_unix_wgl wasm_egl_stubs; do echo "$NODEO/$o.o" >> "$RSP"; done   # opengl32 unix companion + EGL stubs
 
 echo "[3/3] link browser bundle (worker, MEMFS, link $LOPT)"
 emcc $LOPT @"$RSP" -o "$OUT/webwine-bw.js" \
   -sENVIRONMENT=worker -sFORCE_FILESYSTEM=1 \
   -sGLOBAL_BASE=1879048192 -sINITIAL_MEMORY=2147483648 -sALLOW_MEMORY_GROWTH=0 \
   -sSTACK_SIZE=67108864 -sEXIT_RUNTIME=0 \
+  -lEGL -lGLESv2 -sMAX_WEBGL_VERSION=2 -sGL_ENABLE_GET_PROC_ADDRESS=1 \
   --pre-js "$HERE/bw-pre.js" \
   --preload-file "$AT/game@/game" --preload-file "$AT/root@/root"
 cp "$HERE/worker.js" "$HERE/index.html" "$HERE/serve.py" "$HERE/audio-worklet.js" "$OUT/"

@@ -990,6 +990,16 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             *funcs = (const void *)(ULONG_PTR)1;
             status = STATUS_SUCCESS;
         }
+        else if (builtin->unix_path && strstr( builtin->unix_path, "opengl32.so" ))
+        {
+            /* Same funcs-table form as ws2_32.  Its table symbol is renamed at
+             * compile time (see browser/build-node.sh): every unix companion
+             * defines __wine_unix_call_funcs, and only one of them can win in a
+             * single statically linked wasm module. */
+            extern const unixlib_entry_t __wine_unix_call_funcs_opengl32[];
+            *funcs = __wine_unix_call_funcs_opengl32;
+            status = STATUS_SUCCESS;
+        }
         else if (builtin->unix_path && strstr( builtin->unix_path, "ws2_32.so" ))
         {
             /* ws2_32 uses the unix_call funcs-table form: its dispatch handle is

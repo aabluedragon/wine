@@ -2970,7 +2970,13 @@ static void run( struct x86cpu *c )
              * to the cushion in one visit, so this is also more than fast enough. */
             audio_pump( c );
 #ifdef WEBWINE_BROWSER
-            wasm_dump_frame( c );
+            /* In OpenGL (Polymost) mode the picture is in the WebGL default
+             * framebuffer and win32u presents it at the drawable swap;
+             * frameplace is then a stale classic-renderer buffer, so presenting
+             * it here would paint garbage over every GL frame. */
+            { extern int webwine_gl_active;
+              if (webwine_gl_active > 0) webwine_gl_active--;
+              else wasm_dump_frame( c ); }
 #else
             {   /* node headless capture: gated by WASM_DUMP_FRAME, up to 16 frames */
                 static int dmp = -1, nframes = 0;
@@ -3487,12 +3493,21 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
     if (target == addr_unixcall)
     {
         /* i386 __wine_unix_call_dispatcher stack on entry (after the call):
-         * [esp]=ret_eip, [esp+4]=handle, [esp+8]=code, [esp+12]=args_ptr.
-         * handle is the module's unixlib function table; code indexes it. */
+         * [esp]=ret_eip, then the arguments of
+         *   __wine_unix_call( unixlib_handle_t handle, unsigned int code, void *args )
+         * - and the handle is a UINT64, so it occupies TWO slots.  The real
+         * dispatcher (signal_i386.c) reads them at (%esp), 8(%esp) and 12(%esp)
+         * once the return address is popped; our pointers fit in the low half.
+         *
+         * Getting this wrong is quiet rather than loud: `code` lands on the
+         * handle's high half, which is always 0, so every unix call runs entry 0
+         * (process_attach) and returns STATUS_SUCCESS.  opengl32 then "loaded"
+         * and every get_pixel_formats came back with zero formats, which SDL
+         * reports as "No matching GL pixel format available". */
         uint32_t ret_eip = pop32( c );
         unixlib_handle_t handle = rd32( c->regs[ESP] + 0 );
-        unsigned int code = rd32( c->regs[ESP] + 4 );
-        void *args = (void *)(uintptr_t)rd32( c->regs[ESP] + 8 );
+        unsigned int code = rd32( c->regs[ESP] + 8 );
+        void *args = (void *)(uintptr_t)rd32( c->regs[ESP] + 12 );
         const unixlib_entry_t *funcs = (const unixlib_entry_t *)(uintptr_t)handle;
         if (trace()) fprintf( stderr, "wasm_x86: unix_call handle=%llx code=%u args=%p\n",
                               (unsigned long long)handle, code, args );
@@ -3505,7 +3520,31 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
             c->eip = ret_eip;
             return 1;
         }
+        { static int diag = -1;
+          if (diag == -1) diag = getenv( "WASM_DIAG" ) ? 1 : 0;
+          if (diag)
+          {   /* mark "inside code", then "done with code" - the page can tell
+               * a call that is still running from one that returned. */
+              extern void webwine_diag( int a, int b );
+              webwine_diag( (int)code, (int)ret_eip );
+              c->regs[EAX] = funcs[code]( args );
+              webwine_diag( (int)code | 0x40000000, (int)ret_eip );
+              c->eip = ret_eip;
+              return 1;
+          } }
         c->regs[EAX] = funcs[code]( args );
+        /* WASM_UCALL=1: report each unix call that answers STATUS_NOT_IMPLEMENTED
+         * once.  For opengl32 that is exactly the set of GL entry points the
+         * driver could not resolve and the game is calling anyway - the quiet
+         * way a GLES driver loses a fixed-function matrix op. */
+        if (c->regs[EAX] == 0xC0000002u)
+        {
+            static int on = -1;
+            static unsigned char seen[4096];
+            if (on == -1) on = getenv( "WASM_UCALL" ) ? 1 : 0;
+            if (on && code < 4096 && !seen[code])
+            { seen[code] = 1; fprintf( stderr, "wasm_x86: unix call %u not implemented\n", code ); }
+        }
         c->eip = ret_eip;
         return 1;
     }

@@ -342,10 +342,62 @@ out. Real music would need a *native* OPL3 core driven by intercepting the game'
 register writes, or a MIDI-to-WebAudio path; both are separate projects.
 To hear it anyway, set `mus_enabled 1` and expect single-digit fps.
 
+## OpenGL (Polymost) — `?WW_GL=1`
+
+The engine's hardware renderer runs in the browser too: `?WW_GL=1` rewrites the
+baked-in `autoexec.cfg` to `vidmode 640 400 32 0` (32 bits per pixel is what
+selects Polymost) and the game draws through wine's `opengl32` → `win32u` EGL
+backend onto emscripten's WebGL 2. Verified rendering the Duke3D title screen and
+menu at 640x400, ~280 fps in headless Chrome (SwiftShader).
+
+How it fits together, and what each piece cost:
+
+* **A canvas in the worker.** EGL needs one and a worker has no DOM, so
+  `bw-pre.js` sets `Module['canvas']` to an `OffscreenCanvas` it creates itself.
+  Not a canvas transferred from the page: a transferred one only composites when
+  its task yields, and this worker never returns to its event loop.
+  `transferToImageBitmap()` at the drawable swap hands the finished picture to the
+  page with no readback (`webwine_gl_present` in `../wasm_ipc.c`, `glframe` in
+  `index.html`). The 8-bpp present backs off while GL frames are arriving and
+  comes straight back if the game returns to the classic renderer.
+* **A drawable that is the canvas.** WebGL 2 has no direct-state-access entry
+  points, so win32u's generic framebuffer surface (`glCreateFramebuffers` &c)
+  cannot be built. The wasm surface leaves `read_fbo`/`draw_fbo` at 0 and draws
+  into the default framebuffer, which is exactly what opengl32 already means by
+  "no emulated framebuffer".
+* **Emscripten's EGL is one context over one canvas.** It reports its config from
+  the last `eglChooseConfig` (default: no alpha, *no depth*), so the driver primes
+  it once before enumerating or SDL finds no usable pixel format. It rejects any
+  context attribute other than `EGL_CONTEXT_CLIENT_VERSION` — SDL passes
+  `WGL_CONTEXT_OPENGL_NO_ERROR_ARB` — and its `eglDestroyContext` takes the
+  canvas' WebGL context down with it, so the driver never destroys it.
+* **`fwidth` in a GLSL ES 1.00 shader on WebGL 2.** Derivatives are an extension
+  in ESSL 1.00 and core in 3.00, so WebGL 2 reports `GL_OES_standard_derivatives`
+  as unsupported and Polymost's fragment shader fails to compile — silently: the
+  engine falls back to the fixed function pipeline and you get the raw palette
+  index in the red channel. `translate_glsl_es()` now emits flat-derivative
+  fallbacks guarded on the extension macro.
+
+Two things this shook out that were never GL-specific: the interpreter read
+`code`/`args` from the wrong stack slots for `__wine_unix_call` (the handle is a
+UINT64, so it takes two), which silently ran entry 0 for every unix call; and a
+failed font lookup left an uninitialised `TEXTMETRICW` that turned into a garbage
+caption height and a window with no client area at all.
+
+Diagnostics worth keeping in mind: `?WASM_DIAG=1` writes the native call the
+worker is inside into a SharedArrayBuffer the page reports in the beacon line —
+the only way to see where it stopped when it blocks inside native code, since the
+log relay is on that same thread. `?WASM_UCALL=1` names each unix call that
+answers `STATUS_NOT_IMPLEMENTED`, i.e. the GL entry points the driver could not
+resolve and the game is calling anyway.
+
 ## Files
 
 `build-node.sh` `run-node.sh` `build-browser.sh` `assemble-assets.sh`
 `dll-closure.py` (PE import BFS) `bw-pre.js` (env + FS symlinks + argv, --pre-js)
 `worker.js` `index.html`.  The interpreter's browser hooks live in
 `../wasm_x86.c` (present-on-flip, frameplace cache, `WASM_TPUT`/`WASM_HISTO`
-diagnostics) and `../wasm_ipc.c` (`WEBWINE_MEMFS` host I/O + `webwine_present`).
+diagnostics) and `../wasm_ipc.c` (`WEBWINE_MEMFS` host I/O, `webwine_present`, the GL present and
+the `WASM_DIAG` watchdog).  `../wasm_egl_stubs.c` supplies the EGL entry points
+emscripten does not implement, and `../rebuild-win32u-one.sh` rebuilds a single
+win32u source with the symbol renames the wasm link needs.

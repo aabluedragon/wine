@@ -183,6 +183,43 @@ EM_JS(void, webwine_present, (const void *rgba, int w, int h), {
 void webwine_present( const void *rgb, int w, int h ) { (void)rgb; (void)w; (void)h; }
 #endif
 
+/* ---- browser display: the OpenGL path -------------------------------------
+ *
+ * When the game runs its Polymost renderer there is no 8-bpp frameplace to
+ * de-palettise: the picture lives in the WebGL default framebuffer of the
+ * OffscreenCanvas the worker was given (see browser/bw-pre.js).  win32u's EGL
+ * driver calls these at the drawable's swap and resize (weak symbols there, so
+ * the node build links without them).
+ *
+ * transferToImageBitmap() hands the finished picture to the page as a GPU-side
+ * ImageBitmap, so the frame never round-trips through the wasm heap the way
+ * glReadPixels would.  It also does NOT need the worker to yield, which matters
+ * because this thread is inside the interpreter for the whole session and never
+ * returns to its event loop - a transferred (compositing) canvas would simply
+ * never paint. */
+/* Frames of grace left for the GL path.  Each GL present tops it up and each
+ * page flip spends one, so the 8-bpp present stays out of the way while GL is
+ * driving the screen and comes straight back if the game returns to the classic
+ * renderer (the video menu can switch either way at any time). */
+int webwine_gl_active;
+
+#ifdef WEBWINE_MEMFS
+EM_JS(void, webwine_gl_present_js, (void), {
+  var c = Module['canvas'];
+  if (!c || !c.transferToImageBitmap) return;
+  var bmp = c.transferToImageBitmap();
+  postMessage({ type: 'glframe', w: c.width, h: c.height, bmp: bmp }, [bmp]);
+});
+EM_JS(void, webwine_gl_resize, (int w, int h), {
+  var c = Module['canvas'];
+  if (c && (c.width !== w || c.height !== h)) { c.width = w; c.height = h; }
+});
+void webwine_gl_present( void ) { webwine_gl_active = 8; webwine_gl_present_js(); }
+#else
+void webwine_gl_present( void ) {}
+void webwine_gl_resize( int w, int h ) { (void)w; (void)h; }
+#endif
+
 /* ---- browser input ring ----
  *
  * The worker thread is blocked inside the interpreter for the whole session and
@@ -207,6 +244,18 @@ EM_JS(int, webwine_poll_input, (int *ev), {
   HEAP32[(ev >> 2) + 3] = r[b + 3];
   Atomics.store(r, 1, (tail + 1) % slots);
   return 1;
+});
+
+/* ---- native-call watchdog ----------------------------------------------
+ * When the interpreter blocks inside a native call there is nothing left to
+ * print with: the worker never returns to its event loop and the whole log
+ * relay is on that thread.  Write the call it is in into a tiny
+ * SharedArrayBuffer instead - the page can read that while the worker is stuck,
+ * and it reports it in the ?beacon=1 line.  Gated on WASM_DIAG because it costs
+ * a JS call per unix call. */
+EM_JS(void, webwine_diag, (int a, int b), {
+  var d = self.__wwDiag;
+  if (d) { d[0] = a; d[1] = b; }
 });
 
 /* ---- audio bridge ----

@@ -2,6 +2,14 @@
 // Runs inside the emscripten module scope before the runtime starts.
 Module['arguments'] = ['c:\\netduke32.exe'];
 
+/* The EGL/WebGL backend needs a canvas to make a context from, and a worker has
+   no DOM.  An OffscreenCanvas made HERE (not one transferred from the page) is
+   the right kind: a transferred canvas only composites when its task yields, and
+   this worker is inside the interpreter for the whole session and never does -
+   whereas transferToImageBitmap() on a worker-owned one hands the finished
+   picture straight to the page (see webwine_gl_present in ../wasm_ipc.c). */
+try { Module['canvas'] = new OffscreenCanvas(640, 400); } catch (e) {}
+
 Module['print'] = function (t) { try { postMessage({ type: 'log', line: t }); } catch (e) {} };
 Module['printErr'] = function (t) { try { postMessage({ type: 'log', line: t }); } catch (e) {} };
 
@@ -40,3 +48,23 @@ Module['preRun'].push(function () {
   mkdirp('/game/windows');
   sym('/root/lib/wine/i386-windows', '/game/windows/system32');
 });
+
+/* ?WW_GL=1 puts the game on its OpenGL (Polymost) renderer: 32 bits per pixel is
+   what selects it, and the classic renderer's 1/N upscale does not apply.
+   Rewrite those two lines rather than appending more - a second vidmode line
+   makes the engine set the software mode afterwards and tear the GL window back
+   down - and everything else in the config stays identical between the arms.
+
+   This has to run here, not in preRun: the --preload-file data is unpacked by a
+   preRun callback of the packager's own, which is queued after ours, so the game
+   files do not exist yet while preRun is running. */
+Module['onRuntimeInitialized'] = function () {
+  try {
+    if (!(self.__wwEnv || {}).WW_GL) return;
+    var f = '/game/autoexec.cfg';
+    var cfg = FS.readFile(f, { encoding: 'utf8' })
+                .replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
+                .replace(/^r_upscalefactor .*$/m, 'r_upscalefactor 1');
+    FS.writeFile(f, cfg);
+  } catch (e) { err('wasm_x86: GL autoexec.cfg failed: ' + e); }
+};

@@ -810,6 +810,19 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
     /* an extension directive has to come before anything that is not a
      * preprocessor token, so these go between the version and the precision */
     static const char derivatives[] = "#extension GL_OES_standard_derivatives : enable\n";
+    /* Derivatives are an extension in GLSL ES 1.00 but core in 3.00, so a driver
+     * whose shading language is already 3.00 - WebGL 2 is the one that matters
+     * here - reports the extension as unsupported and the shader fails to
+     * compile on dFdx/dFdy/fwidth.  An enabled extension defines its own macro,
+     * so this substitutes flat (zero) derivatives exactly when the real ones are
+     * unavailable; subtracting the argument from itself keeps the result the
+     * caller's type, which a plain 0.0 would not. */
+    static const char derivatives_fallback[] =
+        "#ifndef GL_OES_standard_derivatives\n"
+        "#define dFdx(a) ((a) - (a))\n"
+        "#define dFdy(a) ((a) - (a))\n"
+        "#define fwidth(a) ((a) - (a))\n"
+        "#endif\n";
     static const char precision[] = "precision highp float;\nprecision highp int;\n";
     char **sources;
     GLsizei i;
@@ -932,8 +945,8 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
         }
 
         len = strlen( body );
-        if (!(sources[i] = malloc( sizeof(version) + sizeof(derivatives) + sizeof(precision) +
-                                   strlen( decls ) + len + 1 )))
+        if (!(sources[i] = malloc( sizeof(version) + sizeof(derivatives) + sizeof(derivatives_fallback) +
+                                   sizeof(precision) + strlen( decls ) + len + 1 )))
         {
             free( body );
             goto failed;
@@ -943,6 +956,7 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
         if (derivs) dst = stpcpy( dst, derivatives );
         memcpy( dst, body, head );
         dst += head;
+        if (derivs) dst = stpcpy( dst, derivatives_fallback );
         dst = stpcpy( dst, precision );
         dst = stpcpy( dst, decls );
         strcpy( dst, body + head );

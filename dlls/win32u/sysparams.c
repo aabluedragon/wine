@@ -5425,6 +5425,12 @@ static void get_text_metr_size( HDC hdc, LOGFONTW *lf, TEXTMETRICW *metric, UINT
     TEXTMETRICW tm;
     UINT ret;
     if (!metric) metric = &tm;
+    /* Every exit has to leave a defined metric behind: get_char_dimensions()
+     * below returns without touching it when the font engine cannot answer (a
+     * configuration with no fonts at all - the wasm and android builds), and
+     * the callers fold what they find into a max(), so an untouched metric
+     * turns into a garbage caption height and a window with no client area. */
+    memset( metric, 0, sizeof(*metric) );
     hfont = NtGdiHfontCreate( lf, sizeof(*lf), 0, 0, NULL );
     if (!hfont || !(hfontsav = NtGdiSelectFont( hdc, hfont )))
     {

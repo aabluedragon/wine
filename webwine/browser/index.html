@@ -63,7 +63,7 @@ function tick() {
        is then the only way to read a phone's state - iOS Safari has no console
        you can reach without attaching the desktop Web Inspector by hand. */
     if (beacon) fetch('/__beacon?' + encodeURIComponent(
-      `fps=${fps.toFixed(1)} res=${res} frames=${frames} ttf=${ttf} sab=${!!ring} coi=${self.crossOriginIsolated} keys=${keysSent} mouse=${mouseSent} touch=${touchSeen} audio=${audioState} head=${ring?Atomics.load(ring,0):-1} tail=${ring?Atomics.load(ring,1):-1}`)).catch(() => {});
+      `fps=${fps.toFixed(1)} res=${res} frames=${frames} ttf=${ttf} sab=${!!ring} coi=${self.crossOriginIsolated} keys=${keysSent} mouse=${mouseSent} touch=${touchSeen} audio=${audioState} head=${ring?Atomics.load(ring,0):-1} tail=${ring?Atomics.load(ring,1):-1} ucall=${diag?diag[0]:-1}/${diag?(diag[1]>>>0).toString(16):'-'}`)).catch(() => {});
   }
   requestAnimationFrame(tick);
 }
@@ -91,6 +91,11 @@ let audioSab = null;
 try {
   if (ring) audioSab = new SharedArrayBuffer(8 + AUDIO_CAP * 2 * 4);
 } catch (e) {}
+
+/* Two ints the worker writes the native call it is inside into; see
+   webwine_diag in ../wasm_ipc.c.  Only meaningful with ?WASM_DIAG=1. */
+let diag = null;
+try { if (ring) diag = new Int32Array(new SharedArrayBuffer(16)); } catch (e) {}
 
 function push(type, a, b, c) {
   if (!ring) return;
@@ -222,12 +227,16 @@ worker.onerror = e => {
   const msg = 'worker died: ' + (e.message || 'wasm trap') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : '');
   logEl.textContent += msg + '\n';
   statusEl.textContent = msg;
+  /* This is the one line that must not be lost: with ?beacon=1 a dead worker
+     otherwise looks exactly like a slow one - fps 0 and no more log lines. */
+  if (beacon) fetch('/__log?' + encodeURIComponent(msg)).catch(() => {});
 };
 // Hand over the ring BEFORE the module boots - once it starts interpreting, the
 // worker never services messages again.
 const wwEnv = {};
 for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*$/.test(k)) wwEnv[k] = v;
-worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP, env: wwEnv });
+worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP,
+                     diag: diag ? diag.buffer : null, env: wwEnv });
 
 worker.onmessage = (e) => {
   const m = e.data;
@@ -237,6 +246,17 @@ worker.onmessage = (e) => {
     lastW = m.w; lastH = m.h;
     ctx.putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
     frames++;
+  } else if (m.type === 'glframe') {
+    /* OpenGL (Polymost) path: the worker rendered into its own OffscreenCanvas
+       and transferred the finished picture as an ImageBitmap, so there is no
+       pixel data to convert here - just draw it.  close() matters: an ImageBitmap
+       holds a GPU surface that the GC would otherwise free far too late. */
+    if (!firstFrameT) firstFrameT = performance.now();
+    if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; fitCanvas(m.w, m.h); }
+    lastW = m.w; lastH = m.h;
+    ctx.drawImage(m.bmp, 0, 0);
+    m.bmp.close();
+    frames++;
   } else if (m.type === 'audio') {
     startAudio(m.freq, m.channels);
   } else if (m.type === 'log') {
@@ -245,7 +265,7 @@ worker.onmessage = (e) => {
       /* With ?beacon=1, push the lines that matter to the server too: its access
          log is the only way to read a phone's diagnostics, and on desktop it
          survives a renderer too busy to answer Runtime.evaluate. */
-      if (beacon && /wasm_x86:|GFX\||ERR\||FATAL/.test(m.line))
+      if (beacon && /wasm_x86:|GFX\||ERR\||FATAL|:err:|:warn:/.test(m.line))
         fetch('/__log?' + encodeURIComponent(m.line.slice(0, 300))).catch(() => {});
     if (logEl.textContent.length > 60000) logEl.textContent = logEl.textContent.slice(-40000);
     if (atBottom) logEl.scrollTop = logEl.scrollHeight;

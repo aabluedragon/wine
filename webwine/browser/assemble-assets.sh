@@ -18,7 +18,10 @@ mkdir -p "$AT/game" "$AT/root/lib/wine/i386-windows" "$AT/root/lib/wine/i386-uni
 
 # BFS import closure from the exe + the 4 forward targets not in any import table
 # (apisetschema: api-ms-win redirects; cryptbase: advapi32.SystemFunction036).
-DLLS="$(GAME="$GAME" PEDIR="$PEDIR" python3 "$HERE/dll-closure.py" 2>/dev/null) apisetschema.dll cryptbase.dll cryptsp.dll bcrypt.dll"
+# opengl32/glu32 are LoadLibrary'd by SDL at runtime, so a static-import BFS can
+# never find them - without them the engine reports "all OpenGL modes are
+# unavailable" and only the software renderer is offered.
+DLLS="$(GAME="$GAME" PEDIR="$PEDIR" python3 "$HERE/dll-closure.py" 2>/dev/null) apisetschema.dll cryptbase.dll cryptsp.dll bcrypt.dll opengl32.dll glu32.dll"
 n=0
 for d in $DLLS; do
   if [ -f "$PEDIR/$d" ]; then cp "$PEDIR/$d" "$AT/root/lib/wine/i386-windows/"; n=$((n+1)); else echo "MISSING $d"; fi

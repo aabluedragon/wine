@@ -240,6 +240,13 @@ static void make_client_context_current(void)
     driver_funcs->p_make_current( context->draw, context->read, context->driver_private );
 }
 
+#if defined(__wasm__) && !defined(SONAME_LIBEGL)
+/* Emscripten's libEGL is linked statically into the module, so configure never
+ * finds a shared object to name.  Define one anyway to compile the EGL backend
+ * in; egl_init() below binds the entry points directly instead of dlopen'ing. */
+#define SONAME_LIBEGL "<emscripten>"
+#endif
+
 #ifdef SONAME_LIBEGL
 
 struct framebuffer_surface
@@ -506,7 +513,14 @@ static EGLConfig egl_config_for_format( const struct egl_platform *egl, int form
 
 static void egldrv_init_egl_platform( struct egl_platform *platform )
 {
+#ifdef __wasm__
+    /* Emscripten has no platform extensions at all - leaving type zero makes
+     * init_egl_platforms() use eglGetDisplay(EGL_DEFAULT_DISPLAY), which is the
+     * only display it knows how to make. */
+    platform->type = 0;
+#else
     platform->type = EGL_PLATFORM_SURFACELESS_MESA;
+#endif
     platform->native_display = 0;
 }
 
@@ -529,6 +543,28 @@ static UINT egldrv_init_pixel_formats( UINT *onscreen_count )
     struct egl_platform *egl = &display_egl;
     EGLConfig *configs;
     EGLint i, j, render, count;
+
+#ifdef __wasm__
+    /* Emscripten derives BOTH what it reports about its one config AND the
+     * attributes of the WebGL context it will later create from the last
+     * eglChooseConfig call, and it defaults to no alpha, no depth and no
+     * stencil.  Wine enumerates with eglGetConfigs, which never sets them, so
+     * without this the only pixel format on offer is 24-bit colour with no
+     * depth buffer - SDL finds nothing to match and reports "No matching GL
+     * pixel format available" - and even if it matched, the context could not
+     * depth-test.  Ask for no alpha on purpose: an alpha canvas would come out
+     * transparent wherever the game leaves alpha at zero. */
+    {
+        static const EGLint attrs[] =
+        {
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 0,
+            EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8, EGL_NONE
+        };
+        EGLConfig config;
+        EGLint num = 0;
+        funcs->p_eglChooseConfig( egl->display, attrs, &config, 1, &num );
+    }
+#endif
 
     funcs->p_eglGetConfigs( egl->display, NULL, 0, &count );
     if (!(configs = malloc( count * sizeof(*configs) ))) return 0;
@@ -732,9 +768,77 @@ static void egldrv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensio
 {
 }
 
+#ifdef __wasm__
+
+/* Emscripten's WebGL context IS the canvas' default framebuffer, and WebGL2 has
+ * none of the direct-state-access entry points the framebuffer surface above is
+ * built on (glCreateFramebuffers, glNamedFramebufferRenderbuffer, ...), so that
+ * surface cannot work here.  Draw straight into framebuffer 0 instead - leaving
+ * read_fbo/draw_fbo at 0 is exactly what opengl32's unix side already means by
+ * "no emulated framebuffer" - and hand the canvas to the page at the swap. */
+
+extern void webwine_gl_present( void ) __attribute__((weak));
+extern void webwine_gl_resize( int width, int height ) __attribute__((weak));
+
+struct wasm_surface
+{
+    struct opengl_drawable base;
+};
+
+static void wasm_surface_destroy( struct opengl_drawable *drawable )
+{
+    TRACE( "%s\n", debugstr_opengl_drawable( drawable ) );
+}
+
+static void wasm_surface_resize( struct opengl_drawable *drawable )
+{
+    RECT rect;
+
+    NtUserGetClientRect( drawable->client->hwnd, &rect, NtUserGetDpiForWindow( drawable->client->hwnd ) );
+    if (rect.right < 1) rect.right = 1;
+    if (rect.bottom < 1) rect.bottom = 1;
+    TRACE( "resizing drawable %p to %dx%d\n", drawable, (int)rect.right, (int)rect.bottom );
+    if (webwine_gl_resize) webwine_gl_resize( rect.right, rect.bottom );
+}
+
+static void wasm_surface_flush( struct opengl_drawable *drawable, UINT flags )
+{
+    TRACE( "%s, flags %#x\n", debugstr_opengl_drawable( drawable ), flags );
+    if (flags & GL_FLUSH_UPDATED) wasm_surface_resize( drawable );
+}
+
+static BOOL wasm_surface_swap( struct opengl_drawable *drawable )
+{
+    TRACE( "%s\n", debugstr_opengl_drawable( drawable ) );
+    if (webwine_gl_present) webwine_gl_present();
+    return TRUE;
+}
+
+static const struct opengl_drawable_funcs wasm_surface_funcs =
+{
+    .destroy = wasm_surface_destroy,
+    .flush = wasm_surface_flush,
+    .swap = wasm_surface_swap,
+};
+
+static struct opengl_drawable *wasm_surface_create( int format, struct client_surface *client )
+{
+    struct wasm_surface *surface;
+
+    if (!(surface = opengl_drawable_create( sizeof(*surface), &wasm_surface_funcs, format, client ))) return NULL;
+    wasm_surface_resize( &surface->base );
+    return &surface->base;
+}
+
+#endif /* __wasm__ */
+
 static BOOL egldrv_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
+#ifdef __wasm__
+    *drawable = wasm_surface_create( format, client );
+#else
     *drawable = framebuffer_surface_create( format, client );
+#endif
     return !!*drawable;
 }
 
@@ -848,7 +952,16 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
             name = egl_client_api == EGL_OPENGL_ES_API ? EGL_NONE : EGL_CONTEXT_FLAGS_KHR;
             break;
         case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
+#ifdef __wasm__
+            /* Emscripten's EGL accepts EGL_CONTEXT_CLIENT_VERSION and nothing
+             * else: any other attribute - including this one with the value 0,
+             * which is what SDL passes to say it does NOT want a no-error
+             * context - fails the whole eglCreateContext with
+             * EGL_BAD_ATTRIBUTE. */
+            name = EGL_NONE;
+#else
             name = EGL_CONTEXT_OPENGL_NO_ERROR_KHR;
+#endif
             break;
         case WGL_CONTEXT_PROFILE_MASK_ARB:
             if (egl_client_api == EGL_OPENGL_ES_API)
@@ -927,6 +1040,17 @@ static BOOL egldrv_context_destroy( void *context )
     const struct opengl_funcs *funcs = &display_funcs;
     const struct egl_platform *egl = &display_egl;
 
+#ifdef __wasm__
+    /* Emscripten has exactly one context - every eglCreateContext hands back the
+     * same EGL_CONTEXT handle over the same canvas - and eglDestroyContext tears
+     * down the canvas' WebGL context with it.  A caller that makes a probe
+     * context, destroys it and then makes the real one (SDL does exactly that
+     * while looking for extensions) is then left with a GL that has no current
+     * context at all, and the first GL call afterwards throws
+     * "Cannot read properties of undefined (reading 'bindFramebuffer')".
+     * Keep the one context alive instead; it is shared by construction. */
+    return TRUE;
+#endif
     funcs->p_eglDestroyContext( egl->display, context );
     return TRUE;
 }
@@ -979,6 +1103,25 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
     struct opengl_funcs *funcs = &display_funcs;
     const char *extensions;
 
+#ifdef __wasm__
+    /* Statically linked: there is nothing to open and no dlsym to consult, so
+     * take every entry point straight from the library.  The ones emscripten
+     * does not implement come from webwine/wasm_egl_stubs.c.
+     *
+     * Wine's headers only declare the PFN_egl* pointer typedefs, never the
+     * functions, and pulling in the real <EGL/egl.h> here would collide with
+     * Wine's own EGL types - so derive each prototype from its PFN typedef.
+     * The signature has to be EXACT: wasm indirect calls are type-checked, and
+     * declaring these `void func(void)` makes wasm-ld quietly emit a trapping
+     * signature-mismatch stub that hangs the guest at the first EGL call. */
+#define USE_GL_FUNC( func ) extern typeof(*(PFN_##func)0) func;
+    ALL_EGL_FUNCS
+#undef USE_GL_FUNC
+    funcs->egl_handle = (void *)1;
+#define USE_GL_FUNC( func ) funcs->p_##func = (void *)func;
+    ALL_EGL_FUNCS
+#undef USE_GL_FUNC
+#else
     if (!(funcs->egl_handle = dlopen( SONAME_LIBEGL, RTLD_NOW | RTLD_GLOBAL )))
     {
         ERR( "Failed to load %s: %s\n", SONAME_LIBEGL, dlerror() );
@@ -994,11 +1137,19 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
     LOAD_FUNCPTR( eglGetProcAddress );
     LOAD_FUNCPTR( eglQueryString );
 #undef LOAD_FUNCPTR
+#endif
 
     if (!(extensions = funcs->p_eglQueryString( EGL_NO_DISPLAY, EGL_EXTENSIONS )))
     {
+#ifdef __wasm__
+        /* Emscripten answers eglQueryString only for a real display, and has no
+         * client extensions to report anyway.  The two the code looks for below
+         * are already only warnings, so carry on with an empty list. */
+        extensions = "";
+#else
         ERR( "Failed to find client extensions\n" );
         goto failed;
+#endif
     }
     TRACE( "EGL client extensions:\n" );
     dump_extensions( extensions );
@@ -1017,6 +1168,7 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
 
     /* fall back to the library itself for anything eglGetProcAddress will not
      * resolve, which is what EGL_KHR_client_get_all_proc_addresses buys us */
+#ifndef __wasm__
 #define USE_GL_FUNC( func )                                                                     \
     if (!funcs->p_##func && !(funcs->p_##func = (void *)funcs->p_eglGetProcAddress( #func )) && \
         !(funcs->p_##func = dlsym( funcs->egl_handle, #func )))                                 \
@@ -1026,6 +1178,7 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
     }
     ALL_EGL_FUNCS
 #undef USE_GL_FUNC
+#endif
 
     *driver_funcs = &egldrv_funcs;
     return TRUE;
@@ -2745,8 +2898,20 @@ void win32u_glImportSemaphoreWin32NameEXT( GLuint semaphore, GLenum type, const 
     }
 }
 
-/* a harmless landing place for entry points the driver does not implement */
+/* A harmless landing place for entry points the driver does not implement.
+ *
+ * Not on wasm: an indirect call there is checked against the callee's declared
+ * type, so calling this one-size-fits-all stub as, say, void(GLenum) traps the
+ * whole module ("function signature mismatch") instead of quietly doing
+ * nothing.  Leave those pointers NULL instead - opengl32's generated thunks all
+ * test for NULL and answer STATUS_NOT_IMPLEMENTED, which is what a missing
+ * entry point should do anyway. */
+#ifndef __wasm__
 static void *gl_unimplemented(void) { return NULL; }
+#define SET_GL_UNIMPLEMENTED( func ) display_funcs.p_##func = (void *)gl_unimplemented
+#else
+#define SET_GL_UNIMPLEMENTED( func ) (void)0
+#endif
 
 
 /**********************************************************************
@@ -3507,7 +3672,7 @@ static void display_funcs_init(void)
     if (!display_funcs.p_##func && !(display_funcs.p_##func = driver_funcs->p_get_proc_address( #func ))) \
     { \
         WARN( "%s not found.\n", #func ); \
-        display_funcs.p_##func = (void *)gl_unimplemented; \
+        SET_GL_UNIMPLEMENTED( func ); \
     }
     ALL_GL_FUNCS
     ALL_GL_EXT_FUNCS
@@ -3618,6 +3783,7 @@ static void display_funcs_init(void)
 const struct opengl_funcs *__wine_get_opengl_driver( UINT version )
 {
     static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
 
     if (version != WINE_OPENGL_DRIVER_VERSION)
     {
