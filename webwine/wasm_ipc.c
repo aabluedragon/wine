@@ -215,6 +215,14 @@ EM_JS(void, webwine_gl_present_js, (void), {
      queue a third one - a frame the display will never show is pure waste. */
   var d = self.__wwCtl;
   if (d && Atomics.load(d, 3) - Atomics.load(d, 2) >= 2) return;
+  /* Rate cap.  Back-pressure bounds how many frames are in flight but not how
+     fast they are made, and every one is a fresh GPU surface: at several hundred
+     a second the browser churns through them until the drawing buffer stops
+     coming back with anything in it and the canvas goes blank.  No display shows
+     more than its refresh rate anyway. */
+  var now = performance.now();
+  if (self.__wwLastPresent !== undefined && now - self.__wwLastPresent < 15) return;
+  self.__wwLastPresent = now;
   /* WASM_GLPIX=1: sample the middle of the framebuffer before the transfer, so a
      blank picture can be blamed on the rendering or on the transfer. */
   if (Module.__glpix && (Module.__glpixN = (Module.__glpixN|0) + 1) % 300 === 1) {

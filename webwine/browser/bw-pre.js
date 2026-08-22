@@ -76,14 +76,18 @@ Module['preRun'].push(function () {
    files do not exist yet while preRun is running. */
 Module['onRuntimeInitialized'] = function () {
   try {
-    if (!(self.__wwEnv || {}).WW_GL) return;
+    var E = self.__wwEnv || {};
+    if (!E.WW_GL && !E.WW_CFG) return;
     var f = '/game/autoexec.cfg';
-    var cfg = FS.readFile(f, { encoding: 'utf8' })
-                .replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
-                .replace(/^r_upscalefactor .*$/m, 'r_upscalefactor 1');
+    var cfg = FS.readFile(f, { encoding: 'utf8' });
+    if (E.WW_GL) cfg = cfg.replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
+                          .replace(/^r_upscalefactor .*$/m, 'r_upscalefactor 1');
     /* ?WW_NOIDX=1 turns off the engine's indexed-colour texture path, which is
        what packs tiles into one big atlas and addresses them from uniforms. */
-    if ((self.__wwEnv || {}).WW_NOIDX) cfg += 'r_useindexedcolortextures 0\n';
+    if (E.WW_NOIDX) cfg += 'r_useindexedcolortextures 0\n';
+    /* ?WW_CFG=a;b;c appends console lines to autoexec.cfg, for setting cvars
+       without rebuilding the asset tree. */
+    if (E.WW_CFG) cfg += E.WW_CFG.split(';').join('\n') + '\n';
     FS.writeFile(f, cfg);
   } catch (e) { err('wasm_x86: GL autoexec.cfg failed: ' + e); }
 };

@@ -905,7 +905,27 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
          * lands instead of by the texture - red where s reaches 1, green where t
          * does.  A sprite with no red band along its right edge is being given
          * coordinates that stop short of its own texture. Diagnostic only. */
-        if (!vertex_stage && getenv( "WASM_GLSL_TC" ) && strstr( body, "gl_FragData[0] =" ))
+        /* WASM_GLSL_IDX=1: show the raw palette index the fragment sampled,
+         * before any palette lookup - black here means the tile's texels are
+         * zero, i.e. nothing was uploaded where the draw is looking. */
+        if (!vertex_stage && getenv( "WASM_GLSL_IDX" ) && strstr( body, "gl_FragData[0] =" ))
+        {
+            compat = TRUE;
+            body = glsl_replace( body, "gl_FragData[0] =",
+                                 "gl_FragData[0] = vec4(vec3(texture2D(s_texture,"
+                                 " u_texturePosSize.xy+texCoord).r * 4.0), 1.0) + 0.0001 *" );
+        }
+        /* WASM_GLSL_HIT=1: paint every fragment the shader writes bright green,
+         * keeping the original expression live (scaled to nothing) so the
+         * uniforms it reads are not optimised away and the application still
+         * finds them.  Answers "is this geometry reaching the GPU at all". */
+        else if (!vertex_stage && getenv( "WASM_GLSL_HIT" ) && strstr( body, "gl_FragData[0] =" ))
+        {
+            compat = TRUE;
+            body = glsl_replace( body, "gl_FragData[0] =",
+                                 "gl_FragData[0] = vec4(0.0, 1.0, 0.0, 1.0) + 0.0001 *" );
+        }
+        else if (!vertex_stage && getenv( "WASM_GLSL_TC" ) && strstr( body, "gl_FragData[0] =" ))
         {
             compat = TRUE;
             body = glsl_replace( body, "gl_FragData[0] =",
