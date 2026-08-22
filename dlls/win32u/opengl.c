@@ -3381,6 +3381,20 @@ static void ffp_sync_uniforms(void)
             display_funcs.p_glUniformMatrix4fv( entry->texture[i], 1, GL_FALSE,
                                                 state->texture[i].stack[state->texture[i].top].m );
 
+    { /* WASM_NO_FOG=1: push a fog range nothing can reach, so the application's
+       * shader computes a fog factor of 1 and leaves colours alone.  Tells a
+       * picture the fog state blackened from one the texture path lost. */
+      static int off = -1;
+      if (off == -1) off = getenv( "WASM_NO_FOG" ) ? 1 : 0;
+      if (off)
+      {
+          if (entry->fog_end >= 0) display_funcs.p_glUniform1f( entry->fog_end, 1.0e9f );
+          if (entry->fog_scale >= 0) display_funcs.p_glUniform1f( entry->fog_scale, 1.0f );
+          if (entry->fog_start >= 0) display_funcs.p_glUniform1f( entry->fog_start, 0.0f );
+          if (entry->fog_density >= 0) display_funcs.p_glUniform1f( entry->fog_density, 0.0f );
+          if (entry->fog_color >= 0) display_funcs.p_glUniform4fv( entry->fog_color, 1, state->fog.color );
+          return;
+      } }
     if (entry->fog_color >= 0) display_funcs.p_glUniform4fv( entry->fog_color, 1, state->fog.color );
     if (entry->fog_density >= 0) display_funcs.p_glUniform1f( entry->fog_density, state->fog.density );
     if (entry->fog_start >= 0) display_funcs.p_glUniform1f( entry->fog_start, state->fog.start );
