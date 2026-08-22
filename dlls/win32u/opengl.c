@@ -2988,6 +2988,18 @@ static struct ffp_state *ffp_get_state(void)
     for (i = 0; i < FFP_MAX_TEXTURES; i++) state->texture[i].stack[0] = ffp_identity;
     state->fog.density = 1.0f;
     state->fog.end = 1.0f;
+
+    /* The fixed function pipeline's own defaults for the attributes mapped onto
+     * generic ones, which are not the same: the current colour starts white and
+     * the current normal points along z, where a generic vertex attribute starts
+     * (0,0,0,1).  A draw that never sets a colour - the parallax sky is one -
+     * would otherwise be handed black, and an application shader that modulates
+     * by gl_Color renders it black. */
+    if (display_funcs.p_glVertexAttrib4f)
+        display_funcs.p_glVertexAttrib4f( FFP_ATTRIB_COLOR, 1.0f, 1.0f, 1.0f, 1.0f );
+    if (display_funcs.p_glVertexAttrib3f)
+        display_funcs.p_glVertexAttrib3f( FFP_ATTRIB_NORMAL, 0.0f, 0.0f, 1.0f );
+
     pthread_setspecific( ffp_key, state );
     return state;
 }

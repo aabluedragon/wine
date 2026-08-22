@@ -10,15 +10,17 @@ Module['arguments'] = ['c:\\netduke32.exe'];
    picture straight to the page (see webwine_gl_present in ../wasm_ipc.c). */
 try {
   Module['canvas'] = new OffscreenCanvas(640, 400);
-  /* Make the context HERE rather than leaving it to emscripten's EGL, because
-     the one attribute that matters is not reachable through EGL:
-     preserveDrawingBuffer.  transferToImageBitmap() resets the drawing buffer,
-     and the engine does not redraw every pixel of every frame - once it settles
-     on a static screen it stops drawing entirely and what we captured would be
-     the reset value, a transparent frame.  A second getContext() returns this
-     same context and ignores its attributes, so emscripten picks this one up. */
+  /* Make the context HERE rather than leaving it to emscripten's EGL: the
+     attributes that matter are not reachable through it.  preserveDrawingBuffer
+     stays OFF - asking for it makes transferToImageBitmap() copy the whole
+     drawing buffer every frame instead of handing it over, and after about
+     16k frames the browser stops producing anything and the canvas goes blank
+     for good.  ?WW_PDB=1 turns it back on for a renderer that needs the previous
+     frame to still be there.  A second getContext() returns this same context
+     and ignores its attributes, so emscripten picks this one up. */
   Module['canvas'].getContext('webgl2', { alpha: false, depth: true, stencil: true,
-                                          antialias: false, preserveDrawingBuffer: true });
+                                          antialias: false,
+                                          preserveDrawingBuffer: !!(self.__wwEnv || {}).WW_PDB });
 } catch (e) {}
 
 Module['print'] = function (t) { try { postMessage({ type: 'log', line: t }); } catch (e) {} };
