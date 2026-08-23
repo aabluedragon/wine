@@ -877,11 +877,29 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
             char first[48]; size_t fl = 0;
             while (fl < sizeof(first) - 1 && fl < len && eol[fl] != '\n') { first[fl] = eol[fl]; fl++; }
             first[fl] = 0;
-            ERR( "WASMPROBE: shader %s len %zu palette=%d fog=%d fragdata=%d sky=%d parallax=%d first[%s]\n",
+            ERR( "WASMPROBE: shader %s len %zu palette=%d fog=%d fragdata=%d discard=%d clamp=%d first[%s]\n",
                  vertex_stage ? "VERT" : "FRAG", len,
                  glsl_uses( eol, len, "s_palette" ), glsl_uses( eol, len, "gl_Fog" ),
-                 glsl_uses( eol, len, "gl_FragData" ), glsl_uses( eol, len, "sky" ),
-                 glsl_uses( eol, len, "parallax" ), first );
+                 glsl_uses( eol, len, "gl_FragData" ), glsl_uses( eol, len, "discard" ),
+                 glsl_uses( eol, len, "u_clamp" ), first );
+        }
+        /* WASM_DUMPFRAG=1: dump the whole fragment shader body in chunks, so the
+         * exact colour/discard logic can be read. */
+        if (!vertex_stage && getenv( "WASM_DUMPFRAG" ) && glsl_uses( eol, len, "s_palette" ))
+        {
+            static int done;
+            if (!done)
+            {
+                size_t p;
+                done = 1;
+                for (p = 0; p < len; p += 100)
+                {
+                    char ch[104]; size_t n = len - p < 100 ? len - p : 100, q;
+                    memcpy( ch, eol + p, n ); ch[n] = 0;
+                    for (q = 0; q < n; q++) if (ch[q] == '\n' || ch[q] == '\r') ch[q] = '~';
+                    ERR( "WASMPROBE: FRAG[%04zu] %s\n", p, ch );
+                }
+            }
         }
 
         /* the shader may carry its own #extension directives, and those have to
