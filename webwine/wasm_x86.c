@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1 };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32 };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1560,8 +1560,75 @@ static void nat_arm_vline1( void )
     nat_register( b, NAT_VLINE1, "vlineasm1" );
 }
 
+/* ---- Bcrc32: the engine's CRC32, native ---------------------------------
+ *
+ * At level load EDuke32 CRC32-hashes texture data to key its GL texture cache;
+ * the guest CRC loop (crc32.cpp, Bcrc32) then dominates wall-time under the
+ * interpreter and the level can take minutes to load, looking like a hang.
+ * Bcrc32 is a slice-by-four CRC32:
+ *   uint32_t Bcrc32( const void *buf, int len, uint32_t crc )   // -mregparm=3
+ * so buf is in eax, len in edx, crc in ecx, and it inverts crc on both ends.
+ * The four 256-entry tables live in guest data at fixed addresses; read them
+ * straight from there so the result is bit-identical to the interpreted loop
+ * whatever polynomial they hold.  Skeleton-verified before arming. */
+#define ND_CRC32      0x4e3070u
+#define ND_CRC_T0     0x12247c0u   /* indexed by the top byte    */
+#define ND_CRC_T1     0x1224bc0u   /* indexed by byte 2          */
+#define ND_CRC_T2     0x1224fc0u   /* indexed by byte 1          */
+#define ND_CRC_T3     0x12253c0u   /* indexed by the bottom byte */
+static const uint8_t nd_crc32_code[] = {
+    0x55,                   /* push %ebp        */
+    0xf7,0xd1,              /* not  %ecx        */
+    0x89,0xe5,              /* mov  %esp,%ebp   */
+    0x57,                   /* push %edi        */
+    0x89,0xd7,              /* mov  %edx,%edi   */
+    0x89,0xca,              /* mov  %ecx,%edx   */
+    0x56,                   /* push %esi        */
+    0x53,                   /* push %ebx        */
+    0x89,0xc3,              /* mov  %eax,%ebx   */
+    0x83,0xec,0x08          /* sub  $0x8,%esp   */
+};
+
+static int nat_crc32( struct x86cpu *c )
+{
+    uint32_t buf = c->regs[EAX];
+    int32_t  len = (int32_t)c->regs[EDX];
+    uint32_t crc = ~c->regs[ECX];
+    uint32_t t0 = ND_CRC_T0 + (uint32_t)nd_slide, t1 = ND_CRC_T1 + (uint32_t)nd_slide;
+    uint32_t t2 = ND_CRC_T2 + (uint32_t)nd_slide, t3 = ND_CRC_T3 + (uint32_t)nd_slide;
+    uint32_t esp = c->regs[ESP];
+
+    while (len >= 4)
+    {
+        uint32_t w = crc ^ rd32( buf );
+        buf += 4; len -= 4;
+        crc = rd32( t0 + (((w >> 24) & 0xff) << 2) ) ^ rd32( t1 + (((w >> 16) & 0xff) << 2) )
+            ^ rd32( t2 + (((w >>  8) & 0xff) << 2) ) ^ rd32( t3 + ((w & 0xff) << 2) );
+    }
+    while (len-- > 0)
+    {
+        crc = (crc >> 8) ^ rd32( t0 + (((crc ^ rd8( buf )) & 0xff) << 2) );
+        buf++;
+    }
+    c->regs[EAX] = ~crc;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_crc32( void )
+{
+    uint32_t b = ND_CRC32 + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_crc32_code); i++)
+        if (rd8( b + i ) != nd_crc32_code[i])
+        { fprintf( stderr, "wasm_x86: Bcrc32 skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_CRC32, "Bcrc32" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
+    if (kind == NAT_CRC32)   return nat_crc32( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
@@ -2833,6 +2900,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
+                          if (!getenv( "WASM_NO_CRC32" )) nat_arm_crc32();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
@@ -2866,6 +2934,37 @@ static void run( struct x86cpu *c )
                 {
                     stall = 0;
                     audio_pump( c );
+                }
+
+                /* WASM_STALLBT=1: when the render loop has gone a very long time
+                 * without a flip (a load-time spin, not a normal frame), dump the
+                 * guest EIP and walk the EBP chain once per stall episode so we
+                 * can see which guest function is looping. */
+                {
+                    static int on = -1, longstall = 0, ndump = 0;
+                    if (on == -1) on = getenv( "WASM_STALLBT" ) ? 1 : 0;
+                    if (on)
+                    {
+                        if (g_flip_count != last_flip) { longstall = 0; ndump = 0; }
+                        else if (++longstall > 3000 && (longstall % 4000) == 3001 && ndump < 20)
+                        {
+                            ndump++;
+                            uint32_t bp = c->regs[EBP], eip = c->eip;
+                            int d;
+                            fprintf( stderr, "wasm_x86: STALLBT flips=%llu eip=%08x", (unsigned long long)g_flip_count, eip );
+                            for (d = 0; d < 16; d++)
+                            {
+                                uint32_t ret, next;
+                                if (bp < 0x10000 || bp >= 0x70000000) break;
+                                ret  = rd32( bp + 4 );
+                                next = rd32( bp );
+                                fprintf( stderr, " <%08x", ret );
+                                if (next <= bp) break;
+                                bp = next;
+                            }
+                            fprintf( stderr, "\n" );
+                        }
+                    }
                 }
             }
             { static uint32_t nat_tries;

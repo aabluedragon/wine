@@ -869,6 +869,21 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
                  glsl_uses( eol, len, "dFdy" );
         vertex_stage = glsl_uses( eol, len, "gl_Position" ) || glsl_uses( eol, len, "gl_Vertex" );
 
+        /* WASM_SHADERS=1: log a signature for every shader the application
+         * compiles, so a second fragment shader that draws the sky (one without
+         * the fog line the WASM_GLSL_BLACK highlight keys on) shows up. */
+        if (getenv( "WASM_SHADERS" ))
+        {
+            char first[48]; size_t fl = 0;
+            while (fl < sizeof(first) - 1 && fl < len && eol[fl] != '\n') { first[fl] = eol[fl]; fl++; }
+            first[fl] = 0;
+            ERR( "WASMPROBE: shader %s len %zu palette=%d fog=%d fragdata=%d sky=%d parallax=%d first[%s]\n",
+                 vertex_stage ? "VERT" : "FRAG", len,
+                 glsl_uses( eol, len, "s_palette" ), glsl_uses( eol, len, "gl_Fog" ),
+                 glsl_uses( eol, len, "gl_FragData" ), glsl_uses( eol, len, "sky" ),
+                 glsl_uses( eol, len, "parallax" ), first );
+        }
+
         /* the shader may carry its own #extension directives, and those have to
          * stay ahead of anything that is not a preprocessor token, so the
          * precision defaults go after the whole leading directive block */
@@ -899,6 +914,22 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
             /* the vertex stage reads the colour attribute, the fragment stage
              * reads what the vertex stage interpolated */
             body = glsl_replace( body, "gl_Color", vertex_stage ? "wine_Color" : "wine_FrontColor" );
+        }
+
+        /* WASM_GLSL_BLACK=1: after the shader has computed its final colour,
+         * repaint any fragment that came out black (and opaque) bright magenta.
+         * This runs in the real shader, changing no uniforms, so it tells apart
+         * the two ways a region can be black: if the sky turns magenta the sky
+         * geometry IS drawn and the shader computed it to black (an input
+         * problem - palette, index or shade); if it stays black the sky was not
+         * drawn there at all (a geometry or depth problem).  Keyed on the fog
+         * mix, which is the last statement to touch `color` before the write. */
+        if (!vertex_stage && getenv( "WASM_GLSL_BLACK" ) && strstr( body, "color.rgb, fogFactor);" ))
+        {
+            compat = TRUE;
+            body = glsl_replace( body, "color.rgb, fogFactor);",
+                                 "color.rgb, fogFactor); if (dot(color.rgb, vec3(c_one)) < 0.02)"
+                                 " color.rgb = vec3(c_one, c_zero, c_one);" );
         }
 
         /* WASM_GLSL_TC=1: paint each fragment by where its texture coordinate

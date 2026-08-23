@@ -3304,6 +3304,47 @@ static void WINAPI ffp_glActiveTexture( GLenum texture )
     ffp_next_glActiveTexture( texture );
 }
 
+/* WASM_BLUE_CLEAR=1: ignore whatever clear colour the application asks for and
+ * force bright blue, so a region that is never drawn shows blue and one that is
+ * drawn (even drawn black) stays black.  Answers "is this geometry drawn at all"
+ * without depending on the shader that draws it. Diagnostic only. */
+static PFN_glClearColor ffp_next_glClearColor;
+
+static void WINAPI ffp_glClearColor( GLfloat r, GLfloat g, GLfloat b, GLfloat a )
+{
+    static int on = -1;
+    if (on == -1) on = getenv( "WASM_BLUE_CLEAR" ) ? 1 : 0;
+    if (on) ffp_next_glClearColor( 0.0f, 0.0f, 1.0f, 1.0f );
+    else ffp_next_glClearColor( r, g, b, a );
+}
+
+/* WASM_BLUE_CLEAR=1 also forces a colour clear to blue every frame, even if the
+ * application only asked to clear depth, so a region that is never drawn ends up
+ * blue no matter whether the application clears colour itself. */
+static PFN_glClear ffp_next_glClear;
+
+static void WINAPI ffp_glClear( GLbitfield mask )
+{
+    static int on = -1;
+    if (on == -1) on = getenv( "WASM_BLUE_CLEAR" ) ? 1 : 0;
+    if (on) mask |= GL_COLOR_BUFFER_BIT;
+    ffp_next_glClear( mask );
+}
+
+/* WASM_DEPTH_ALWAYS=1: force the depth comparison to always pass.  A parallax
+ * sky drawn at the far plane fails GL_LESS against a depth buffer cleared to its
+ * maximum, and a fragment that fails the depth test is never written, so it is
+ * black and the shader highlight cannot reach it either.  If forcing the compare
+ * makes the sky appear, that rejection is the cause. Diagnostic only. */
+static PFN_glDepthFunc ffp_next_glDepthFunc;
+
+static void WINAPI ffp_glDepthFunc( GLenum func )
+{
+    static int on = -1;
+    if (on == -1) on = getenv( "WASM_DEPTH_ALWAYS" ) ? 1 : 0;
+    ffp_next_glDepthFunc( on ? GL_ALWAYS : func );
+}
+
 static void WINAPI ffp_glColor4f( GLfloat r, GLfloat g, GLfloat b, GLfloat a )
 {
     GLfloat color[4] = { r, g, b, a };
@@ -3660,6 +3701,15 @@ static void init_ffp_emulation(void)
 
     ffp_next_glActiveTexture = display_funcs.p_glActiveTexture;
     if (ffp_next_glActiveTexture) display_funcs.p_glActiveTexture = ffp_glActiveTexture;
+
+    ffp_next_glClearColor = display_funcs.p_glClearColor;
+    if (ffp_next_glClearColor) display_funcs.p_glClearColor = ffp_glClearColor;
+
+    ffp_next_glClear = display_funcs.p_glClear;
+    if (ffp_next_glClear) display_funcs.p_glClear = ffp_glClear;
+
+    ffp_next_glDepthFunc = display_funcs.p_glDepthFunc;
+    if (ffp_next_glDepthFunc) display_funcs.p_glDepthFunc = ffp_glDepthFunc;
 
     ffp_next_glEnable = display_funcs.p_glEnable;
     ffp_next_glDisable = display_funcs.p_glDisable;
