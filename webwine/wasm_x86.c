@@ -961,10 +961,24 @@ int g_mouse_x = 160, g_mouse_y = 100;
 
 static int sdl_poll_event( struct x86cpu *c )
 {
+    static uint64_t last_synth_flip;
     uint32_t ev = garg( c, 0 );
     int dx = g_mouse_dx, dy = g_mouse_dy;
 
     if ((!dx && !dy) || !ev) return 0;      /* nothing pending: run the real one */
+
+    /* At most one synthesised motion event per rendered frame.  The win32u ring
+     * drain refills g_mouse_dx/dy from inside the game's own PeekMessage pump,
+     * which runs inside its "while (SDL_PollEvent(&e))" drain loop - so if the
+     * pointer keeps moving while a frame is in flight (a level load pumps events
+     * without flipping), synthesising on every poll makes that loop never see an
+     * empty queue and it spins forever, wedging the load.  Real SDL snapshots the
+     * OS queue once per pump; coalescing to one event per flip is the same shape:
+     * the game still gets the whole delta each frame for smooth mouselook, and a
+     * flipless load drains empty after the first event. */
+    if (g_flip_count == last_synth_flip) return 0;
+    last_synth_flip = g_flip_count;
+
     g_mouse_dx = 0; g_mouse_dy = 0;
     g_mouse_x += dx; g_mouse_y += dy;
 

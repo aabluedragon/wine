@@ -188,14 +188,26 @@ document.addEventListener('pointerlockchange', () => {
 });
 cv.addEventListener('click', () => { if (!locked && cv.requestPointerLock) cv.requestPointerLock(); });
 
+// Coalesce absolute mouse-move to at most one event per animation frame.  The
+// game drains SDL events in a tight "while (SDL_PollEvent(&e))" loop (and does so
+// during a level load, which pumps events without rendering a frame); pushing one
+// ring event per DOM mousemove floods that loop so it never sees an empty queue
+// and the load wedges.  One-per-frame keeps it bounded - the drain empties
+// between frames - while still tracking the pointer.  Locked (relative) motion is
+// already coalesced downstream, per frame, in wasm_x86.c's sdl_poll_event.
+let pendingAbsX = null, pendingAbsY = 0;
 cv.addEventListener('mousemove', (e) => {
   if (locked) {
-    // relative motion -> synthetic SDL_MOUSEMOTION (see wasm_x86.c sdl_poll_event)
     if (e.movementX || e.movementY) { push(6, e.movementX | 0, e.movementY | 0, 0); mouseSent++; }
   } else {
-    const [x,y] = guestXY(e); push(3, x, y, 0); mouseSent++;
+    const [x,y] = guestXY(e); pendingAbsX = x; pendingAbsY = y;
   }
 });
+function flushMouse() {
+  if (pendingAbsX !== null) { push(3, pendingAbsX, pendingAbsY, 0); mouseSent++; pendingAbsX = null; }
+  requestAnimationFrame(flushMouse);
+}
+requestAnimationFrame(flushMouse);
 cv.addEventListener('mousedown', (e) => { const [x,y] = guestXY(e); push(4, e.button, x, y); mouseSent++; cv.focus(); e.preventDefault(); });
 cv.addEventListener('mouseup',   (e) => { const [x,y] = guestXY(e); push(5, e.button, x, y); mouseSent++; e.preventDefault(); });
 cv.addEventListener('contextmenu', (e) => e.preventDefault());
