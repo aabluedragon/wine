@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32 };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1640,9 +1640,130 @@ static void nat_arm_crc32( void )
     nat_register( b, NAT_CRC32, "Bcrc32" );
 }
 
+/* paletteGetClosestColorWithBlacklist (colmatch.cpp) - the grid-accelerated
+ * nearest-palette-colour search the engine runs tens of thousands of times
+ * while building shade/palswap lookup tables at first level load.  Under the
+ * interpreter its inner cache scan (up to 4096 entries) plus grid walk dominate
+ * wall-time and make the first load take minutes (STALLBT catches it inside
+ * this function).  It is -mregparm=3, so r/g/b arrive in eax/edx/ecx and
+ * lastokcol/blacklist on the stack; it returns in eax with a plain ret.
+ *
+ * The function is a memoising wrapper around a pure grid search: every value it
+ * ever returns is a fresh grid-search result (the cache is flushed whenever
+ * lastokcol or blacklist changes, so a hit can only echo a miss under the same
+ * arguments).  So computing the grid search directly - ignoring the cache
+ * entirely - yields bit-identical returns without touching any guest state,
+ * exactly like the crc32 hook.  All the tables live at fixed guest addresses;
+ * every byte the compiler loads from them is movzx, i.e. unsigned char, which
+ * this mirrors.  FASTPALGRIDSIZ is 256>>3 = 32. */
+#define ND_PALMATCH   0x4e28a0u
+#define ND_RDIST      0xf8e9e0u    /* int32_t[513], indexed by pal.r + (256-r) */
+#define ND_GDIST      0xf8e1c0u    /* int32_t[513]                             */
+#define ND_BDIST      0xf8d9a0u    /* int32_t[513]                             */
+#define ND_COLDIST    0xf8f1e8u    /* uint8_t[8]                               */
+#define ND_COLSCAN    0xf8f200u    /* int32_t[27], grid-cell offsets           */
+#define ND_COLHEAD    0x1225be0u   /* uint8_t[], per-cell linked-list head     */
+#define ND_COLHERE    0x122f580u   /* bitmap, cell occupied                    */
+#define ND_COLNEXT    0x12257c0u   /* int32_t[256], linked-list next, -1 ends  */
+#define ND_COLPAL     0x1225bc0u   /* uint8_t[768], the matched palette        */
+static const uint8_t nd_palmatch_code[] = {
+    0x55,                   /* push %ebp        */
+    0x89,0xe5,              /* mov  %esp,%ebp   */
+    0x57,                   /* push %edi        */
+    0x56,                   /* push %esi        */
+    0x89,0xc6,              /* mov  %eax,%esi   */
+    0x89,0xc8,              /* mov  %ecx,%eax   */
+    0x53,                   /* push %ebx        */
+    0xc1,0xe0,0x10,         /* shl  $0x10,%eax  */
+    0x09,0xf0,              /* or   %esi,%eax   */
+    0x83,0xec,0x2c          /* sub  $0x2c,%esp  */
+};
+
+static int nat_pal_closest( struct x86cpu *c )
+{
+    int32_t  r = (int32_t)c->regs[EAX];
+    int32_t  g = (int32_t)c->regs[EDX];
+    int32_t  b = (int32_t)c->regs[ECX];
+    int32_t  lastokcol = (int32_t)garg( c, 0 );
+    uint32_t blacklist = garg( c, 1 );
+    uint32_t s = (uint32_t)nd_slide;
+    uint32_t rdist = ND_RDIST + s, gdist = ND_GDIST + s, bdist = ND_BDIST + s;
+    uint32_t coldist = ND_COLDIST + s, colscan = ND_COLSCAN + s;
+    uint32_t colhead = ND_COLHEAD + s, colhere = ND_COLHERE + s;
+    uint32_t colnext = ND_COLNEXT + s, colpal = ND_COLPAL + s;
+    const int GRID = 32;
+
+    int j = (r >> 3) * GRID * GRID + (g >> 3) * GRID + (b >> 3) + GRID * GRID + GRID + 1;
+    int minrdist = (int32_t)rd32( rdist + (uint32_t)(rd8( coldist + (r & 7) ) + 256) * 4 );
+    int mingdist = (int32_t)rd32( gdist + (uint32_t)(rd8( coldist + (g & 7) ) + 256) * 4 );
+    int minbdist = (int32_t)rd32( bdist + (uint32_t)(rd8( coldist + (b & 7) ) + 256) * 4 );
+    int mindist = minrdist < mingdist ? minrdist : mingdist;
+    if (minbdist < mindist) mindist = minbdist;
+    mindist += 1;
+
+    int R = 256 - r, G = 256 - g, B = 256 - b;
+    int retcol = -1, k;
+
+    for (k = 26; k >= 0; k--)
+    {
+        int i = (int32_t)rd32( colscan + (uint32_t)k * 4 ) + j;
+        if (!(rd8( colhere + ((uint32_t)i >> 3) ) & (1u << (i & 7)))) continue;
+        i = rd8( colhead + (uint32_t)i );
+        do {
+            uint32_t pal1 = colpal + (uint32_t)i * 3;
+            int dist = (int32_t)rd32( gdist + (uint32_t)(rd8( pal1 + 1 ) + G) * 4 );
+            if (!(dist >= mindist || i > lastokcol ||
+                  (blacklist && (rd8( blacklist + ((uint32_t)i >> 3) ) & (1u << (i & 7))))))
+            {
+                if ((dist += (int32_t)rd32( rdist + (uint32_t)(rd8( pal1 ) + R) * 4 )) < mindist &&
+                    (dist += (int32_t)rd32( bdist + (uint32_t)(rd8( pal1 + 2 ) + B) * 4 )) < mindist)
+                { mindist = dist; retcol = i; }
+            }
+            i = (int32_t)rd32( colnext + (uint32_t)i * 4 );
+        } while (i >= 0);
+    }
+
+    if (retcol < 0)
+    {
+        int i;
+        mindist = 0x7fffffff;
+        for (i = 0; i <= lastokcol; i++)
+        {
+            uint32_t pal1;
+            int dist;
+            if (blacklist && (rd8( blacklist + ((uint32_t)i >> 3) ) & (1u << (i & 7)))) continue;
+            pal1 = colpal + (uint32_t)i * 3;
+            dist = (int32_t)rd32( gdist + (uint32_t)(rd8( pal1 + 1 ) + G) * 4 );
+            if (dist >= mindist) continue;
+            if ((dist += (int32_t)rd32( rdist + (uint32_t)(rd8( pal1 ) + R) * 4 )) >= mindist) continue;
+            if ((dist += (int32_t)rd32( bdist + (uint32_t)(rd8( pal1 + 2 ) + B) * 4 )) >= mindist) continue;
+            mindist = dist; retcol = i;
+        }
+    }
+
+    {
+        uint32_t esp = c->regs[ESP];
+        c->regs[EAX] = (uint32_t)retcol;
+        c->eip = rd32( esp );
+        c->regs[ESP] = esp + 4;
+    }
+    return 1;
+}
+
+static void nat_arm_pal_closest( void )
+{
+    uint32_t b = ND_PALMATCH + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_palmatch_code); i++)
+        if (rd8( b + i ) != nd_palmatch_code[i])
+        { fprintf( stderr, "wasm_x86: palmatch skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_PALMATCH, "paletteGetClosestColorWithBlacklist" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
+    if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
@@ -2915,6 +3036,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (!getenv( "WASM_NO_CRC32" )) nat_arm_crc32();
+                          if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
