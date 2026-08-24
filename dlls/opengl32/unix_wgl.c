@@ -1041,6 +1041,37 @@ char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLin
             }
         }
 
+        /* Emulate GL_DEPTH_CLAMP.  Desktop polymost enables it globally (polymost.cpp,
+         * gated on the GL_ARB_depth_clamp extension), which lets the parallax sky draw:
+         * the engine gives sky vertices a tiny w (dd ~= 1e-4), so their post-projection
+         * z lands past the hardcoded far plane (farclip = 8, sky z ~= 9.8).  With depth
+         * clamp the far sky is clamped to the far plane; without it those vertices are
+         * clipped away and the sky is black.  WebGL 2 has no GL_ARB_depth_clamp, so the
+         * game never enables it and the sky vanishes.  Clamping gl_Position.z into
+         * [-w, w] at the end of the vertex stage reproduces depth clamping exactly - a
+         * no-op for in-range geometry (polymost already near-clips in software, so no
+         * vertex reaches here with w <= 0), and it pins the distant sky so it rasterises.
+         * WASM_NO_DEPTHCLAMP disables it. */
+        if (vertex_stage && !getenv( "WASM_NO_DEPTHCLAMP" ))
+        {
+            char *close = strrchr( body, '}' );
+            if (close)
+            {
+                static const char inject[] =
+                    "\ngl_Position.z = clamp(gl_Position.z, -gl_Position.w, gl_Position.w);\n";
+                size_t blen = strlen( body ), off = close - body, ilen = sizeof(inject) - 1;
+                char *nb = malloc( blen + ilen + 1 );
+                if (nb)
+                {
+                    memcpy( nb, body, off );
+                    memcpy( nb + off, inject, ilen );
+                    memcpy( nb + off + ilen, body + off, blen - off + 1 );
+                    free( body );
+                    body = nb;
+                }
+            }
+        }
+
         len = strlen( body );
         if (!(sources[i] = malloc( sizeof(version) + sizeof(derivatives) + sizeof(derivatives_fallback) +
                                    sizeof(precision) + strlen( decls ) + len + 1 )))
