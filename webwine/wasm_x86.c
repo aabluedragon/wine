@@ -1666,6 +1666,40 @@ static void nat_arm_crc32( void )
 #define ND_COLHERE    0x122f580u   /* bitmap, cell occupied                    */
 #define ND_COLNEXT    0x12257c0u   /* int32_t[256], linked-list next, -1 ends  */
 #define ND_COLPAL     0x1225bc0u   /* uint8_t[768], the matched palette        */
+#define ND_PALETTE    0xf8f280u    /* uint8_t[768], the engine's base palette  */
+#define ND_NUMCOLRES2 0x12348c0u   /* int32_t numcolmatchresults (result cache)*/
+#define ND_GRIDCELLS  ((32+2)*(32+2)*(32+2))
+
+/* Re-sync colmatch_palette + its lookup grid to the engine's base `palette`,
+ * replicating paletteInitClosestColorMap (colmatch.cpp).  The engine is supposed to
+ * keep colmatch_palette == the base palette (both paletteInitClosestColorMap callers
+ * pass `palette`), but on this build it can be left holding a stale palette while
+ * `palette` already holds the correct base one - so paletteGetClosestColor matches the
+ * wrong palette and paletteMakeLookupTable builds wrong (e.g. all-black) tables.  The
+ * interpreted wrapper hid this via its result cache; this native hook recomputes fresh,
+ * so it needs colmatch_palette correct.  Restores the invariant without touching speed. */
+static void nd_pal_resync( uint32_t s )
+{
+    uint32_t pal = ND_PALETTE + s, cmp = ND_COLPAL + s;
+    uint32_t colhere = ND_COLHERE + s, colhead = ND_COLHEAD + s, colnext = ND_COLNEXT + s;
+    unsigned i, nbytes = (ND_GRIDCELLS + 7) >> 3;
+    for (i = 0; i < 768; i++) wr8( cmp + i, rd8( pal + i ) );
+    for (i = 0; i + 4 <= nbytes; i += 4) wr32( colhere + i, 0 );
+    for (; i < nbytes; i++) wr8( colhere + i, 0 );
+    for (i = 256; i-- > 0; )
+    {
+        uint32_t p = cmp + i * 3, hb;
+        int j = (rd8( p ) >> 3) * 32 * 32 + (rd8( p + 1 ) >> 3) * 32 + (rd8( p + 2 ) >> 3)
+                + 32 * 32 + 32 + 1;
+        hb = colhere + ((uint32_t)j >> 3);
+        if (rd8( hb ) & (1u << (j & 7))) wr32( colnext + i * 4, rd8( colhead + (uint32_t)j ) );
+        else                             wr32( colnext + i * 4, 0xffffffffu );
+        wr8( colhead + (uint32_t)j, (uint8_t)i );
+        wr8( hb, rd8( hb ) | (1u << (j & 7)) );
+    }
+    wr32( ND_NUMCOLRES2 + s, 0 );
+}
+
 static const uint8_t nd_palmatch_code[] = {
     0x55,                   /* push %ebp        */
     0x89,0xe5,              /* mov  %esp,%ebp   */
@@ -1692,6 +1726,15 @@ static int nat_pal_closest( struct x86cpu *c )
     uint32_t colhead = ND_COLHEAD + s, colhere = ND_COLHERE + s;
     uint32_t colnext = ND_COLNEXT + s, colpal = ND_COLPAL + s;
     const int GRID = 32;
+
+    {
+        static const unsigned sent[4] = { 31 * 3, 96 * 3, 160 * 3, 224 * 3 };
+        unsigned kk;
+        for (kk = 0; kk < 4; kk++)
+            if (rd8( colpal + sent[kk] ) != rd8( ND_PALETTE + s + sent[kk] ) ||
+                rd8( colpal + sent[kk] + 2 ) != rd8( ND_PALETTE + s + sent[kk] + 2 ))
+            { nd_pal_resync( s ); break; }
+    }
 
     int j = (r >> 3) * GRID * GRID + (g >> 3) * GRID + (b >> 3) + GRID * GRID + GRID + 1;
     int minrdist = (int32_t)rd32( rdist + (uint32_t)(rd8( coldist + (r & 7) ) + 256) * 4 );
