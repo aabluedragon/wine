@@ -820,6 +820,30 @@ static char *glsl_replace( char *src, const char *from, const char *to )
     return out;
 }
 
+#ifdef __wasm__
+/* WebGL 2 has no GL_BGRA pixel format.  The Build/Polymost engine uploads its
+ * non-indexed ART and hires tiles as GL_BGRA (it byte-swaps R<->B into the
+ * source first), so those uploads fail silently on WebGL and the affected tiles
+ * - the tinted HUD crosshair among them (HICTINT_USEONART drops the indexed
+ * path in texcache_tryart) - never appear.  Undo the engine's swap into a
+ * malloc'd RGBA copy so the thunk can upload GL_RGBA instead.  Caller frees. */
+unsigned char *webwine_bgra_to_rgba_dup( const void *src, unsigned width, unsigned height )
+{
+    size_t n = (size_t)width * height, i;
+    const unsigned char *s = src;
+    unsigned char *d;
+    if (!s || !n || !(d = malloc( n * 4 ))) return NULL;
+    for (i = 0; i < n; i++)
+    {
+        d[i*4+0] = s[i*4+2];
+        d[i*4+1] = s[i*4+1];
+        d[i*4+2] = s[i*4+0];
+        d[i*4+3] = s[i*4+3];
+    }
+    return d;
+}
+#endif
+
 char **translate_glsl_es( GLsizei count, const GLchar *const *string, const GLint *length )
 {
     static const char version[] = "#version 100\n";

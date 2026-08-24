@@ -6,6 +6,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -3055,6 +3056,24 @@ static NTSTATUS gl_glTexImage2D( void *args )
     struct glTexImage2D_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glTexImage2D) return STATUS_NOT_IMPLEMENTED;
+#ifdef __wasm__
+    /* WebGL 2 has neither the GL_BGRA (0x80E1) pixel format nor the packed
+     * GL_UNSIGNED_INT_8_8_8_8_REV (0x8367) type that Polymost uploads BGRA tiles
+     * with; swizzle to a plain RGBA/UNSIGNED_BYTE image the browser accepts. */
+    if (params->format == 0x80E1 && (params->type == 0x1401 || params->type == 0x8367) && params->pixels)
+    {
+        extern unsigned char *webwine_bgra_to_rgba_dup( const void *, unsigned, unsigned );
+        unsigned char *rgba = webwine_bgra_to_rgba_dup( params->pixels, params->width, params->height );
+        if (rgba)
+        {
+            GLint ifmt = params->internalformat == 0x80E1 ? 0x1908 /* GL_RGBA */ : params->internalformat;
+            funcs->p_glTexImage2D( params->target, params->level, ifmt, params->width, params->height, params->border, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba );
+            free( rgba );
+            set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
+            return STATUS_SUCCESS;
+        }
+    }
+#endif
     funcs->p_glTexImage2D( params->target, params->level, params->internalformat, params->width, params->height, params->border, params->format, params->type, params->pixels );
     set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
     return STATUS_SUCCESS;
@@ -3115,6 +3134,23 @@ static NTSTATUS gl_glTexSubImage2D( void *args )
     struct glTexSubImage2D_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glTexSubImage2D) return STATUS_NOT_IMPLEMENTED;
+#ifdef __wasm__
+    /* WebGL 2 has neither the GL_BGRA (0x80E1) pixel format nor the packed
+     * GL_UNSIGNED_INT_8_8_8_8_REV (0x8367) type that Polymost uploads BGRA tiles
+     * with; swizzle to a plain RGBA/UNSIGNED_BYTE image the browser accepts. */
+    if (params->format == 0x80E1 && (params->type == 0x1401 || params->type == 0x8367) && params->pixels)
+    {
+        extern unsigned char *webwine_bgra_to_rgba_dup( const void *, unsigned, unsigned );
+        unsigned char *rgba = webwine_bgra_to_rgba_dup( params->pixels, params->width, params->height );
+        if (rgba)
+        {
+            funcs->p_glTexSubImage2D( params->target, params->level, params->xoffset, params->yoffset, params->width, params->height, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba );
+            free( rgba );
+            set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
+            return STATUS_SUCCESS;
+        }
+    }
+#endif
     funcs->p_glTexSubImage2D( params->target, params->level, params->xoffset, params->yoffset, params->width, params->height, params->format, params->type, params->pixels );
     set_context_attribute( params->teb, -1 /* unsupported */, NULL, 0 );
     return STATUS_SUCCESS;
