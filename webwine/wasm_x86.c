@@ -956,16 +956,55 @@ static void nat_arm_surfblit( void )
 
 /* Filled by the win32u ring drain (dlls/win32u/message.c) from page events. */
 int g_mouse_dx, g_mouse_dy;      /* accumulated pointer-lock motion */
-int g_mouse_buttons;             /* SDL button mask */
+int g_mouse_buttons;             /* live SDL button mask (win32u ring drain) */
 int g_mouse_x = 160, g_mouse_y = 100;
+static int g_rel_mouse_on;       /* game asked for SDL relative (aiming) mode */
+static int g_mb_reported;        /* button mask the game has already been given */
+
+/* SDL_MouseButtonEvent (from the exe's DWARF, 28 bytes): type@0 timestamp@4
+ * windowID@8 which@12 button@16(u8) state@17(u8) clicks@18(u8) pad@19 x@20 y@24. */
+#define SDL_EV_MOUSEBUTTONDOWN 1025u
+#define SDL_EV_MOUSEBUTTONUP   1026u
 
 static int sdl_poll_event( struct x86cpu *c )
 {
     static uint64_t last_synth_flip;
     uint32_t ev = garg( c, 0 );
-    int dx = g_mouse_dx, dy = g_mouse_dy;
+    int dx, dy;
 
-    if ((!dx && !dy) || !ev) return 0;      /* nothing pending: run the real one */
+    if (!ev) return 0;
+
+    /* Emit one pending mouse-button transition per poll (a click is two: down
+     * then up, so the game's drain loop still empties).  Gated on relative mode:
+     * in the menus the cursor is absolute and SDL delivers the real WM_*BUTTON
+     * events, so leave those alone and avoid double-clicks.  g_mouse_buttons:
+     * bit1=left, bit2=middle, bit4=right (win32u ring drain). */
+    if (g_rel_mouse_on)
+    {
+        int diff = g_mouse_buttons ^ g_mb_reported;
+        if (diff)
+        {
+            int lowbit = diff & -diff;                       /* one button at a time */
+            int down   = (g_mouse_buttons & lowbit) != 0;
+            int sdlbtn = lowbit == 1 ? 1 : lowbit == 2 ? 2 : 3;  /* L / M / R */
+            g_mb_reported ^= lowbit;
+            wr32( ev + 0,  down ? SDL_EV_MOUSEBUTTONDOWN : SDL_EV_MOUSEBUTTONUP );
+            wr32( ev + 4,  0 );                              /* timestamp */
+            wr32( ev + 8,  1 );                              /* windowID */
+            wr32( ev + 12, 0 );                              /* which */
+            wr8 ( ev + 16, (uint8_t)sdlbtn );
+            wr8 ( ev + 17, (uint8_t)(down ? 1 : 0) );        /* SDL_PRESSED / RELEASED */
+            wr8 ( ev + 18, 1 );                              /* clicks */
+            wr8 ( ev + 19, 0 );
+            wr32( ev + 20, (uint32_t)g_mouse_x );
+            wr32( ev + 24, (uint32_t)g_mouse_y );
+            gret( c, 1 );
+            return 1;
+        }
+    }
+
+    dx = g_mouse_dx; dy = g_mouse_dy;
+    if (!dx && !dy) return 0;                /* nothing pending: run the real one */
 
     /* At most one synthesised motion event per rendered frame.  The win32u ring
      * drain refills g_mouse_dx/dy from inside the game's own PeekMessage pump,
@@ -1909,8 +1948,11 @@ static int nat_call( struct x86cpu *c, int kind )
     case NAT_SDL_UNLOCK:   if (g_aud.lock) g_aud.lock--; gret( c, 0 ); return 1;
     case NAT_SDL_CLOSE:    g_aud.open = 0; g_aud.paused = 1; gret( c, 0 ); return 1;
     case NAT_SDL_POLL:     return sdl_poll_event( c );
-    /* Say yes to relative mode: the game then uses xrel/yrel, which we supply. */
-    case NAT_SDL_RELMOUSE: gret( c, 0 ); return 1;
+    /* Say yes to relative mode: the game then uses xrel/yrel, which we supply.
+     * Record the requested state - in relative (aiming) mode SDL never gets the
+     * WM_MOUSEMOVE that would give its window mouse focus, so it drops the posted
+     * WM_*BUTTON messages; sdl_poll_event synthesises the button events instead. */
+    case NAT_SDL_RELMOUSE: g_rel_mouse_on = (int)garg( c, 0 ); gret( c, 0 ); return 1;
     default: break;
     }
     uint32_t esp = c->regs[ESP];
