@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1923,10 +1923,62 @@ static void nat_arm_mixstereo( void )
     nat_register( b, NAT_MIXSTEREO, "MV_MixStereo<u8,s16>" );
 }
 
+/* mimalloc debug overhead.  The bundled mimalloc was built with MI_STAT and
+ * MI_PADDING on, so every allocation runs mi_stat_update (atomic counter bumps
+ * feeding MIMALLOC_SHOW_STATS) and every free runs mi_check_padding (decodes
+ * the guard padding to detect overflow).  Both are void, purely diagnostic, and
+ * take their args in registers (regparm, no stack args) - so replacing each with
+ * an immediate return is functionally transparent (you lose only the stats
+ * report and the corruption check, neither of which anything here reads) and
+ * cannot unbalance the stack.  They fire on the allocation-heavy paths - level
+ * load (texcache + palookups) most of all - so skipping them speeds loading and
+ * trims a few % of steady render too.  Skeleton-verified; gated WASM_NO_MIDEBUG.
+ * Any convention mistake would corrupt the very first free, so a rendering menu
+ * is itself the proof it is right. */
+#define ND_MI_STATUPD  0x5c9440u   /* mi_stat_update(stat<-eax, amount<-edx:ecx) */
+#define ND_MI_CHKPAD   0x5c2720u   /* mi_check_padding(page<-eax, block<-edx)    */
+static const int16_t nd_mistatupd_code[] = {
+    0x55, 0x89,0xe5, 0x57, 0x56, 0x89,0xc6, 0x53, 0x83,0xec,0x24,   /* push ebp;mov esp,ebp;push edi,esi;mov eax,esi;push ebx;sub 0x24,esp */
+    0x89,0x55,0xe0, 0x89,0x4d,0xe4                                  /* mov edx,-0x20(ebp); mov ecx,-0x1c(ebp)  (int64 amount) */
+};
+static const int16_t nd_michkpad_code[] = {
+    0x55, 0x89,0xe5, 0x56, 0x53, 0x89,0xd3, 0x8d,0x55,0xf0,         /* push ebp;mov esp,ebp;push esi,ebx;mov edx,ebx;lea -0x10(ebp),edx */
+    0x8d,0x4d,0xf4, 0x83,0xec,0x30, 0x89,0x14,0x24                  /* lea -0xc(ebp),ecx; sub 0x30,esp; mov edx,(esp) */
+};
+
+/* Immediate return for a regparm void function: pop the return address, leave
+ * every register untouched (so any caller-saved/scratch expectation holds). */
+static int nat_noop_ret( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP];
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_one( uint32_t va, const int16_t *code, unsigned n, const char *what )
+{
+    uint32_t b = va + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < n; i++)
+        if (code[i] >= 0 && rd8( b + i ) != (uint8_t)code[i])
+        { fprintf( stderr, "wasm_x86: %s skeleton differs at %08x - left interpreted\n", what, b ); return; }
+    nat_register( b, NAT_MIDEBUG, what );
+}
+
+static void nat_arm_midebug( void )
+{
+    nat_arm_one( ND_MI_STATUPD, nd_mistatupd_code,
+                 sizeof(nd_mistatupd_code)/sizeof(nd_mistatupd_code[0]), "mi_stat_update (noop)" );
+    nat_arm_one( ND_MI_CHKPAD, nd_michkpad_code,
+                 sizeof(nd_michkpad_code)/sizeof(nd_michkpad_code[0]), "mi_check_padding (noop)" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
     if (kind == NAT_MIXSTEREO) return nat_mixstereo( c );
+    if (kind == NAT_MIDEBUG)  return nat_noop_ret( c );
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
@@ -3204,6 +3256,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (!getenv( "WASM_NO_CRC32" )) nat_arm_crc32();
                           if (!getenv( "WASM_NO_MIXSTEREO" )) nat_arm_mixstereo();
+                          if (!getenv( "WASM_NO_MIDEBUG" )) nat_arm_midebug();
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
