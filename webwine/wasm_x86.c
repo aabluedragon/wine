@@ -208,7 +208,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1803,9 +1803,91 @@ static void nat_arm_pal_closest( void )
     nat_register( b, NAT_PALMATCH, "paletteGetClosestColorWithBlacklist" );
 }
 
+/* MV_MixStereo<uint8_t,int16_t> (audiolib mix.cpp) - the SFX software mixer's
+ * hot per-sample loop.  In gameplay the audio callback runs on this same single
+ * interpreter thread and this mix is its biggest slice.  Reimplement the loop
+ * bit-exactly: 8-bit source flipped to signed and shifted up, two
+ * fix16_fast_trunc_mul stages (global*panned volume, then *sample), clamp to
+ * int16, interleaved-stereo store, and the per-sample volume smoothing that the
+ * guest writes back into voice->PannedVolume.  cdecl(voice, length); returns the
+ * advanced sample position in EAX.  All volumes/rate/globals are read from the
+ * same places the guest reads them, so the mixed output is identical whatever
+ * they hold (checked against an offline reference over 20k random cases).
+ * Skeleton-verified before arming; -1 entries below skip the one relocated
+ * imm32 (the mov MV_MixDestination,%edi). */
+#define ND_MIXSTEREO   0x594550u
+#define ND_MV_MIXDEST  0x01ab7b68u   /* MV_MixDestination     (int16* as a VA) */
+#define ND_MV_GLOBVOL  0x00826eecu   /* MV_GlobalVolume       (fix16) */
+#define ND_MV_SMOOTH   0x0082c40cu   /* MV_VolumeSmoothFactor (fix16) */
+#define ND_MV_RIGHTOFF 0x01ab7c40u   /* MV_RightChannelOffset (bytes) */
+static const int16_t nd_mixstereo_code[] = {
+    0x55, 0x89,0xe5, 0x57, 0x56, 0x53, 0x83,0xec,0x34, /* push ebp;mov esp,ebp;push edi,esi,ebx;sub 0x34,esp */
+    0x8b,0x75,0x08,                                     /* mov 0x8(ebp),esi   (voice)              */
+    0x8b,0x3d, -1,-1,-1,-1,                             /* mov MV_MixDestination,edi   (relocated) */
+    0x8b,0x46,0x10,                                     /* mov 0x10(esi),eax  (voice->sound)       */
+    0x8b,0x5e,0x6c,                                     /* mov 0x6c(esi),ebx  (voice->position)    */
+    0x89,0x7d,0xc8,                                     /* mov edi,-0x38(ebp)                      */
+    0x8b,0x4e,0x30                                      /* mov 0x30(esi),ecx  (PannedVolume.Left)  */
+};
+
+static int nat_mixstereo( struct x86cpu *c )
+{
+    uint32_t voice  = garg( c, 0 );
+    uint32_t length = garg( c, 1 );
+    uint32_t esp    = c->regs[ESP];
+
+    uint32_t sound  = rd32( voice + 0x10 );
+    uint32_t pos    = rd32( voice + 0x6c );
+    uint32_t rate   = rd32( voice + 0x68 );
+    int32_t  gvol   = (int32_t)rd32( ND_MV_GLOBVOL + (uint32_t)nd_slide );
+    int32_t  volume = (int32_t)(((int64_t)(int32_t)rd32( voice + 0x4c ) * gvol) >> 16);
+    int32_t  pL = (int32_t)rd32( voice + 0x30 ), pR = (int32_t)rd32( voice + 0x34 );
+    int32_t  gL = (int32_t)rd32( voice + 0x38 ), gR = (int32_t)rd32( voice + 0x3c );
+    int32_t  smooth = (int32_t)rd32( ND_MV_SMOOTH + (uint32_t)nd_slide );
+    uint32_t roff   = rd32( ND_MV_RIGHTOFF + (uint32_t)nd_slide ) & 0xfffffffeu;
+    uint32_t dest   = rd32( ND_MV_MIXDEST + (uint32_t)nd_slide );
+    uint32_t i;
+
+    for (i = 0; i < length; i++)
+    {
+        int isample0 = ((int)(int8_t)(rd8( sound + (pos >> 16) ) ^ 0x80)) << 8;
+        pos += rate;
+        {   int lvol = (int)(((int64_t)volume * pL) >> 16);
+            int mix  = (int)(((int64_t)isample0 * lvol) >> 16) + (int16_t)rd16( dest );
+            if (mix > 32767) mix = 32767; else if (mix < -32768) mix = -32768;
+            wr16( dest, (uint16_t)(int16_t)mix ); }
+        {   int rvol = (int)(((int64_t)volume * pR) >> 16);
+            int mix  = (int)(((int64_t)isample0 * rvol) >> 16) + (int16_t)rd16( dest + roff );
+            if (mix > 32767) mix = 32767; else if (mix < -32768) mix = -32768;
+            wr16( dest + roff, (uint16_t)(int16_t)mix ); }
+        dest += 4;
+        pL = pL + (int)(((int64_t)(gL - pL) * smooth) >> 16);
+        pR = pR + (int)(((int64_t)(gR - pR) * smooth) >> 16);
+    }
+    wr32( voice + 0x30, (uint32_t)pL );
+    wr32( voice + 0x34, (uint32_t)pR );
+    wr32( ND_MV_MIXDEST + (uint32_t)nd_slide, dest );
+
+    gret( c, pos );                    /* return value: the advanced sample position */
+    c->eip = rd32( esp );              /* cdecl: caller cleans the two args */
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_mixstereo( void )
+{
+    uint32_t b = ND_MIXSTEREO + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_mixstereo_code)/sizeof(nd_mixstereo_code[0]); i++)
+        if (nd_mixstereo_code[i] >= 0 && rd8( b + i ) != (uint8_t)nd_mixstereo_code[i])
+        { fprintf( stderr, "wasm_x86: MV_MixStereo skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_MIXSTEREO, "MV_MixStereo<u8,s16>" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
+    if (kind == NAT_MIXSTEREO) return nat_mixstereo( c );
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
@@ -3079,6 +3161,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (!getenv( "WASM_NO_CRC32" )) nat_arm_crc32();
+                          if (!getenv( "WASM_NO_MIXSTEREO" )) nat_arm_mixstereo();
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
