@@ -86,6 +86,16 @@ static int trace(void)
 
 /* ---- flat memory (identity map) ---- */
 uint64_t g_total_insns; /* total guest instructions executed (perf measurement) */
+/* GL-thunk bypass: skip the interpreted guest-side opengl32 marshalling by
+ * calling the native gl_* unix thunk directly.  g_ogl_handle is opengl32's
+ * unixlib funcs array, captured from the first GL unix-call (its return address
+ * lands inside opengl32.dll).  Per hooked entry we stash the unix code + arg
+ * count keyed by NAT_SLOT. */
+static uint32_t  g_ogl_base, g_ogl_size;
+static uintptr_t g_ogl_handle;
+static uint16_t  g_gl_code[256];
+static uint8_t   g_gl_nargs[256];
+static int       g_gl_armed;
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
 static inline uint32_t rd32( uint32_t a ){ return *(uint32_t *)(uintptr_t)a; }
@@ -208,7 +218,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -1974,11 +1984,75 @@ static void nat_arm_midebug( void )
                  sizeof(nd_michkpad_code)/sizeof(nd_michkpad_code[0]), "mi_check_padding (noop)" );
 }
 
+/* Generic GL-thunk bypass.  The guest opengl32 entry is WINAPI (stdcall) and,
+ * for every function we hook, takes N 4-byte args (int/float/enum/pointer - and
+ * since guest_base is 0 a guest pointer is already a valid native pointer).  So
+ * rebuild the native params struct { TEB *teb; arg0..argN } straight from the
+ * guest stack and call the same native gl_* thunk the unix-call would have
+ * reached - skipping only the interpreted marshalling.  stdcall: pop the return
+ * address plus N*4 arg bytes; the guest wrappers are void so EAX is ignored. */
+static int nat_glthunk( struct x86cpu *c )
+{
+    unsigned slot  = NAT_SLOT( c->eip );
+    unsigned code  = g_gl_code[slot];
+    unsigned nargs = g_gl_nargs[slot];
+    uint32_t esp   = c->regs[ESP];
+    uint32_t buf[20];
+    unsigned i;
+    typedef unsigned int (*ogl_fn_t)( void * );
+    buf[0] = c->fs_base;                                  /* TEB *teb */
+    for (i = 0; i < nargs; i++) buf[1 + i] = rd32( esp + 4 + i * 4 );
+    ((ogl_fn_t *)g_ogl_handle)[code]( buf );
+    c->regs[EAX] = 0;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4 + nargs * 4;
+    return 1;
+}
+
+/* Core opengl32 entry points worth bypassing (exported, 4-byte args).  Sized by
+ * the WASM_GLCOUNT tally: the fixed-function matrix stack and the per-draw state
+ * dominate.  code = index into opengl32's __wine_unix_call_funcs. */
+static const struct { const char *name; uint16_t code; uint8_t nargs; } nd_glthunks[] = {
+    { "glMatrixMode",  183, 1 }, { "glPushMatrix", 219, 0 }, { "glPopMatrix",   214, 0 },
+    { "glLoadMatrixf", 168, 1 }, { "glMultMatrixf",185, 1 }, { "glLoadIdentity",166, 0 },
+    { "glEnable",       81, 1 }, { "glDisable",     72, 1 }, { "glBlendFunc",    16, 2 },
+    { "glColor4f",      46, 4 }, { "glDrawArrays",  74, 3 }, { "glBindTexture",  14, 2 },
+    { "glDepthFunc",    69, 1 },
+};
+
+static void nat_arm_glthunks( struct x86cpu *c )
+{
+    unsigned k;
+    if (g_gl_armed) return;
+    if (!g_ogl_base)
+    {
+        g_ogl_base = find_module( c, "opengl32.dll" );
+        if (g_ogl_base)
+        {
+            uint32_t pe = g_ogl_base + rd32( g_ogl_base + 0x3c );
+            g_ogl_size = rd32( pe + 0x50 );              /* SizeOfImage */
+        }
+    }
+    if (!g_ogl_base || !g_ogl_handle) return;            /* wait for the handle capture */
+    for (k = 0; k < sizeof(nd_glthunks)/sizeof(nd_glthunks[0]); k++)
+    {
+        uint32_t a = pe_export( g_ogl_base, nd_glthunks[k].name );
+        if (!a) { fprintf( stderr, "wasm_x86: GL %s not exported - skipped\n", nd_glthunks[k].name ); continue; }
+        nat_register( a, NAT_GLTHUNK, nd_glthunks[k].name );
+        if (g_nat_addr[NAT_SLOT(a)] == a)                /* registered (not a slot clash) */
+        { g_gl_code[NAT_SLOT(a)] = nd_glthunks[k].code; g_gl_nargs[NAT_SLOT(a)] = nd_glthunks[k].nargs; }
+    }
+    g_gl_armed = 1;
+    fprintf( stderr, "wasm_x86: GL-thunk bypass armed (opengl32=%08x handle=%08x)\n",
+             g_ogl_base, (uint32_t)g_ogl_handle );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
     if (kind == NAT_MIXSTEREO) return nat_mixstereo( c );
     if (kind == NAT_MIDEBUG)  return nat_noop_ret( c );
+    if (kind == NAT_GLTHUNK)  return nat_glthunk( c );
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
@@ -3326,6 +3400,9 @@ static void run( struct x86cpu *c )
             }
             { static uint32_t nat_tries;
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
+            { static int gl_on = -1;
+              if (gl_on == -1) gl_on = getenv( "WASM_NO_GLTHUNK" ) ? 0 : 1;
+              if (gl_on && g_slide_ok && !g_gl_armed) nat_arm_glthunks( c ); }
             /* Cache the live frameplace pointer while it is valid, so the flip
              * handler can present the finished frame after it is cleared to 0. */
             if (g_slide_ok)
@@ -3986,6 +4063,11 @@ int wasm_x86_dispatch( struct x86cpu *c, uint32_t target )
         unsigned int code = rd32( c->regs[ESP] + 8 );
         void *args = (void *)(uintptr_t)rd32( c->regs[ESP] + 12 );
         const unixlib_entry_t *funcs = (const unixlib_entry_t *)(uintptr_t)handle;
+        /* Capture opengl32's unixlib funcs array the first time a GL call comes
+         * through - identified by the caller (ret_eip) sitting inside opengl32.
+         * The GL-thunk bypass then calls funcs[code] directly. */
+        if (!g_ogl_handle && g_ogl_base && ret_eip >= g_ogl_base && ret_eip < g_ogl_base + g_ogl_size)
+            g_ogl_handle = (uintptr_t)handle;
         if (trace()) fprintf( stderr, "wasm_x86: unix_call handle=%llx code=%u args=%p\n",
                               (unsigned long long)handle, code, args );
         if (!handle) {
