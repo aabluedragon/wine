@@ -218,7 +218,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -402,6 +402,106 @@ static int nat_ageloop( struct x86cpu *c )
     c->regs[EAX] = p;
     set_lazy( c, K_SUB, p, end, 0, 4 );      /* the cmp that ends the loop */
     c->eip = ND_AGELOOP + (uint32_t)sizeof(nd_ageloop_code) + (uint32_t)nd_slide;
+    return 1;
+}
+
+/* ---- cache1d::ageBlocks - the Build texture-cache LRU ager (guest 0x60b9c0) --
+ * Walks cac[] (an array of 16-byte entries) decrementing the lock byte of every
+ * ageable block (lock in [2,199]) and rotating the agecount cursor; blocks that
+ * are free (lock 0/1) or locked (>=200, or 0xff) are skipped.  In the attract
+ * demo this is ~5800 iterations/frame - the top UNHOOKED loop once the renderer
+ * mappers run native - so run the whole function natively.  Its four globals are
+ * absolute (relocated) addresses read straight from the code; the rest of the
+ * 181-byte body is byte-verified so the fast path can only fire on the exact
+ * routine.  WASM_NO_AGEBLOCKS disables it. */
+#define ND_AGEBLOCKS 0x60b9c0u
+static const uint8_t nd_ageblocks_code[181] = {
+    0x55,0x89,0xe5,0x57,0x56,0x53,0x83,0xec,0x04,0xa1,0x74,0xc9,0xdf,0x00,0x8d,0x50,
+    0xff,0x3b,0x05,0x94,0x9d,0xac,0x01,0x7f,0x06,0x89,0x15,0x94,0x9d,0xac,0x01,0xa1,
+    0x70,0xc9,0xdf,0x00,0xc1,0xf8,0x04,0x39,0xd0,0x0f,0x4e,0xd0,0x89,0xd0,0x89,0x55,
+    0xf0,0x8d,0x52,0xff,0x85,0xc0,0x74,0x75,0xa1,0x94,0x9d,0xac,0x01,0x8b,0x3d,0x60,
+    0xc9,0xdf,0x00,0xeb,0x27,0x8d,0x76,0x00,0x8d,0x5e,0xff,0x88,0x19,0x83,0xe8,0x01,
+    0x79,0x08,0xa1,0x74,0xc9,0xdf,0x00,0x83,0xe8,0x01,0x8d,0x4a,0xff,0x85,0xd2,0x74,
+    0x47,0x8b,0x3d,0x60,0xc9,0xdf,0x00,0x89,0x55,0xf0,0x89,0xca,0x89,0xc1,0xc1,0xe1,
+    0x04,0x8b,0x0c,0x0f,0x85,0xc9,0x74,0xd5,0x0f,0xb6,0x31,0x8d,0x5e,0xfe,0x0f,0xb6,
+    0xdb,0x81,0xfb,0xc5,0x00,0x00,0x00,0x7e,0xbf,0x89,0xf3,0x80,0xfb,0xff,0x75,0xbd,
+    0x83,0xe8,0x01,0x79,0x08,0xa1,0x74,0xc9,0xdf,0x00,0x83,0xe8,0x01,0x8b,0x55,0xf0,
+    0x8d,0x4a,0xff,0xeb,0xc2,0x8d,0x76,0x00,0xa3,0x94,0x9d,0xac,0x01,0x83,0xc4,0x04,
+    0x5b,0x5e,0x5f,0x5d,0xc3,
+};
+static const uint8_t nd_ageblocks_wild[181] = {
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,1,
+    1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,
+    0,0,0,0,0,
+};
+
+/* the four globals, resolved from the code at arm time (slid absolute addrs) */
+static uint32_t nd_ab_cacnum, nd_ab_agecount, nd_ab_size, nd_ab_cac;
+
+static void nat_arm_ageblocks( void )
+{
+    uint32_t a = ND_AGEBLOCKS + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_ageblocks_code); i++)
+        if (!nd_ageblocks_wild[i] && rd8( a + i ) != nd_ageblocks_code[i]) break;
+    if (i != sizeof(nd_ageblocks_code))
+    { fprintf( stderr, "wasm_x86: ageBlocks bytes differ at %08x+%x - left interpreted\n", a, i ); return; }
+    nd_ab_cacnum   = rd32( a + 0x0a );
+    nd_ab_agecount = rd32( a + 0x13 );
+    nd_ab_size     = rd32( a + 0x20 );
+    nd_ab_cac      = rd32( a + 0x3f );
+    /* each global is referenced more than once; require the repeats to agree so
+     * a mis-slid read can never resolve half a pointer */
+    if (rd32( a + 0x53 ) != nd_ab_cacnum || rd32( a + 0x96 ) != nd_ab_cacnum ||
+        rd32( a + 0x1b ) != nd_ab_agecount || rd32( a + 0x39 ) != nd_ab_agecount ||
+        rd32( a + 0xa9 ) != nd_ab_agecount || rd32( a + 0x63 ) != nd_ab_cac )
+    { fprintf( stderr, "wasm_x86: ageBlocks globals inconsistent at %08x - left interpreted\n", a ); return; }
+    nat_register( a, NAT_AGEBLOCKS, "cache1d::ageBlocks" );
+}
+
+static int nat_ageblocks( struct x86cpu *c )
+{
+    uint32_t cacnum   = rd32( nd_ab_cacnum );
+    int32_t  agecount = (int32_t)rd32( nd_ab_agecount );
+    uint32_t cac      = rd32( nd_ab_cac );
+    int32_t  cnt = (int32_t)cacnum - 1;
+
+    /* keep the cursor in range (guest: if cacnum <= agecount, agecount=cacnum-1) */
+    if ((int32_t)cacnum <= agecount) { agecount = (int32_t)cacnum - 1; wr32( nd_ab_agecount, (uint32_t)agecount ); }
+    int32_t sz = (int32_t)rd32( nd_ab_size ) >> 4;
+    if (sz <= cnt) cnt = sz;                          /* cnt = min(cacnum-1, size/16) */
+
+    if (cnt != 0)
+    {
+        int32_t cursor = agecount, remaining = cnt - 1;
+        for (;;)
+        {
+            uint32_t ptr = rd32( cac + (uint32_t)cursor * 16u );
+            if (ptr)
+            {
+                uint8_t lock = rd8( ptr );
+                if ((uint8_t)(lock - 2) <= 0xc5) wr8( ptr, (uint8_t)(lock - 1) );  /* age it */
+            }
+            cursor -= 1;
+            if (cursor < 0) cursor = (int32_t)cacnum - 1;      /* jns wrap */
+            if (remaining == 0) break;
+            remaining -= 1;
+        }
+        wr32( nd_ab_agecount, (uint32_t)cursor );
+    }
+    /* return: the routine preserves ebx/esi/edi/ebp (never touched here) and
+     * trashes eax/ecx/edx (caller-saved); pop the return address off the stack. */
+    c->eip = rd32( c->regs[ESP] );
+    c->regs[ESP] += 4;
     return 1;
 }
 
@@ -2107,6 +2207,7 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_GLTHUNK)  return nat_glthunk( c );
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
+    if (kind == NAT_AGEBLOCKS) return nat_ageblocks( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
@@ -3375,6 +3476,7 @@ static void run( struct x86cpu *c )
                           }
                           if (!getenv( "WASM_NO_AGELOOP" ) && !getenv( "WASM_COUNT_LOOP" ))
                               nat_arm_ageloop();
+                          if (!getenv( "WASM_NO_AGEBLOCKS" )) nat_arm_ageblocks();
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
