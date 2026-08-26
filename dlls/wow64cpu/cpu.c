@@ -205,14 +205,16 @@ __ASM_GLOBAL_FUNC( syscall_32to64,
                    "movl 0xa4(%r13),%ebx\n\t"   /* context->Ebx */
                    "movl 0xb4(%r13),%ebp\n\t"   /* context->Ebp */
                    "btrl $0,-4(%r13)\n\t"       /* cpu->Flags & WOW64_CPURESERVED_FLAG_RESET_STATE */
+                   /* Apple Silicon does not reliably switch CPU mode on a far
+                    * jump (see the thunk_32to64 note above); an ljmp back to
+                    * 32-bit occasionally leaves the thread running 32-bit code
+                    * in 64-bit mode, so a later 32-bit ret pops 8 bytes and
+                    * jumps to a garbage 64-bit rip.  Return through an iretq,
+                    * which switches mode reliably.  The reset-state case needs a
+                    * full context reload; the common case only needs the mode
+                    * switch, so use the lighter fast path (no segment reloads). */
                    "jc .Lsyscall_32to64_return\n\t"
-                   "movl 0xb8(%r13),%edx\n\t"   /* context->Eip */
-                   "movl %edx,(%rsp)\n\t"
-                   "movl 0xbc(%r13),%edx\n\t"   /* context->SegCs */
-                   "movl %edx,4(%rsp)\n\t"
-                   "movl 0xc4(%r13),%r14d\n\t"  /* context->Esp */
-                   "xchgq %r14,%rsp\n\t"
-                   "ljmp *(%r14)\n"
+                   "jmp .Lsyscall_32to64_return_fast\n"
                    ".Lsyscall_32to64_return:\n\t"
                    "movq %rsp,%r14\n\t"
                    "movl 0xa8(%r13),%edx\n\t"   /* context->Edx */
@@ -231,7 +233,30 @@ __ASM_GLOBAL_FUNC( syscall_32to64,
                    "movl 0xb8(%r13),%eax\n\t"   /* context->Eip */
                    "movq %rax,(%rsp)\n\t"
                    "movl 0xb0(%r13),%eax\n\t"   /* context->Eax */
-                   "iretq" )
+                   "iretq\n"
+                   /* fast path: switch mode with a far RETURN, not iretq.
+                    * iretq is astronomically slow under Rosetta (a rare, complex
+                    * instruction that misses its fast translation path), whereas
+                    * a far return is cheap AND reliably switches CPU mode on
+                    * Apple Silicon (the thunk_32to64 note above; the 32->64 thunk
+                    * uses one thousands of times per frame).  Build a [eip,cs]
+                    * far-return frame just below the 32-bit esp using pushq -
+                    * which moves rsp together with each write, so an async signal
+                    * arriving mid-sequence pushes below the live rsp and cannot
+                    * clobber the frame - then lretq.  Registers/segments are left
+                    * as the 64-bit side leaves them, exactly as the old ljmp did.
+                    * r14 must be left holding the 64-bit stack pointer so the
+                    * next syscall's "xchgq %r14,%rsp" swaps to it correctly. */
+                   ".Lsyscall_32to64_return_fast:\n\t"
+                   "movq %rsp,%r14\n\t"          /* save 64-bit stack for next syscall */
+                   "movl 0xb0(%r13),%eax\n\t"   /* eax = context->Eax (return value) */
+                   "movl 0xc4(%r13),%edx\n\t"   /* context->Esp */
+                   "movq %rdx,%rsp\n\t"          /* switch to the 32-bit stack */
+                   "movl 0xbc(%r13),%edx\n\t"   /* context->SegCs */
+                   "pushq %rdx\n\t"              /* far-return frame: selector */
+                   "movl 0xb8(%r13),%edx\n\t"   /* context->Eip */
+                   "pushq %rdx\n\t"              /* far-return frame: offset */
+                   "lretq" )
 
 
 /**********************************************************************
@@ -253,6 +278,9 @@ __ASM_GLOBAL_FUNC( unix_call_32to64,
                    "movl %esi,0xa0(%r13)\n\t"   /* context->Esi */
                    "movl %ebx,0xa4(%r13)\n\t"   /* context->Ebx */
                    "movl %ebp,0xb4(%r13)\n\t"   /* context->Ebp */
+                   "pushfq\n\t"
+                   "popq %rdx\n\t"
+                   "movl %edx,0xc0(%r13)\n\t"   /* context->EFlags */
                    "movl (%r14),%edx\n\t"
                    "movl %edx,0xb8(%r13)\n\t"   /* context->Eip */
                    "movl cs32_sel(%rip),%edx\n\t"
@@ -265,14 +293,16 @@ __ASM_GLOBAL_FUNC( unix_call_32to64,
                    "callq *__wine_unix_call_dispatcher(%rip)\n\t"
                    "movl %eax,0xb0(%r13)\n\t"   /* context->Eax */
                    "btrl $0,-4(%r13)\n\t"       /* cpu->Flags & WOW64_CPURESERVED_FLAG_RESET_STATE */
+                   /* Apple Silicon does not reliably switch CPU mode on a far
+                    * jump (see the thunk_32to64 note above); an ljmp back to
+                    * 32-bit sometimes leaves the thread running 32-bit code in
+                    * 64-bit mode, so the next 32-bit ret pops 8 bytes and jumps
+                    * to garbage.  Return through the syscall thunk's iretq path,
+                    * which switches mode reliably (fast path in the common case;
+                    * context->EFlags is saved on entry above so iretq restores
+                    * it correctly). */
                    "jc .Lsyscall_32to64_return\n\t"
-                   "movl 0xb8(%r13),%edx\n\t"   /* context->Eip */
-                   "movl %edx,(%rsp)\n\t"
-                   "movl 0xbc(%r13),%edx\n\t"   /* context->SegCs */
-                   "movl %edx,4(%rsp)\n\t"
-                   "movl 0xc4(%r13),%r14d\n\t"  /* context->Esp */
-                   "xchgq %r14,%rsp\n\t"
-                   "ljmp *(%r14)" )
+                   "jmp .Lsyscall_32to64_return_fast" )
 
 
 /**********************************************************************
