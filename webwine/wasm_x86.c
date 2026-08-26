@@ -99,9 +99,24 @@ static int       g_gl_armed;
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
 static inline uint32_t rd32( uint32_t a ){ return *(uint32_t *)(uintptr_t)a; }
+#ifdef WEBWINE_GENBLOCKS
+/* Undo log for the JIT differential verify: while recording, every guest write
+ * saves the old value so the harness can roll the block's memory back and re-run
+ * it through the interpreter from an identical state.  Zero cost when not the
+ * GENBLK build; one predictable branch (recording off) when it is. */
+#define WLOG_N 1024
+static struct { uint32_t addr, old; uint8_t size; } g_wlog[WLOG_N];
+static int g_wlog_n, g_jit_recording, g_wlog_of;
+static inline void wlog( uint32_t a, uint32_t old, uint8_t sz )
+{ if (g_wlog_n < WLOG_N) { g_wlog[g_wlog_n].addr=a; g_wlog[g_wlog_n].old=old; g_wlog[g_wlog_n].size=sz; g_wlog_n++; } else g_wlog_of = 1; }
+static inline void wr8 ( uint32_t a, uint8_t  v ){ if (g_jit_recording) wlog(a, *(uint8_t *)(uintptr_t)a, 1); *(uint8_t  *)(uintptr_t)a = v; }
+static inline void wr16( uint32_t a, uint16_t v ){ if (g_jit_recording) wlog(a, *(uint16_t*)(uintptr_t)a, 2); *(uint16_t *)(uintptr_t)a = v; }
+static inline void wr32( uint32_t a, uint32_t v ){ if (g_jit_recording) wlog(a, *(uint32_t*)(uintptr_t)a, 4); *(uint32_t *)(uintptr_t)a = v; }
+#else
 static inline void wr8 ( uint32_t a, uint8_t  v ){ *(uint8_t  *)(uintptr_t)a = v; }
 static inline void wr16( uint32_t a, uint16_t v ){ *(uint16_t *)(uintptr_t)a = v; }
 static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v; }
+#endif
 
 /* ---- headless frame capture ----------------------------------------------
  * netduke32 renders its 8-bpp Build frame, then de-palettises it to a 16-bpp
@@ -3574,6 +3589,124 @@ static __attribute__((noinline)) void run_x87( struct x86cpu *c, struct decode *
 
 /* Execute until the guest transfers to a native dispatcher (returns 1, target
  * left in c->eip) or stops. */
+/* ---- AOT-translated basic blocks (hybrid recompiler) ---------------------
+ * gen_blocks.c is x86toc.py's static translation of the guest's hot .text into
+ * C basic-block functions that call the SAME helpers as the interpreter (same
+ * module -> direct calls, no JIT boundary tax).  A block runs a whole straight
+ * line of guest instructions in one call, then sets c->eip and returns; the
+ * interpreter is the fallback for anything not translated (unhandled opcode,
+ * SMC, indirect target with no block).  Gated on WASM_JIT + the compile flag. */
+#ifdef WEBWINE_GENBLOCKS
+/* Shift/rotate helper shared with the AOT-translated blocks: replicates the
+ * interpreter's 0xc0-0xd3 flag semantics exactly (the verify pass enforces the
+ * match).  regf is the modrm.reg field: 4/6=shl/sal 5=shr 7=sar 0=rol 1=ror. */
+static uint32_t do_shift( struct x86cpu *c, int regf, uint32_t a, uint32_t cnt, int sz )
+{
+    uint32_t sm = signmask(sz), mask = sizemask(sz);
+    cnt &= 31; a &= mask;
+    if (cnt == 0) return a;                      /* x86: count 0 leaves flags */
+    int W = sz*8; uint32_t r, cf=0, of=0; int rotate=0;
+    switch (regf)
+    {
+    case 4: case 6:
+        cf = (cnt <= (uint32_t)W) ? ((a >> (W-cnt)) & 1) : 0;
+        r = (a << cnt) & mask;
+        of = ((r & sm)?1:0) ^ cf; break;
+    case 5:
+        cf = (a >> (cnt-1)) & 1; r = a >> cnt; of = (a & sm)?1:0; break;
+    case 7:
+        { int32_t sa=(int32_t)(a<<(32-W)); sa>>=(32-W);
+          cf = (a >> (cnt-1)) & 1; r = ((uint32_t)(sa >> cnt)) & mask; of = 0; } break;
+    case 0:
+        { uint32_t n = cnt % (uint32_t)W; r = n ? (((a<<n)|(a>>(W-n)))&mask) : a;
+          cf = r & 1; of = ((r & sm)?1:0) ^ cf; rotate=1; } break;
+    case 1:
+        { uint32_t n = cnt % (uint32_t)W; r = n ? (((a>>n)|(a<<(W-n)))&mask) : a;
+          cf = (r >> (W-1)) & 1; of = ((r & sm)?1:0) ^ (((r>>(W-2))&1)); rotate=1; } break;
+    default: c->lf_size=0; return (a<<cnt)&mask;
+    }
+    if (rotate) {
+        c->eflags = get_flags(c);
+        c->eflags = (c->eflags & ~(CF|OF)) | (cf?CF:0) | (of?OF:0);
+    } else {
+        uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+        if (cf) f|=CF; if (of) f|=OF;
+        if (!(r & mask)) f|=ZF;
+        if (r & sm) f|=SF;
+        if (parity((uint8_t)r)) f|=PF;
+        c->eflags = f;
+    }
+    c->lf_size = 0;
+    return r;
+}
+/* SHLD/SHRD helper (0x0f a4/a5/ac/ad): double-precision shift. */
+static uint32_t do_dshift( struct x86cpu *c, int left, uint32_t dst, uint32_t src, uint32_t cnt, int sz )
+{
+    uint32_t mask = sizemask(sz), sm = signmask(sz); int W = sz*8;
+    cnt &= 31; dst &= mask; src &= mask;
+    if (cnt == 0) return dst;
+    if (cnt >= (uint32_t)W) cnt %= (uint32_t)W;      /* 16-bit UB guard */
+    if (cnt == 0) return dst;
+    uint32_t res, cf;
+    if (left) { res = ((dst<<cnt) | (src>>(W-cnt))) & mask; cf = (dst >> (W-cnt)) & 1; }
+    else      { res = ((dst>>cnt) | (src<<(W-cnt))) & mask; cf = (dst >> (cnt-1)) & 1; }
+    uint32_t f = c->eflags & ~(CF|PF|AF|ZF|SF|OF);
+    if (cf) f|=CF;
+    if (!(res & mask)) f|=ZF;
+    if (res & sm) f|=SF;
+    if (parity((uint8_t)res)) f|=PF;
+    if (cnt==1 && ((res ^ dst) & sm)) f|=OF;
+    c->eflags = f; c->lf_size = 0;
+    return res;
+}
+/* 1-operand mul/imul/div/idiv (F6/F7 reg 4-7): EDX:EAX result, no flags.
+ * Mirrors run_cold_grp3 exactly.  regf is the modrm.reg field. */
+static void do_muldiv( struct x86cpu *c, int regf, uint32_t a, int sz )
+{
+    switch (regf) {
+    case 4: { uint64_t p=(uint64_t)(a&sizemask(sz))*(sz==1?(c->regs[EAX]&0xff):sz==2?(c->regs[EAX]&0xffff):c->regs[EAX]);
+              if(sz==1) c->regs[EAX]=(c->regs[EAX]&0xffff0000)|(uint16_t)p;
+              else if(sz==2){write_reg(c,EAX,2,(uint16_t)p); write_reg(c,EDX,2,(uint16_t)(p>>16));}
+              else {c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} } break;
+    case 5: { int64_t p=(int64_t)(int32_t)a*(int32_t)c->regs[EAX];
+              if(sz==4){c->regs[EAX]=(uint32_t)p; c->regs[EDX]=(uint32_t)(p>>32);} else write_reg(c,EAX,sz,(uint32_t)p);} break;
+    case 6: if(sz==4){ uint64_t dd=((uint64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dd/a); c->regs[EDX]=(uint32_t)(dd%a);} }
+            else if(sz==2){ uint32_t dd=((c->regs[EDX]&0xffff)<<16)|(c->regs[EAX]&0xffff); if(a){write_reg(c,EAX,2,dd/a); write_reg(c,EDX,2,dd%a);} }
+            else { uint32_t dd=c->regs[EAX]&0xffff; if(a){c->regs[EAX]=(c->regs[EAX]&0xffff0000)|((dd/a)&0xff)|(((dd%a)&0xff)<<8);} } break;
+    case 7: if(sz==4){ int64_t dd=((int64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dd/(int32_t)a); c->regs[EDX]=(uint32_t)(dd%(int32_t)a);} } break;
+    }
+}
+#include "gen_blocks.c"
+#define GEN_HASHN (1u << 19)
+static uint32_t g_gen_va[GEN_HASHN];
+static uint32_t g_gen_end[GEN_HASHN];
+static uint16_t g_gen_ninsn[GEN_HASHN];
+static int    (*g_gen_fn[GEN_HASHN])( struct x86cpu * );
+static int32_t  g_gen_idx[GEN_HASHN];   /* g_genblk[] index for this hash slot */
+static int      g_jit_on, g_jit_verify, g_jit_filling, g_verify_budget;
+static uint64_t g_jit_insns, g_jit_blocks, g_jit_last_insns, g_jit_last_blocks;
+static uint32_t g_gen_nblk;
+static void gen_build_hash( void )
+{
+    for (int i = 0; g_genblk[i].fn; i++)
+    {
+        uint32_t va = g_genblk[i].va;
+        unsigned h = (unsigned)((va * 2654435761u) >> (32 - 19));
+        while (g_gen_va[h]) h = (h + 1) & (GEN_HASHN - 1);
+        g_gen_va[h] = va; g_gen_end[h] = g_genblk[i].end;
+        g_gen_ninsn[h] = g_genblk[i].ninsn; g_gen_fn[h] = g_genblk[i].fn;
+        g_gen_idx[h] = i; g_gen_nblk++;
+    }
+    fprintf( stderr, "wasm_x86: JIT %u translated blocks loaded\n", g_gen_nblk );
+}
+static int gen_lookup( uint32_t va )   /* slot index, or -1 */
+{
+    unsigned h = (unsigned)((va * 2654435761u) >> (32 - 19));
+    while (g_gen_va[h]) { if (g_gen_va[h] == va) return (int)h; h = (h + 1) & (GEN_HASHN - 1); }
+    return -1;
+}
+#endif
+
 static void run( struct x86cpu *c )
 {
     uint32_t last_eip = c->eip;
@@ -3620,6 +3753,11 @@ static void run( struct x86cpu *c )
                 uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
                 uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
                 if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
+#ifdef WEBWINE_GENBLOCKS
+                          g_jit_on = getenv( "WASM_NO_JIT" ) ? 0 : 1;   /* AOT on by default; escape hatch */
+                          g_jit_verify = getenv( "WASM_JIT_VERIFY" ) ? 1 : 0;
+                          if (g_jit_on) gen_build_hash();
+#endif
                           g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
                           nat_register( g_flip_addr, NAT_FLIP, "frame flip" );
                           {   /* WASM_COUNT_ADDR=<hex> counts executions of any guest
@@ -3739,6 +3877,14 @@ static void run( struct x86cpu *c )
                     double dt = (now - tp_last) / 1000.0;
                     double fps = (double)(g_flip_count - tp_last_flip) / dt;
                     double mips = (double)(g_total_insns - tp_last_insns) / dt / 1e6;
+#ifdef WEBWINE_GENBLOCKS
+                    if (g_jit_on) {
+                        uint64_t td = g_total_insns - tp_last_insns, jd = g_jit_insns - g_jit_last_insns;
+                        fprintf( stderr, "JITCOV blocks/s=%llu jit_frac=%.1f%% total=%.1fM/s\n",
+                            (unsigned long long)((g_jit_blocks - g_jit_last_blocks)),
+                            td ? 100.0*(double)jd/(double)td : 0.0, (double)td/1e6/dt );
+                        g_jit_last_insns = g_jit_insns; g_jit_last_blocks = g_jit_blocks; }
+#endif
                     fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f mh=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
@@ -3815,6 +3961,13 @@ static void run( struct x86cpu *c )
         }
         uint32_t start = c->eip;
         last_eip = start;
+#ifdef WEBWINE_GENBLOCKS
+        if (g_jit_filling && g_verify_budget-- <= 0)
+        {   /* verify mode: ran the block's instruction count -> stop BEFORE the
+             * nat check, so a call to a hooked target does not run the callee. */
+            g_total_insns += idelta; return;
+        }
+#endif
         /* Frame boundary: _videoNextPage is the engine's page flip, entered once
          * per rendered frame with frameplace holding the COMPLETE frame.  Present
          * here (not on an insn-count timer) so the canvas shows whole, untorn
@@ -3854,6 +4007,69 @@ static void run( struct x86cpu *c )
 #endif
             }
         }
+#ifdef WEBWINE_GENBLOCKS
+        if (g_jit_on && !g_jit_filling)
+        {   /* run a whole AOT-translated block, if we have one for this eip */
+            int slot = gen_lookup( start - (uint32_t)nd_slide );
+            if (slot >= 0)
+            {
+                if (g_jit_verify)
+                {   /* differential check: run JIT while logging writes, roll the
+                     * memory back, then run the interpreter for the SAME number
+                     * of guest instructions from an identical state and compare. */
+                    struct x86cpu saved = *c;
+                    g_wlog_n = 0; g_wlog_of = 0; g_jit_recording = 1;
+                    g_gen_fn[slot]( c );
+                    g_jit_recording = 0;
+                    struct x86cpu jit = *c;
+                    for (int i = g_wlog_n - 1; i >= 0; i--)   /* undo the JIT's writes */
+                    { uint32_t a = g_wlog[i].addr;
+                      if (g_wlog[i].size == 1) *(uint8_t*)(uintptr_t)a = (uint8_t)g_wlog[i].old;
+                      else if (g_wlog[i].size == 2) *(uint16_t*)(uintptr_t)a = (uint16_t)g_wlog[i].old;
+                      else *(uint32_t*)(uintptr_t)a = g_wlog[i].old; }
+                    *c = saved;
+                    if (!g_wlog_of)   /* skip blocks that overflowed the undo log */
+                    {
+                        g_verify_budget = g_gen_ninsn[slot];
+                        c->running = 1; g_jit_filling = 1; run( c ); g_jit_filling = 0;
+                        int bad = 0;
+                        for (int r = 0; r < 8; r++) if (c->regs[r] != jit.regs[r])
+                        { static int nb=0; bad=1; if (nb++<40)
+                            fprintf( stderr, "JITBAD blk=%08x reg%d jit=%08x int=%08x eipj=%08x eipi=%08x\n",
+                                     start-(uint32_t)nd_slide, r, jit.regs[r], c->regs[r],
+                                     jit.eip-(uint32_t)nd_slide, c->eip-(uint32_t)nd_slide ); break; }
+                        if (!bad && c->eip != jit.eip) { static int nb=0; if (nb++<40)
+                            fprintf( stderr, "JITBADEIP blk=%08x jit=%08x int=%08x\n",
+                                     start-(uint32_t)nd_slide, jit.eip-(uint32_t)nd_slide, c->eip-(uint32_t)nd_slide ); }
+                    }
+                    else *c = jit;   /* couldn't verify; just keep the JIT result */
+                    continue;
+                }
+                /* Tight JIT driver with block chaining: each block returns the
+                 * g_genblk index of its statically-known successor, so we jump
+                 * straight to it - no per-block hash lookup.  Break out only at a
+                 * trampoline (eip<64K), a native hook boundary, a dynamic target
+                 * (ret/indirect -> -1), or an untranslated target. */
+                int idx = g_gen_idx[slot];
+                uint64_t jd = 0, jb = 0;   /* accumulate in locals (wasm regs); the
+                                            * per-block i64 memory traffic was pure
+                                            * diagnostic overhead in the hot chain. */
+                for (;;)
+                {
+                    const struct genblk *b = &g_genblk[idx];
+                    int nxt = b->fn( c );
+                    jd += b->ninsn; jb++;
+                    if (nxt < 0) break;                             /* dynamic target */
+                    uint32_t ne = c->eip;
+                    if (ne < 0x10000) break;                        /* trampoline */
+                    if (g_nat_addr[NAT_SLOT(ne)] == ne) break;      /* hook entry */
+                    idx = nxt;
+                }
+                g_total_insns += jd; g_jit_insns += jd; g_jit_blocks += jb;
+                continue;
+            }
+        }
+#endif
         struct decode d = { 4, 4, 0, 0, c->eip };
         uint8_t op;
 

@@ -33,13 +33,26 @@ for c in ../server/*.c; do b=$(basename "$c" .c)
   emcc "${CF[@]}" "${R[@]}" -c "$c" -o "$OUT/srv/$b.o" 2>/dev/null || cp "server/$b.o" "$OUT/srv/$b.o"; done
 
 echo "[2/4] shims ($OPT) + interpreter ($XOPT)"
+# AOT x86->C block translator (GENBLK=1): regenerate gen_blocks.c from the game
+# binary.  It is a build artifact (~40MB, ~1M lines) - generated, never committed.
+# The hook list must match the guest addresses wasm_x86.c registers via nat_arm_*
+# (so those functions stay native fast paths and are never mid-block-translated);
+# the excluded 0x631000-0x634000 window is the SMC mapper region.
+if [ -n "$GENBLK" ]; then
+  NDEXE="${NDEXE:-$HOME/games/netduke32_v1.2.1/netduke32.exe}"
+  if [ ! -f "$WEBW/gen_blocks.c" ] || [ "$WEBW/x86toc.py" -nt "$WEBW/gen_blocks.c" ] || [ "$NDEXE" -nt "$WEBW/gen_blocks.c" ]; then
+    echo "  [genblocks] translating $NDEXE -> gen_blocks.c"
+    NDHOOKS='--hooks=0x401e60,0x4e28a0,0x4e3070,0x519620,0x5196c0,0x519a41,0x519f87,0x529500,0x52a6a0,0x594550,0x60b9c0,0x6a8140,0x6a8170,0x6a81a0,0x6a81b0,0x6a8240,0x6a8250,0x6a8260,0x6a8270,0x6a8280,0x6a8290,0x6a8420,0x6a8c80'
+    python3 "$WEBW/x86toc.py" "$NDEXE" "$WEBW/gen_blocks.c" 0x401000-0x631000 0x634000-0x81f710 "$NDHOOKS"
+  fi
+fi
 INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
 CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
 emcc $OPT -c "$WEBW/wasm_vm.c"  -o "$OUT/wasm_vm.o"
 emcc $OPT -c "$WEBW/wasm_ipc.c" -o "$OUT/wasm_ipc.o"
 emcc $OPT -c "$WEBW/wasm_egl_stubs.c" -o "$OUT/wasm_egl_stubs.o"   # EGL entry points emscripten lacks
 emcc -std=gnu23 $OPT $CF2 $INC -c "$WEBW/wasm_cpu_bridge.c" -o "$OUT/wasm_cpu_bridge.o"
-emcc -std=gnu23 $XOPT $CF2 $INC -c "$WEBW/wasm_x86.c"       -o "$OUT/wasm_x86.o"
+emcc -std=gnu23 $XOPT $CF2 $INC ${GENBLK:+-DWEBWINE_GENBLOCKS} -c "$WEBW/wasm_x86.c"       -o "$OUT/wasm_x86.o"
 emcc $OPT -c "$WEBW/wasm_combined_main.c" -o "$OUT/combined_main.o"
 
 # opengl32's unix companion.  Compiled here rather than taken from
