@@ -303,6 +303,31 @@ static uint32_t find_module( struct x86cpu *c, const char *want )
     return 0;
 }
 
+/* One-shot dump of every loaded guest module (name + base) - identifies which
+ * DLL owns a hot interpreted address range.  Gated by WASM_MODULES. */
+static int dump_modules( struct x86cpu *c )
+{
+    uint32_t teb = c->fs_base;
+    uint32_t peb = teb ? rd32( teb + 0x30 ) : 0;
+    uint32_t ldr = peb ? rd32( peb + 0x0c ) : 0;
+    if (!ldr) return 0;
+    uint32_t head = ldr + 0x14, cur = rd32( head );
+    int cnt = 0;
+    for (int n = 0; n < 256 && cur && cur != head; n++, cur = rd32( cur ))
+    {
+        uint32_t ent = cur - 0x08;
+        uint32_t dllbase = rd32( ent + 0x18 ), esz = rd32( ent + 0x20 );
+        uint16_t len = rd16( ent + 0x2c ); uint32_t buf = rd32( ent + 0x30 );
+        if (!dllbase) continue;
+        char name[128]; unsigned i = 0;
+        for (; i < len/2 && i < sizeof(name)-1; i++) name[i] = (char)rd16( buf + i*2 );
+        name[i] = 0;
+        fprintf( stderr, "MODULE %08x-%08x %s\n", dllbase, dllbase + esz, name );
+        cnt++;
+    }
+    return cnt;
+}
+
 static void nat_init( struct x86cpu *c )
 {
     /* msvcrt is loaded well after the exe base is known, so keep retrying on
@@ -3707,6 +3732,8 @@ static int gen_lookup( uint32_t va )   /* slot index, or -1 */
 }
 #endif
 
+static uint32_t g_ipage[1024]; static int g_ipage_on;   /* interpreted-block-entry tally per 64KB guest page (WASM_IPAGE) */
+static uint32_t g_ipage_eip[1024];                       /* a representative eip seen in each page */
 static void run( struct x86cpu *c )
 {
     uint32_t last_eip = c->eip;
@@ -3851,6 +3878,9 @@ static void run( struct x86cpu *c )
             }
             { static uint32_t nat_tries;
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
+            { static int md = -1;
+              if (md == -1) md = getenv( "WASM_MODULES" ) ? 0 : 1;
+              if (!md && g_slide_ok && dump_modules( c ) > 0) md = 1; }
             { static int gl_on = -1;
               if (gl_on == -1) gl_on = getenv( "WASM_NO_GLTHUNK" ) ? 0 : 1;
               if (gl_on && g_slide_ok && !g_gl_armed) nat_arm_glthunks( c );
@@ -3867,7 +3897,7 @@ static void run( struct x86cpu *c )
             static double tp_start = 0, tp_last = 0;
             static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0, tp_last_mhc = 0, tp_last_mhi = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
-                               g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; }
+                               g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; g_ipage_on = getenv( "WASM_IPAGE" ) ? 1 : 0; }
             if (tp_on)
             {
                 double now = emscripten_get_now();
@@ -3918,6 +3948,22 @@ static void run( struct x86cpu *c )
                         for (int i=0;i<16;i++) { int o=idx[i]; if (!g_histo[o]) break;
                             fprintf( stderr, " %s%02x=%.1fM", o>=256?"0f":"", o&0xff, (double)g_histo[o]/1e6 ); }
                         fprintf( stderr, "\n" );
+                    }
+                    if (g_ipage_on)
+                    {   /* top interpreted-entry pages: which 64KB of guest VA still
+                         * runs in the interpreter (JIT missed there). */
+                        int pi[1024]; for (int i=0;i<1024;i++) pi[i]=i;
+                        for (int i=0;i<12;i++) for (int j=i+1;j<1024;j++)
+                            if (g_ipage[pi[j]] > g_ipage[pi[i]]) { int t=pi[i]; pi[i]=pi[j]; pi[j]=t; }
+                        uint64_t tot=0; for (int i=0;i<1024;i++) tot+=g_ipage[i];
+                        fprintf( stderr, "IPAGE top (of %lluK entries):", (unsigned long long)(tot/1000) );
+                        for (int i=0;i<12;i++) { int p=pi[i]; if (!g_ipage[p]) break;
+                            fprintf( stderr, " %08x=%.1f%%", (unsigned)p<<16, 100.0*g_ipage[p]/(double)(tot?tot:1) ); }
+                        fprintf( stderr, "\n" );
+                        for (int i=0;i<4;i++) { int p=pi[i]; if (!g_ipage[p]) break;
+                            uint32_t e = g_ipage_eip[p]; fprintf( stderr, "IPAGE bytes @%08x:", e-(uint32_t)nd_slide );
+                            for (int k=0;k<48;k++) fprintf( stderr, "%02x", rd8( e+k ) );
+                            fprintf( stderr, "\n" ); }
                     }
                 }
             }
@@ -4068,6 +4114,11 @@ static void run( struct x86cpu *c )
                 g_total_insns += jd; g_jit_insns += jd; g_jit_blocks += jb;
                 continue;
             }
+            /* JIT miss: this eip has no translated block.  Under WASM_IPAGE, tally
+             * the interpreted block entry by 64KB guest page so we can see WHERE
+             * the remaining interpreted load lives (which module/section). */
+            if (g_ipage_on) { unsigned pg = ((start - (uint32_t)nd_slide) >> 16) & 0x3ff;
+                              g_ipage[pg]++; g_ipage_eip[pg] = start; }
         }
 #endif
         struct decode d = { 4, 4, 0, 0, c->eip };

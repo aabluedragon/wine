@@ -209,6 +209,36 @@ def translate_insn(insn):
         S.append('do_muldiv(c,%d,%s,%d);' % (regf, av, opsize(insn))); return S, None
     if I == X.X86_INS_CWDE:
         S.append('c->regs[0] = (int32_t)(int16_t)(c->regs[0] & 0xffff);'); return S, None
+    if I in (X.X86_INS_BSF, X.X86_INS_BSR):
+        av, _ = rd_op(insn, 1)
+        idx = '__builtin_ctz(a)' if I == X.X86_INS_BSF else '(31 - __builtin_clz(a))'
+        S.append('{ uint32_t a=%s; if(a){ %s c->eflags&=~ZF; } else c->eflags|=ZF; c->lf_size=0; }'
+                 % (av, wr_op(insn, 0, idx))); return S, None
+    if I in (X.X86_INS_BT, X.X86_INS_BTS, X.X86_INS_BTR, X.X86_INS_BTC):
+        sz = opsize(insn); av, _ = rd_op(insn, 0); bv, _ = rd_op(insn, 1)
+        S.append('{ uint32_t a=%s, b=%s&(%d); c->eflags=(c->eflags&~CF)|(((a>>b)&1)?CF:0); c->lf_size=0;'
+                 % (av, bv, sz*8-1))
+        upd = {X.X86_INS_BTS:'a|(1u<<b)', X.X86_INS_BTR:'a&~(1u<<b)', X.X86_INS_BTC:'a^(1u<<b)'}.get(I)
+        if upd: S.append('  ' + wr_op(insn, 0, '(%s)' % upd))
+        S.append('}'); return S, None
+    if I == X.X86_INS_BSWAP:
+        idx, _ = REG[ops[0].reg]
+        S.append('{ uint32_t v=c->regs[%d]; c->regs[%d]=((v>>24)&0xff)|((v>>8)&0xff00)|((v<<8)&0xff0000)|((v<<24)&0xff000000); }'
+                 % (idx, idx)); return S, None
+    if I == X.X86_INS_XCHG:
+        v0, _ = rd_op(insn, 0); v1, _ = rd_op(insn, 1)
+        S.append('{ uint32_t t0=%s, t1=%s; %s %s }'
+                 % (v0, v1, wr_op(insn, 0, 't1'), wr_op(insn, 1, 't0'))); return S, None
+    if I == X.X86_INS_XADD:
+        sz = opsize(insn); av, _ = rd_op(insn, 0); bv, _ = rd_op(insn, 1)
+        S.append('{ uint32_t a=%s, b=%s; %s %s set_lazy(c,K_ADD,a,b,a+b,%d); }'
+                 % (av, bv, wr_op(insn, 0, 'a+b'), wr_op(insn, 1, 'a'), sz)); return S, None
+    if I == X.X86_INS_CMPXCHG:
+        sz = opsize(insn); rmv, _ = rd_op(insn, 0); regv, _ = rd_op(insn, 1)
+        eax = 'read_reg(c,0,%d)' % sz
+        S.append('{ uint32_t a=%s, acc=%s;' % (rmv, eax))
+        S.append('  if(acc==a){ %s set_lazy(c,K_SUB,acc,a,0,%d); }' % (wr_op(insn, 0, regv), sz))
+        S.append('  else { write_reg(c,0,%d,a); set_lazy(c,K_SUB,acc,a,acc-a,%d); } }' % (sz, sz)); return S, None
     if I == X.X86_INS_PUSH:
         v, _ = rd_op(insn, 0); S.append('push32(c, %s);' % v); return S, None
     if I == X.X86_INS_POP:
@@ -256,6 +286,16 @@ for va, insn in insns.items():
         leaders.add(insn.operands[0].imm & 0xffffffff)
     elif I == X.X86_INS_CALL:
         leaders.add(va + insn.size)   # return address is a leader
+# Split around every UNTRANSLATABLE instruction so it alone falls to the
+# interpreter instead of killing its whole basic block.  A single float/SSE op
+# used to discard all the surrounding integer instructions (the histogram showed
+# millions of already-handled mov/add/test stuck in the interpreter); making the
+# op and its successor both leaders recovers the integer prefix AND suffix.
+for va, insn in insns.items():
+    try:
+        translate_insn(insn)
+    except Unhandled:
+        leaders.add(va); leaders.add(va + insn.size)
 leaders = sorted(l for l in leaders if l in insns)
 
 leaderset = set(leaders)
