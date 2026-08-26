@@ -2047,6 +2047,44 @@ static void nat_arm_glthunks( struct x86cpu *c )
              g_ogl_base, (uint32_t)g_ogl_handle );
 }
 
+/* The hot GL 2.0+/3.x entry points are extension functions - not opengl32
+ * exports, so pe_export can't see them; they are resolved through
+ * wglGetProcAddress.  netduke32 uses GLAD, which parks each resolved thunk
+ * pointer in a `glad_gl*` global (exe .bss, so nd_slide applies).  Read the
+ * pointer straight from there and hook the thunk it names.  { glad global VA,
+ * unix code, arg count }.  These were the top of the WASM_GLCOUNT tally
+ * (glBindSampler, glUniform*, glVertexAttribPointer, ...). */
+static const struct { uint32_t glad; uint16_t code; uint8_t nargs; const char *name; } nd_glext[] = {
+    { 0x018e0c80, 350, 1, "glActiveTexture" }, { 0x019c6164, 417, 2, "glBindSampler" },
+    { 0x018e0c7c,2645, 1, "glUseProgram" },    { 0x018e10d8,2924, 6, "glVertexAttribPointer" },
+    { 0x018e10d4, 825, 1, "glEnableVertexAttribArray" },
+    { 0x010d3a24,2520, 2, "glUniform1f" },     { 0x018dfb14,2542, 3, "glUniform2f" },
+    { 0x019faae4,2627, 4, "glUniformMatrix4fv" },
+    { 0x019c617c, 387, 2, "glBindBuffer" },    { 0x018e10dc, 479, 4, "glBufferData" },
+};
+static int g_glext_armed;
+
+static void nat_arm_glext( struct x86cpu *c )
+{
+    unsigned k;
+    (void)c;
+    if (g_glext_armed || !g_ogl_handle) return;
+    /* GLAD fills every pointer at once during GL setup; use glUseProgram's slot
+     * as the "resolved yet?" gate so we don't half-arm on a partial init. */
+    if (!rd32( 0x018e0c7cu + (uint32_t)nd_slide )) return;
+    for (k = 0; k < sizeof(nd_glext)/sizeof(nd_glext[0]); k++)
+    {
+        uint32_t a = rd32( nd_glext[k].glad + (uint32_t)nd_slide );
+        if (!a || a >= 0x70000000u) continue;            /* unresolved / not a guest thunk */
+        if (g_nat_addr[NAT_SLOT(a)]) continue;           /* slot already taken - skip */
+        nat_register( a, NAT_GLTHUNK, nd_glext[k].name );
+        if (g_nat_addr[NAT_SLOT(a)] == a)
+        { g_gl_code[NAT_SLOT(a)] = nd_glext[k].code; g_gl_nargs[NAT_SLOT(a)] = nd_glext[k].nargs; }
+    }
+    g_glext_armed = 1;
+    fprintf( stderr, "wasm_x86: GL-thunk ext bypass armed\n" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
@@ -3402,7 +3440,8 @@ static void run( struct x86cpu *c )
               if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
             { static int gl_on = -1;
               if (gl_on == -1) gl_on = getenv( "WASM_NO_GLTHUNK" ) ? 0 : 1;
-              if (gl_on && g_slide_ok && !g_gl_armed) nat_arm_glthunks( c ); }
+              if (gl_on && g_slide_ok && !g_gl_armed) nat_arm_glthunks( c );
+              if (gl_on && g_slide_ok && !g_glext_armed) nat_arm_glext( c ); }
             /* Cache the live frameplace pointer while it is valid, so the flip
              * handler can present the finished frame after it is cleared to 0. */
             if (g_slide_ok)
