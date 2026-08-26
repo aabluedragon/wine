@@ -218,7 +218,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS };
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS, NAT_QRHLINE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -503,6 +503,163 @@ static int nat_ageblocks( struct x86cpu *c )
     c->eip = rd32( c->regs[ESP] );
     c->regs[ESP] += 4;
     return 1;
+}
+
+/* ---- qrhlineasm4 - the Build rotated horizontal texture mapper (guest 0x633310) -
+ * Draws sloped floors/ceilings; the top per-frame guest loop once the other mappers
+ * run native (~200k inner iterations/frame).  Same self-modifying family as
+ * vlineasm4/mvlineasm4/mhlineskipmodify: the engine patches the two fixed-point steps
+ * (sub/sbb into esi/ebx), the second-texel offset and the palookup base straight into
+ * the 0x88888888 fields before each call, so read them from the code every call and
+ * require the copies to agree.  Args arrive on the stack (cdecl): count then the
+ * initial ebx/ecx/edx/esi/edi.  The routine saves and restores every register it uses,
+ * so to the caller nothing but memory and eip changes.  WASM_NO_QRHLINE disables it. */
+#define ND_QRHLINE 0x633310u
+static const uint8_t nd_qrhline_code[196] = {
+    0x53,0x51,0x52,0x56,0x57,0x8b,0x44,0x24,0x18,0x8b,0x5c,0x24,0x1c,0x8b,0x4c,0x24,
+    0x20,0x8b,0x54,0x24,0x24,0x8b,0x74,0x24,0x28,0x8b,0x7c,0x24,0x2c,0x55,0x83,0xf8,
+    0x00,0x0f,0x8e,0x96,0x00,0x00,0x00,0x89,0xc5,0xf7,0xc5,0x03,0x00,0x00,0x00,0x74,
+    0x33,0xeb,0x0d,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,
+    0x8a,0x0b,0x4f,0x81,0xee,0x88,0x88,0x88,0x88,0x4d,0x81,0xdb,0x88,0x88,0x88,0x88,
+    0x8a,0x81,0x88,0x88,0x88,0x88,0x88,0x07,0xf7,0xc5,0x03,0x00,0x00,0x00,0x75,0xe0,
+    0x85,0xed,0x74,0x59,0x8a,0x0b,0xeb,0x08,0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90,
+    0x8a,0x93,0x88,0x88,0x88,0x88,0x81,0xee,0x88,0x88,0x88,0x88,0x81,0xdb,0x88,0x88,
+    0x88,0x88,0x8a,0xa1,0x88,0x88,0x88,0x88,0x8a,0x82,0x88,0x88,0x88,0x88,0x83,0xef,
+    0x04,0xc1,0xe0,0x10,0x8a,0x0b,0x8a,0x93,0x88,0x88,0x88,0x88,0x81,0xee,0x88,0x88,
+    0x88,0x88,0x81,0xdb,0x88,0x88,0x88,0x88,0x8a,0xa1,0x88,0x88,0x88,0x88,0x8a,0x82,
+    0x88,0x88,0x88,0x88,0x8a,0x0b,0x89,0x07,0x83,0xed,0x04,0x75,0xb3,0x5d,0x5f,0x5e,
+    0x5a,0x59,0x5b,0xc3,
+};
+static const uint8_t nd_qrhline_wild[196] = {
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,0,0,0,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,0,0,1,1,1,1,0,0,1,1,
+    1,1,0,0,1,1,1,1,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,1,1,
+    1,1,0,0,1,1,1,1,0,0,1,1,1,1,0,0,
+    1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,
+};
+
+/* The mapping itself.  Reads every patched immediate from its OWN site - the
+ * engine does NOT patch them identically (the prologue steps 1 pixel, the main
+ * loop 2 per sub-step, so their `sub $imm,%esi` values differ 2x), so replicate
+ * each exactly where the guest uses it.  Writes only guest memory. */
+static void qrhline_do( int32_t count, uint32_t ebx, uint32_t ecx, uint32_t edx,
+                        uint32_t esi, uint32_t edi )
+{
+    uint32_t base = ND_QRHLINE + (uint32_t)nd_slide;
+    uint32_t s_e = rd32(base+0x45), b_e = rd32(base+0x4c), pal_e = rd32(base+0x52);   /* prologue */
+    uint32_t texb_a = rd32(base+0x72), s_a = rd32(base+0x78), b_a = rd32(base+0x7e);  /* main pair 1 */
+    uint32_t pal_a = rd32(base+0x84), pal_b = rd32(base+0x8a);
+    uint32_t texb_b = rd32(base+0x98), s_b = rd32(base+0x9e), b_b = rd32(base+0xa4);  /* main pair 2 */
+    uint32_t pal_c = rd32(base+0xaa), pal_d = rd32(base+0xb0);
+
+    if (count <= 0) return;
+    int32_t ebp = count;
+    /* 1-pixel prologue: run until the remaining count is a multiple of 4 */
+    if (ebp & 3)
+    {
+        for (;;)
+        {
+            uint8_t cl = rd8( ebx );
+            edi -= 1;
+            uint32_t borrow = (esi < s_e);
+            esi -= s_e;
+            ebp -= 1;
+            ebx = ebx - b_e - borrow;
+            ecx = (ecx & 0xffffff00u) | cl;
+            wr8( edi, rd8( ecx + pal_e ) );
+            if (!(ebp & 3)) break;
+        }
+        if (ebp == 0) return;
+    }
+    /* 4-pixel main loop: two output pixels per sub-step (ebx and ebx+texb),
+     * two sub-steps per iteration -> the four bytes p3..p0 written as a dword */
+    uint8_t cl = rd8( ebx );
+    for (;;)
+    {
+        uint32_t borrow;
+        uint8_t dl = rd8( ebx + texb_a );
+        borrow = (esi < s_a); esi -= s_a; ebx = ebx - b_a - borrow;
+        ecx = (ecx & 0xffffff00u) | cl;
+        edx = (edx & 0xffffff00u) | dl;
+        uint8_t p3 = rd8( ecx + pal_a );    /* qrmach4a ecx -> ah */
+        uint8_t p2 = rd8( edx + pal_b );    /* qrmach4b edx -> al */
+        edi -= 4;
+        cl = rd8( ebx );
+        dl = rd8( ebx + texb_b );
+        borrow = (esi < s_b); esi -= s_b; ebx = ebx - b_b - borrow;
+        ecx = (ecx & 0xffffff00u) | cl;
+        edx = (edx & 0xffffff00u) | dl;
+        uint8_t p1 = rd8( ecx + pal_c );    /* qrmach4c ecx -> ah */
+        uint8_t p0 = rd8( edx + pal_d );    /* qrmach4d edx -> al */
+        cl = rd8( ebx );
+        wr32( edi, ((uint32_t)p3 << 24) | ((uint32_t)p2 << 16) | ((uint32_t)p1 << 8) | p0 );
+        ebp -= 4;
+        if (ebp == 0) break;
+    }
+}
+
+static int g_qr_filling;   /* recursion guard for the WASM_QRHLINE_VERIFY guest run */
+
+static int nat_qrhline( struct x86cpu *c )
+{
+    if (g_qr_filling) return 0;                 /* nested verify run -> interpret */
+    uint32_t esp = c->regs[ESP];
+    int32_t  count = (int32_t)rd32( esp + 4 );
+    uint32_t ebx = rd32( esp + 8 ), ecx = rd32( esp + 0xc ), edx = rd32( esp + 0x10 );
+    uint32_t esi = rd32( esp + 0x14 ), edi = rd32( esp + 0x18 );
+
+    static int verify = -1;
+    if (verify < 0) verify = getenv( "WASM_QRHLINE_VERIFY" ) ? 1 : 0;
+    if (verify && count > 0 && count <= 4096)
+    {
+        /* Differential check against the guest: the mapper only READS the
+         * texture/palookup and WRITES the [edi-count, edi) span, so snapshot that
+         * span, run native, stash the result, restore the span, then run the real
+         * guest routine (guarded so it interprets) over the same args and compare.
+         * The guest's output is what stays on screen. */
+        static uint8_t snap[4096], nat[4096];
+        uint32_t lo = edi - (uint32_t)count;
+        int n = count, i;
+        for (i = 0; i < n; i++) snap[i] = rd8( lo + i );
+        qrhline_do( count, ebx, ecx, edx, esi, edi );
+        for (i = 0; i < n; i++) nat[i] = rd8( lo + i );
+        for (i = 0; i < n; i++) wr8( lo + i, snap[i] );
+        uint32_t argv[6] = { (uint32_t)count, ebx, ecx, edx, esi, edi };
+        g_qr_filling = 1;
+        call_guest_cdecl( c, ND_QRHLINE + (uint32_t)nd_slide, 6, argv, esp );
+        g_qr_filling = 0;
+        for (i = 0; i < n; i++) if (nat[i] != rd8( lo + i ))
+        {
+            static int nbad = 0;
+            if (nbad++ < 8)
+                fprintf( stderr, "wasm_x86: QRHLINE MISMATCH count=%d off=%d native=%02x guest=%02x\n",
+                         count, i, nat[i], rd8( lo + i ) );
+            break;
+        }
+    }
+    else qrhline_do( count, ebx, ecx, edx, esi, edi );
+
+    c->eip = rd32( c->regs[ESP] );      /* cdecl: caller cleans the args */
+    c->regs[ESP] += 4;
+    return 1;
+}
+
+static void nat_arm_qrhline( void )
+{
+    uint32_t a = ND_QRHLINE + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_qrhline_code); i++)
+        if (!nd_qrhline_wild[i] && rd8( a + i ) != nd_qrhline_code[i]) break;
+    if (i == sizeof(nd_qrhline_code)) nat_register( a, NAT_QRHLINE, "qrhlineasm4" );
+    else fprintf( stderr, "wasm_x86: qrhlineasm4 bytes differ at %08x+%x - left interpreted\n", a, i );
 }
 
 /* ---- SDL audio, driven by the interpreter -----------------------------------
@@ -2208,6 +2365,7 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_AGEBLOCKS) return nat_ageblocks( c );
+    if (kind == NAT_QRHLINE) return nat_qrhline( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
@@ -3477,6 +3635,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_AGELOOP" ) && !getenv( "WASM_COUNT_LOOP" ))
                               nat_arm_ageloop();
                           if (!getenv( "WASM_NO_AGEBLOCKS" )) nat_arm_ageblocks();
+                          if (!getenv( "WASM_NO_QRHLINE" )) nat_arm_qrhline();
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
