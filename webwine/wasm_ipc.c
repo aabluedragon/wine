@@ -283,7 +283,7 @@ void webwine_gl_resize( int w, int h ) { (void)w; (void)h; }
  * 4 ints: {type, a, b, c}.  Only the page writes head; only we write tail.
  */
 EM_JS(int, webwine_poll_input, (int *ev), {
-  var r = self.__wwInput;
+  var r = (typeof self !== 'undefined') && self.__wwInput;  /* node has no `self` */
   if (!r) return 0;
   var head = Atomics.load(r, 0), tail = Atomics.load(r, 1);
   if (head === tail) return 0;
@@ -305,7 +305,7 @@ EM_JS(int, webwine_poll_input, (int *ev), {
  * and it reports it in the ?beacon=1 line.  Gated on WASM_DIAG because it costs
  * a JS call per unix call. */
 EM_JS(void, webwine_diag, (int a, int b), {
-  var d = self.__wwCtl;
+  var d = (typeof self !== 'undefined') && self.__wwCtl;  /* node has no `self` */
   if (d) { d[0] = a; d[1] = b; }
 });
 
@@ -316,13 +316,14 @@ EM_JS(void, webwine_diag, (int a, int b), {
  * stereo float32 on the way; a ring rather than postMessage because the audio
  * thread must never wait on the main thread's message loop. */
 EM_JS(void, webwine_audio_open, (int freq, int channels), {
-  postMessage({ type: 'audio', freq: freq, channels: channels });
+  if (typeof postMessage !== 'undefined')                  /* node has no page */
+    postMessage({ type: 'audio', freq: freq, channels: channels });
 });
 
 /* Frames the ring can still accept - the interpreter only runs the game's
  * callback when there is room, which is what paces the whole thing. */
 EM_JS(int, webwine_audio_want, (void), {
-  var a = self.__wwAudio;
+  var a = (typeof self !== 'undefined') && self.__wwAudio;  /* node has no `self` */
   if (!a) return 0;
   var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
   return a.cap - 1 - ((w - r + a.cap) % a.cap);
@@ -332,14 +333,14 @@ EM_JS(int, webwine_audio_want, (void), {
  * Rendering far ahead is wasted work: the mixer and the OPL3 synth are guest
  * code, so every queued frame costs interpreted instructions. */
 EM_JS(int, webwine_audio_queued, (void), {
-  var a = self.__wwAudio;
+  var a = (typeof self !== 'undefined') && self.__wwAudio;  /* node has no `self` */
   if (!a) return 1 << 30;                 /* no ring: never ask for audio */
   var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);
   return (w - r + a.cap) % a.cap;
 });
 
 EM_JS(void, webwine_audio_push, (const void *buf, int frames, int channels, int fmt), {
-  var a = self.__wwAudio;
+  var a = (typeof self !== 'undefined') && self.__wwAudio;  /* node has no `self` */
   if (!a) return;
   var cap = a.cap, d = a.data;
   var w = Atomics.load(a.idx, 0), r = Atomics.load(a.idx, 1);

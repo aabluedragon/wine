@@ -62,6 +62,7 @@ for o in ogl_unix_thunks ogl_unix_wgl wasm_egl_stubs; do echo "$OUT/$o.o" >> "$R
 
 echo "[4/4] link ($OPT, no -g, no ASSERTIONS; 64MB stack for the re-entrant interpreter)"
 emcc $OPT @"$RSP" -o "$OUT/webwine.js" \
+  --pre-js "$WEBW/browser/node-pre.js" \
   -sNODERAWFS=1 -sENVIRONMENT=node \
   -lEGL -lGLESv2 -sMAX_WEBGL_VERSION=2 -sGL_ENABLE_GET_PROC_ADDRESS=1 \
   -sGLOBAL_BASE=1879048192 -sINITIAL_MEMORY=2147483648 -sALLOW_MEMORY_GROWTH=0 -sSTACK_SIZE=67108864
