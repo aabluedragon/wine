@@ -1485,6 +1485,16 @@ static void make_context_current( TEB *teb, const struct opengl_funcs *funcs, HD
         TRACE( "-- %s (disabled by config)\n", all_extensions[i].name );
     }
 
+    /* Apple's GL-on-Metal driver exposes glBindSampler (its p_ pointer is set)
+     * but on a pre-3.0 context a GL loader keying off the ARB extension name -
+     * glad - only pulls the sampler group in when GL_ARB_sampler_objects is
+     * advertised.  netduke32 then calls the never-loaded, NULL glBindSampler in
+     * buildgl_bindSamplerObject and crashes on the first videoSetGameMode.  When
+     * the driver can actually service it, advertise the extension so the loader
+     * resolves the (working) entry point instead of leaving it NULL. */
+    if (funcs->p_glBindSampler && client->major_version < 3)
+        client->extensions[GL_ARB_sampler_objects] = TRUE;
+
     if (is_win64 && is_wow64() && !initialize_vk_device( teb, ctx )
         && !(ctx->use_pinned_memory = client->extensions[GL_AMD_pinned_memory]))
     {
