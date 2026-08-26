@@ -93,8 +93,8 @@ uint64_t g_total_insns; /* total guest instructions executed (perf measurement) 
  * count keyed by NAT_SLOT. */
 static uint32_t  g_ogl_base, g_ogl_size;
 static uintptr_t g_ogl_handle;
-static uint16_t  g_gl_code[256];
-static uint8_t   g_gl_nargs[256];
+static uint16_t  g_gl_code[512];   /* must match NAT_SLOTS */
+static uint8_t   g_gl_nargs[512];
 static int       g_gl_armed;
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
@@ -223,7 +223,8 @@ static uint64_t g_count_hits;   /* diagnostic: executions of a watched address *
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
 static uint64_t g_mv_calls, g_mv_iters;   /* native mvlineasm4: entries and loop iterations */
-#define NAT_SLOTS 256
+#define NAT_SLOTS 512   /* 512 not 256: spread the hash so the GL-thunk hooks
+                         * (glDisable & co.) stop colliding with existing nats */
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
 static int g_nat_ready = 0;
@@ -2059,30 +2060,43 @@ static const struct { uint32_t glad; uint16_t code; uint8_t nargs; const char *n
     { 0x018e0c7c,2645, 1, "glUseProgram" },    { 0x018e10d8,2924, 6, "glVertexAttribPointer" },
     { 0x018e10d4, 825, 1, "glEnableVertexAttribArray" },
     { 0x010d3a24,2520, 2, "glUniform1f" },     { 0x018dfb14,2542, 3, "glUniform2f" },
-    { 0x019faae4,2627, 4, "glUniformMatrix4fv" },
+    { 0x019faae4,2627, 4, "glUniformMatrix4fv" }, { 0x018e0c84,2586, 5, "glUniform4f" },
     { 0x019c617c, 387, 2, "glBindBuffer" },    { 0x018e10dc, 479, 4, "glBufferData" },
+    { 0x019fcd40, 487, 4, "glBufferSubData" },
 };
 static int g_glext_armed;
 
+/* GLAD fills its glad_gl* pointers lazily during GL setup - NOT all at once - so
+ * a single-shot arm races and misses whichever are still NULL that tick (and it
+ * differs run to run).  Retry every tick, arming each entry the moment its
+ * pointer resolves; a per-entry "done" bit means each is handled exactly once.
+ * Stop once all are done or after a generous number of attempts (some entries
+ * may name an extension the driver never provides, staying NULL forever). */
+static uint32_t g_glext_done, g_glext_tries;
+
 static void nat_arm_glext( struct x86cpu *c )
 {
-    unsigned k;
+    unsigned k, n = sizeof(nd_glext)/sizeof(nd_glext[0]);
     (void)c;
     if (g_glext_armed || !g_ogl_handle) return;
-    /* GLAD fills every pointer at once during GL setup; use glUseProgram's slot
-     * as the "resolved yet?" gate so we don't half-arm on a partial init. */
-    if (!rd32( 0x018e0c7cu + (uint32_t)nd_slide )) return;
-    for (k = 0; k < sizeof(nd_glext)/sizeof(nd_glext[0]); k++)
+    for (k = 0; k < n; k++)
     {
-        uint32_t a = rd32( nd_glext[k].glad + (uint32_t)nd_slide );
-        if (!a || a >= 0x70000000u) continue;            /* unresolved / not a guest thunk */
-        if (g_nat_addr[NAT_SLOT(a)]) continue;           /* slot already taken - skip */
+        uint32_t a;
+        if (g_glext_done & (1u << k)) continue;
+        a = rd32( nd_glext[k].glad + (uint32_t)nd_slide );
+        if (!a || a >= 0x70000000u) continue;            /* not resolved yet - retry next tick */
+        g_glext_done |= (1u << k);
+        if (g_nat_addr[NAT_SLOT(a)] && g_nat_addr[NAT_SLOT(a)] != a)
+        { fprintf( stderr, "wasm_x86: GL ext %s slot clash @%08x - not bypassed\n", nd_glext[k].name, a ); continue; }
         nat_register( a, NAT_GLTHUNK, nd_glext[k].name );
         if (g_nat_addr[NAT_SLOT(a)] == a)
         { g_gl_code[NAT_SLOT(a)] = nd_glext[k].code; g_gl_nargs[NAT_SLOT(a)] = nd_glext[k].nargs; }
     }
-    g_glext_armed = 1;
-    fprintf( stderr, "wasm_x86: GL-thunk ext bypass armed\n" );
+    if (g_glext_done == (1u << n) - 1u || ++g_glext_tries > 200000)
+    {
+        g_glext_armed = 1;
+        fprintf( stderr, "wasm_x86: GL-thunk ext bypass armed (done=%03x)\n", g_glext_done );
+    }
 }
 
 static int nat_call( struct x86cpu *c, int kind )
