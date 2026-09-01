@@ -1980,6 +1980,32 @@ void wasm_queue_mouse_input( int type, int a, int b, int c )
 static int g_rel_mouse_on;       /* game asked for SDL relative (aiming) mode */
 static int g_mb_reported;        /* button mask the game has already been given */
 
+/* SDL's keysym.sym is not a Windows VK.  Printable letters use lowercase
+ * ASCII, while navigation/function keys use SDLK_SCANCODE_MASK|scancode. */
+static uint32_t wasm_sdl_keycode( int vk, int scancode )
+{
+    if (vk >= 'A' && vk <= 'Z') return (uint32_t)(vk + ('a' - 'A'));
+    if (vk >= '0' && vk <= '9') return (uint32_t)vk;
+    switch (vk)
+    {
+    case 0x08: return 8;       /* backspace */
+    case 0x09: return 9;       /* tab */
+    case 0x0d: return 13;      /* return */
+    case 0x1b: return 27;      /* escape */
+    case 0x20: return 32;      /* space */
+    case 0x25: return 0x40000050; /* left */
+    case 0x26: return 0x40000052; /* up */
+    case 0x27: return 0x4000004f; /* right */
+    case 0x28: return 0x40000051; /* down */
+    case 0x70: case 0x71: case 0x72: case 0x73:
+    case 0x74: case 0x75: case 0x76: case 0x77:
+    case 0x78: case 0x79: case 0x7a: case 0x7b:
+        return 0x40000000u | (uint32_t)(scancode ? scancode : (vk - 0x70 + 58));
+    default:
+        return scancode ? (0x40000000u | (uint32_t)scancode) : (uint32_t)vk;
+    }
+}
+
 /* SDL_MouseButtonEvent (from the exe's DWARF, 28 bytes): type@0 timestamp@4
  * windowID@8 which@12 button@16(u8) state@17(u8) clicks@18(u8) pad@19 x@20 y@24. */
 #define SDL_EV_MOUSEBUTTONDOWN 1025u
@@ -1999,7 +2025,7 @@ static int wasm_sdl_queued_event( struct x86cpu *c, uint32_t ev )
         wr8 ( ev + 12, in.up ? 0 : 1 );    /* state */
         wr8 ( ev + 13, 0 );                /* repeat */
         wr32( ev + 16, (uint32_t)in.scancode );
-        wr32( ev + 20, (uint32_t)in.vk );  /* SDL keycode == VK for these keys */
+        wr32( ev + 20, wasm_sdl_keycode( in.vk, in.scancode ) );
         wr32( ev + 24, 0 );                /* modifier */
         wr32( ev + 28, 0 );
         gret( c, 1 );

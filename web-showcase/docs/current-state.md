@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-01 23:54 IDT: SDL key-symbol mapping corrected and canonical gate passed
+
+Observation: the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_BADIP=1` serves JS
+`7100ac1d5eb17403526ec882b869de7bff7eb7a5547f4a9d75c19b424ec4d954`, WASM
+`7911ee3aef3d2d980a892a5f86454278ecaab6527cc510b0762f7437e1e45858`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The Wine tree is dirty on `vibe` at `a2ca5099`; no sibling checkout was
+modified.
+
+Observation: a fresh canonical Chrome run reached `OpenGL context: version
+3.3`, `Setting video mode 640x400 (8-bpp windowed)`, and a non-black 320x200
+canvas (`hash e2251540`). It reported `input: ready`, `keys 2, mouse 2`, and
+continued rendering at 35–1180 FPS in the sampled intervals. No `FATAL`,
+`RuntimeError`, or `unreachable` occurred.
+
+Decision: SDL keyboard symbols now use lowercase ASCII for printable keys and
+SDL scancode symbols for navigation/function keys. The updated bundle is
+served for testing at 8799 and 8806.
+
 ## 2026-09-01 23:34 IDT: input queue fix promoted and canonical browser gate passed
 
 Observation: the canonical server at
