@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-02 00:23 IDT: long-run check distinguishes texture-load pause from input failure
+
+Observation: the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_BADIP=1` still serves JS
+`7100ac1d5eb17403526ec882b869de7bff7eb7a5547f4a9d75c19b424ec4d954`, WASM
+`964c44f915a343e41b4ebd78d213848311d0b28bac3637d45efe40f4b929a3a2`, and data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`. The tree
+is dirty on `vibe` at `3d4ee85d`; no sibling checkout was modified.
+
+Observation: a 60-second fresh Chrome run reached a non-black 320x200 canvas,
+reported `first-frame: 10.9s`, and ended at 2,982 frames / 65.8 FPS. It showed
+the same temporary zero-FPS texture/cache-load interval as the user screenshot;
+rendering resumed by t=20s. The run sent Enter at t=18s and Space at t=25s,
+with `input: ready` and no `FATAL`, `RuntimeError`, or `unreachable`.
+
+Decision: retain the SDL event plus keyboard-state hooks in the canonical
+bundle. The screenshot is an in-game loading pause, not a permanent black
+screen or a dead input loop; allow the initial load to finish before judging
+controls.
+
 ## 2026-09-02 00:15 IDT: SDL keyboard-state hook added and canonical gate passed
 
 Observation: the canonical URL
