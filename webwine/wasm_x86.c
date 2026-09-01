@@ -2763,7 +2763,15 @@ static int nat_dynamic_jmp( struct x86cpu *c )
      * avoid re-entering the large opcode decoder for every tiny helper exit.
      * Keep this independently switchable because generated code is self-
      * modifying and the range guard is part of the safety contract. */
-    if (!getenv( "WASM_NO_DYNAMIC_RET" ) && a >= 0x00800000u && a < 0x01000000u)
+    /* Runtime-generated CON code is self-modifying.  Although the c3/c2
+     * shortcut is instruction-for-instruction equivalent for stable code,
+     * treating every return-shaped byte in this broad arena as a thunk can
+     * consume a transient/generated entry with the wrong stack contract.
+     * That strands the main thread at a data byte during level loading.  Keep
+     * the ordinary interpreter return semantics as the safe default; the
+     * shortcut remains available for targeted benchmarking. */
+    if (getenv( "WASM_DYNAMIC_RET" ) && !getenv( "WASM_NO_DYNAMIC_RET" ) &&
+        a >= 0x00800000u && a < 0x01000000u)
     {
         uint32_t sp = c->regs[ESP], n = 0;
         uint8_t op = rd8( a );
@@ -6787,7 +6795,13 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
-                          if (!getenv( "WASM_NO_SURFSPAN" )) nat_arm_surfspan();
+                          /* The span mapper touches the engine's self-growing
+                           * cache while a level is being assembled.  Keep the
+                           * interpreter implementation as the browser-safe
+                           * default until that SMC boundary is independently
+                           * verified; opt into the native hook for profiling. */
+                          if (getenv( "WASM_SURFSPAN" ) && !getenv( "WASM_NO_SURFSPAN" ))
+                              nat_arm_surfspan();
                           g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
                           if (!getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();

@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-02 01:17 IDT: level-load stall fixed and canonical bundle verified
+
+Observation: at source commit `38a33a0c` plus the uncommitted fix, the exact
+fresh Chrome sequence (Enter at 14, 18, 22, 28, and 35 seconds) no longer
+exits at the cache-resize boundary. The canonical URL
+`http://localhost:8799/?WASM_TPUT=1` served JS
+`3e7fe799d9dabd99f066da8f5e110a16e84666cfc0d4a251f299d89560e551bd`, WASM
+`a54f08e340791ac91b73b7f51cc6f91ceee1295d0b7ba190398f469cf5e82330`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The source tree was dirty during the test; no sibling checkout was modified.
+
+Observation: the run reached a real non-black 320x200 WebGL frame at 10.9s,
+reported `input: ready — keys 10, mouse 2` and `audio: on 22050Hz/2ch`, and
+ended at 45s with `fps: 66.7` and `frames: 1950`. Logs showed OpenGL context
+creation and SDL Enter key down/up events, with no `UNIMPLEMENTED opcode`,
+thread exit, `FATAL`, `RuntimeError`, or `unreachable`.
+
+Decision: the broad generated-code dynamic-return shortcut is now opt-in via
+`WASM_DYNAMIC_RET`; the normal interpreter return path is the browser default.
+The self-modifying `surfspan` native hook is also opt-in via `WASM_SURFSPAN`
+while its cache-resize interaction is being independently verified. The
+verified browser bundle is promoted on ports 8799 and 8806.
+
 ## 2026-09-02 00:39 IDT: input/load stress run completed end to end
 
 Observation: the canonical URL
