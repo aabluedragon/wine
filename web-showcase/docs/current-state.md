@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-02 01:40 IDT: browser JIT relocation crash removed
+
+Observation: the canonical URL
+`http://localhost:8799/?WASM_TPUT=1` now serves JS
+`c027014ffdceeeea5c914536027013b8f6418f9f2c638765b351cacfb60990dc`, WASM
+`8dea06047306fd3fdb531b429a8d2d59b388dc75a7995669e0406401c076e838`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The source tree was dirty during testing; no sibling checkout was modified.
+
+Observation: a fresh canonical 85-second run with the five-Enter menu/load
+sequence reached a non-black 320x200 WebGL frame at 43.3s, reported
+`input: ready — keys 10, mouse 2` and `audio: on 22050Hz/2ch`, and ended with
+`fps: 50.0` and `frames: 2069`. It crossed the former cache-growth window
+without `UNIMPLEMENTED opcode`, thread exit, `FATAL`, `RuntimeError`, or
+`unreachable`.
+
+Decision: browser AOT JIT is now opt-in with `WASM_JIT=1`; the interpreter is
+the safe default across self-modifying level-code relocation. Stable native
+hooks remain enabled, while `surfspan` is opt-in with `WASM_SURFSPAN=1`.
+The promoted build is served on ports 8799 and 8806.
+
 ## 2026-09-02 01:17 IDT: level-load stall fixed and canonical bundle verified
 
 Observation: at source commit `38a33a0c` plus the uncommitted fix, the exact

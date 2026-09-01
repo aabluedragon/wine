@@ -6737,7 +6737,18 @@ static void run( struct x86cpu *c )
                 uint32_t ib  = peb ? rd32( peb + 0x08 ) : 0;
                 if (ib) { nd_slide = (int32_t)(ib - 0x400000); g_slide_ok = 1;
 #ifdef WEBWINE_GENBLOCKS
-                          g_jit_on = getenv( "WASM_NO_JIT" ) ? 0 : 1;   /* AOT on by default; escape hatch */
+                          /* The browser's guest executes self-modifying CON
+                           * code whose arena can relocate while a level is
+                           * loading.  A static AOT chain is unsafe across
+                           * that relocation, so make browser JIT opt-in until
+                           * the dynamic-code invalidation boundary is fixed.
+                           * Native verified hooks still provide the stable
+                           * renderer fast paths. */
+#ifdef WEBWINE_BROWSER
+                          g_jit_on = getenv( "WASM_JIT" ) && !getenv( "WASM_NO_JIT" );
+#else
+                          g_jit_on = getenv( "WASM_NO_JIT" ) ? 0 : 1;
+#endif
                           g_jit_verify = getenv( "WASM_JIT_VERIFY" ) ? 1 : 0;
                           if (g_jit_on) gen_build_hash();
 #if defined(WEBWINE_FP_HOT)
