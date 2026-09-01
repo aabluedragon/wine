@@ -299,7 +299,8 @@ const FRAME_HOOK = `(() => {
 })()`;
 await send('Page.addScriptToEvaluateOnNewDocument', { source: FRAME_HOOK });
 
-await send('Page.navigate', { url });
+const navigation = await send('Page.navigate', { url });
+console.log(`navigate: ${JSON.stringify(navigation)}`);
 
 // Report the canvas geometry and where it sits on the page. Pixels are NOT read
 // back through drawImage: the emulator presents through a WebGL context without
@@ -319,7 +320,13 @@ const PROBE = `(() => {
     binds: (window.__bwBinds || []).slice(0, 12),
     shaders: (window.__bwShaders || []),
     compiles: (window.__bwCompiles || []),
-    drawProbes: (window.__bwDrawProbes || []) });
+    drawProbes: (window.__bwDrawProbes || []),
+    status: document.querySelector('#status')?.textContent || '',
+    input: document.querySelector('#input')?.textContent || '',
+    // Diagnostic runs can emit a profiler window between samples. Keep enough
+    // relay history to retain those function lines; normal runs still only
+    // print the compact status object below.
+    logTail: document.querySelector('#log')?.textContent.slice(-12000) || '' });
 })()`;
 
 // Mean luminance and a hash of the composited canvas region, decoded from an
@@ -562,6 +569,15 @@ for (let t = 1; t <= seconds; t++) {
 }
 
 writeFileSync(resolve(outDir, 'samples.json'), JSON.stringify(samples, null, 2));
+try {
+  const r = await send('Runtime.evaluate', {
+    expression: 'document.querySelector("#log")?.textContent || ""',
+    returnByValue: true,
+  });
+  writeFileSync(resolve(outDir, 'guest-log.txt'), r.result.value || '');
+} catch (e) {
+  writeFileSync(resolve(outDir, 'guest-log.txt'), `LOG-READ-ERR: ${e}`);
+}
 
 // 2 KiB of JPEG for a quarter-scale frame is far more than a flat fill encodes to.
 const drawn = samples.filter((s) => s.shotBytes > 2048);

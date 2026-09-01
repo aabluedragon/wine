@@ -3581,6 +3581,9 @@ extern int webwine_poll_input( int *ev ) __attribute__((weak));
  * webwine/wasm_x86.c (the game reads SDL_MOUSEMOTION xrel/yrel, not WM_MOUSEMOVE,
  * once it has asked for relative mouse mode). */
 extern int g_mouse_dx, g_mouse_dy, g_mouse_buttons;
+extern int g_wasm_sdl_poll_fallback;
+extern void wasm_queue_key_input( int vk, int scancode, int up );
+extern void wasm_queue_mouse_input( int type, int a, int b, int c );
 
 /* WM_KEY* lParam: repeat(0-15) scancode(16-23) extended(24) prev(30) transition(31) */
 static LPARAM wasm_key_lparam( int scan, int ext, int up )
@@ -3630,18 +3633,23 @@ static void wasm_drain_browser_input(void)
     while (webwine_poll_input( ev ))
     {
         HWND target = wasm_input_target();
-        if (!target) continue;
         switch (ev[0])
         {
         case 1:  /* key down: vk, scancode, extended */
-            NtUserPostMessage( target, WM_KEYDOWN, ev[1], wasm_key_lparam( ev[2], ev[3], 0 ));
+            g_wasm_sdl_poll_fallback = 32;
+            wasm_queue_key_input( ev[1], ev[3] >> 8, 0 );
+            if (target) NtUserPostMessage( target, WM_KEYDOWN, ev[1], wasm_key_lparam( ev[2], ev[3] & 1, 0 ));
             break;
         case 2:  /* key up */
-            NtUserPostMessage( target, WM_KEYUP, ev[1], wasm_key_lparam( ev[2], ev[3], 1 ));
+            g_wasm_sdl_poll_fallback = 32;
+            wasm_queue_key_input( ev[1], ev[3] >> 8, 1 );
+            if (target) NtUserPostMessage( target, WM_KEYUP, ev[1], wasm_key_lparam( ev[2], ev[3] & 1, 1 ));
             break;
         case 3:  /* mouse move: absolute x, y (client coords), used in menus */
-            NtUserPostMessage( target, WM_MOUSEMOVE, 0,
-                               (ev[1] & 0xffff) | ((LPARAM)(ev[2] & 0xffff) << 16) );
+            g_wasm_sdl_poll_fallback = 32;
+            wasm_queue_mouse_input( 3, ev[1], ev[2], 0 );
+            if (target) NtUserPostMessage( target, WM_MOUSEMOVE, 0,
+                                           (ev[1] & 0xffff) | ((LPARAM)(ev[2] & 0xffff) << 16) );
             break;
         case 6:  /* pointer-lock relative motion: dx, dy */
             g_mouse_dx += ev[1];
@@ -3650,14 +3658,16 @@ static void wasm_drain_browser_input(void)
         case 4:  /* button down: button, x, y */
         case 5:  /* button up */
         {
+            g_wasm_sdl_poll_fallback = 32;
+            wasm_queue_mouse_input( ev[0], ev[1], ev[2], ev[3] );
             UINT down = (ev[0] == 4);
             int bit = ev[1] == 2 ? 4 : ev[1] == 1 ? 2 : 1;
             if (down) g_mouse_buttons |= bit; else g_mouse_buttons &= ~bit;
             UINT msg = ev[1] == 2 ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP)
                      : ev[1] == 1 ? (down ? WM_MBUTTONDOWN : WM_MBUTTONUP)
                                   : (down ? WM_LBUTTONDOWN : WM_LBUTTONUP);
-            NtUserPostMessage( target, msg, 0,
-                               (ev[2] & 0xffff) | ((LPARAM)(ev[3] & 0xffff) << 16) );
+            if (target) NtUserPostMessage( target, msg, 0,
+                                           (ev[2] & 0xffff) | ((LPARAM)(ev[3] & 0xffff) << 16) );
             break;
         }
         default: break;

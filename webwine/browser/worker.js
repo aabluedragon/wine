@@ -32,5 +32,28 @@ self.onmessage = function (e) {
     };
   }
   self.onmessage = null;
-  importScripts('webwine-bw.js');
+  // Keep the bootstrap observable: importScripts() blocks this worker while
+  // the data package and wasm are initialized, and a failure before the
+  // module's own callbacks otherwise looks like an infinite black canvas.
+  try {
+    postMessage({ type: 'log', line: 'worker: input received; loading webwine-bw.js' });
+    /* A stale worker/module pair presents as a black canvas with no useful
+       browser error.  The static server already sends no-store, but some
+       browser/proxy cache layers still reuse an old imported script.  Keep the
+       bootstrap URL unique; Emscripten strips this query when resolving the
+       adjacent wasm/data files. */
+    /* Emscripten normally fetches the adjacent wasm/data files with their
+       plain names.  Pair those requests with the worker too: otherwise a
+       browser that retained an older payload can combine it with this
+       worker and leave the page at a black canvas. */
+    var boot = Date.now();
+    self.Module = self.Module || {};
+    self.Module.locateFile = function (name, prefix) {
+      return (prefix || '') + name + '?boot=' + boot;
+    };
+    importScripts('webwine-bw.js?boot=' + boot);
+  } catch (e) {
+    postMessage({ type: 'log', line: 'FATAL worker bootstrap: ' + (e && e.stack || e) });
+    throw e;
+  }
 };

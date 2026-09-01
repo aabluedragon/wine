@@ -1,19 +1,21 @@
 #!/bin/bash
 # Browser (Web Worker + MEMFS) bundle for native-wasm Wine + netduke32.
 # Reuses build-node.sh's env-agnostic objects; rebuilds only wasm_ipc
-# (-DWEBWINE_MEMFS) and wasm_x86 (-DWEBWINE_BROWSER).  Interpreter compiled -O1
-# (fastest for this interpreter), whole-module link at -O2.
-# Prereqs: build-node.sh (OPT=-O1) and assemble-assets.sh have run.
+# (-DWEBWINE_MEMFS) and wasm_x86 (-DWEBWINE_BROWSER).  Support objects and the
+# support objects use -O3, while the browser IPC and whole-module link retain
+# the known-good -O1/-O2 combination; the interpreter/generated blocks stay at
+# -O2 for differential-verification compatibility.
+# Prereqs: build-node.sh (OPT=-O3, XOPT=-O2) and assemble-assets.sh have run.
 #   WORK=/tmp/webwine-browser ./build-browser.sh   -> $WORK/web/webwine-bw.{js,wasm,data}
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WINE="${WINE:-$HOME/dev/wine}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
 WORK="${WORK:-/tmp/webwine-browser}"
-NODEO="$WORK/nd_O1"; OUT="$WORK/web"; AT="$WORK/assets"
+NODEO="$WORK/nd_O3"; OUT="$WORK/web"; AT="$WORK/assets"
 CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"; XOPT="${XOPT:--O2}"
 source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
 mkdir -p "$OUT"; cd "$BUILD"
-[ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O1) first"; exit 1; }
+[ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O3, XOPT=-O2) first"; exit 1; }
 [ -d "$AT/game" ]   || { echo "run assemble-assets.sh first"; exit 1; }
 # AOT block translation: on when gen_blocks.c exists (build-node.sh GENBLK=1
 # generated it) unless GENBLK is explicitly emptied.  Compiles the JIT into the
@@ -24,7 +26,7 @@ INC="-Idlls/ntdll -I../dlls/ntdll -I../dlls/ntdll/unix -Iinclude -I../include"
 CF2="-D__WINESRC__ -D_NTSYSTEM_ -D_ACRTIMP= -DWINBASEAPI= -DWINE_UNIX_LIB -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing"
 echo "[1/3] MEMFS ipc ($CINT) + BROWSER interpreter ($XOPT)"
 emcc $CINT -DWEBWINE_MEMFS -c "$WEBW/wasm_ipc.c" -o "$NODEO/wasm_ipc_bw.o"
-emcc -std=gnu23 $XOPT -DWEBWINE_BROWSER ${GENBLK:+-DWEBWINE_GENBLOCKS} ${PROFILE:+-DWASM_X86_PROFILE} $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
+emcc -std=gnu23 $XOPT -DWEBWINE_BROWSER ${GENBLK:+-DWEBWINE_GENBLOCKS} ${FP_HOT:+-DWEBWINE_FP_HOT} ${PROFILE:+-DWASM_X86_PROFILE} ${MSVCRT_AOT:+-DWEBWINE_MSVCRT_AOT} ${MSVCRT_AOT_RANGE:+-DWEBWINE_MSVCRT_FOCUSED_AOT} $CF2 $INC -c "$WEBW/wasm_x86.c" -o "$NODEO/wasm_x86_bw.o"
 
 echo "[2/3] response file"
 RSP="$NODEO/objs_bw.rsp"; : > "$RSP"

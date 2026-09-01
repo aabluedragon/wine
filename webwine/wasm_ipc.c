@@ -171,12 +171,18 @@ EM_JS(long, host_close, (int fd), {
  * same wasm_x86.c present path links either way. */
 #ifdef WEBWINE_MEMFS
 EM_JS(void, webwine_present, (const void *rgba, int w, int h), {
+  var d = self.__wwCtl;
+  if (d && Atomics.load(d, 3) - Atomics.load(d, 2) >= 2) return;
+  var now = performance.now();
+  if (self.__wwLastRgbaPresent !== undefined && now - self.__wwLastRgbaPresent < 15) return;
+  self.__wwLastRgbaPresent = now;
   var n = w * h * 4;
   /* copy out of the wasm heap (postMessage transfer needs an owned buffer).
      The pixels are already RGBA, so the page can wrap this buffer in an
      ImageData directly - no per-pixel conversion on the main thread. */
   var out = new Uint8Array(n);
   out.set(HEAPU8.subarray(rgba, rgba + n));
+  if (d) Atomics.add(d, 3, 1);
   postMessage({ type: 'frame', w: w, h: h, rgba: out.buffer }, [out.buffer]);
 });
 #else
@@ -206,7 +212,7 @@ int webwine_gl_active;
 #ifdef WEBWINE_MEMFS
 EM_JS(void, webwine_gl_present_js, (void), {
   var c = Module['canvas'];
-  if (!c || !c.transferToImageBitmap) return;
+  if (!c) return;
   /* Back-pressure.  The interpreter can finish frames several times faster than
      the page can draw them, and every one posted is an ImageBitmap holding a GPU
      surface; with nothing to stop it the main thread's queue grows until the
@@ -223,6 +229,25 @@ EM_JS(void, webwine_gl_present_js, (void), {
   var now = performance.now();
   if (self.__wwLastPresent !== undefined && now - self.__wwLastPresent < 15) return;
   self.__wwLastPresent = now;
+  /* Safari and a few embedded WebViews expose OffscreenCanvas but not
+   * transferToImageBitmap().  Returning here leaves the page's canvas black
+   * forever even though Wine is rendering normally.  Use the established
+   * RGBA message path as a compatibility fallback; it is deliberately only
+   * selected on platforms without bitmap transfer, so Chrome's fast path is
+   * unchanged. */
+  if (!c.transferToImageBitmap) {
+    try {
+      var gl = Module['ctx'];
+      if (!gl) throw new Error('no WebGL context for readback fallback');
+      var row = c.width * 4, pixels = new Uint8Array(c.width * c.height * 4);
+      gl.readPixels(0, 0, c.width, c.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      var rgba = new Uint8Array(pixels.length), y;
+      for (y = 0; y < c.height; y++)
+        rgba.set(pixels.subarray((c.height - 1 - y) * row, (c.height - y) * row), y * row);
+      postMessage({ type: 'frame', w: c.width, h: c.height, rgba: rgba.buffer }, [rgba.buffer]);
+    } catch (e) { postMessage({ type: 'log', line: 'wasm_x86: GL readback fallback failed ' + e }); }
+    return;
+  }
   /* WASM_GLPIX=1: sample the middle of the framebuffer before the transfer, so a
      blank picture can be blamed on the rendering or on the transfer. */
   if (Module.__glpix && (Module.__glpixN = (Module.__glpixN|0) + 1) % 300 === 1) {

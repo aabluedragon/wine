@@ -47,6 +47,7 @@ struct x86cpu
 {
     uint32_t regs[8];
     uint8_t  xmm[8][16];
+    uint8_t  ymm[8][32];
     uint32_t eip;
     uint32_t eflags;
     uint32_t fs_base, gs_base;  /* i386 segment bases: fs -> TEB */
@@ -86,16 +87,26 @@ static int trace(void)
 
 /* ---- flat memory (identity map) ---- */
 uint64_t g_total_insns; /* total guest instructions executed (perf measurement) */
+static int g_trace_3b = -1;
+static uint64_t g_trace_3b_hits;
+static uint32_t g_trace_3b_last;
+static int g_trace_3b_detail = -1;
+static unsigned g_trace_3b_detail_left;
 /* GL-thunk bypass: skip the interpreted guest-side opengl32 marshalling by
  * calling the native gl_* unix thunk directly.  g_ogl_handle is opengl32's
  * unixlib funcs array, captured from the first GL unix-call (its return address
  * lands inside opengl32.dll).  Per hooked entry we stash the unix code + arg
  * count keyed by NAT_SLOT. */
+#define NAT_SLOTS 2048
 static uint32_t  g_ogl_base, g_ogl_size;
+static uint32_t addr_unixcall;
 static uintptr_t g_ogl_handle;
-static uint16_t  g_gl_code[512];   /* must match NAT_SLOTS */
-static uint8_t   g_gl_nargs[512];
+static uint32_t  g_wgl_swap_addr;
+static uint16_t  g_gl_code[NAT_SLOTS];
+static uint8_t   g_gl_nargs[NAT_SLOTS];
 static int       g_gl_armed;
+static int       g_glcount = -1;
+static uint64_t  g_gl_calls[NAT_SLOTS];
 static inline uint8_t  rd8 ( uint32_t a ){ return *(uint8_t  *)(uintptr_t)a; }
 static inline uint16_t rd16( uint32_t a ){ return *(uint16_t *)(uintptr_t)a; }
 static inline uint32_t rd32( uint32_t a ){ return *(uint32_t *)(uintptr_t)a; }
@@ -136,6 +147,8 @@ static inline void wr32( uint32_t a, uint32_t v ){ *(uint32_t *)(uintptr_t)a = v
 #define ND_YDIM          0x930048u  /* screen height                           */
 #define ND_CURPALETTE    0xa61220u  /* palette_t[256], 4 bytes/entry           */
 static int32_t nd_slide = 0;   /* actual_exe_base - 0x400000 (ASLR relocation) */
+static int32_t msvcrt_slide = 0; /* loaded msvcrt base - PE preferred 0x10000000 */
+static uint32_t msvcrt_base;
 static int g_present_count = 0;
 static uint64_t g_flip_count = 0;   /* # of _videoNextPage calls = real game frames */
 static uint32_t g_flip_addr = 0;    /* ND_VIDEONEXTPAGE + slide, set once slide known (0 = never matches, eip>=0x10000) */
@@ -232,17 +245,39 @@ static const char *prof_module( uint32_t va )
  * so it must not get more expensive than that). */
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
-       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS, NAT_QRHLINE };
+       NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_VLINE_DISPATCH, NAT_MVLINE_DISPATCH, NAT_SURFBLIT,
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_MVLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS, NAT_QRHLINE,
+       NAT_MEMCMP, NAT_STRCMP, NAT_STRLEN, NAT_MEMCHR, NAT_STRncmp,
+       NAT_STRCHR, NAT_STRCPY, NAT_STRNCPY, NAT_WCSLEN, NAT_WCSCHR, NAT_MEMSET_LOOP, NAT_TOASCII, NAT_TOLOWER, NAT_TOUPPER, NAT_FLOOR, NAT_QPF, NAT_QPC, NAT_GETTID, NAT_TLSGETVALUE,
+       NAT_VLINE1NP2, NAT_MVLINE1NP2, NAT_UDIVMODDI4, NAT_SDL_TLSGET, NAT_SDL_ATOMIC_GET,
+       NAT_SDL_ATOMIC_GETPTR, NAT_SDL_ATOMIC_XADD, NAT_NTDLL_SRW_EXCL,
+       NAT_NTDLL_SRW_SHARED, NAT_NTDLL_SRW_EXCL_REL, NAT_NTDLL_WAKE_ALL_EMPTY,
+       NAT_GLTHUNK_RET, NAT_SETUPQRHLINE, NAT_POW, NAT_WIN_GL_SWAP,
+       NAT_PTHREAD_SPIN_UNLOCK, NAT_PTHREAD_SPIN_LOCK, NAT_PTHREAD_GETSPECIFIC,
+       NAT_GDI_RELAY, NAT_GDI_CLIENT, NAT_SETUP_VLINE, NAT_SETUP_PVLINE, NAT_SETUP_MVLINE,
+       NAT_SETUP_TVLINE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
 static uint64_t g_mv_calls, g_mv_iters;   /* native mvlineasm4: entries and loop iterations */
-#define NAT_SLOTS 512   /* 512 not 256: spread the hash so the GL-thunk hooks
-                         * (glDisable & co.) stop colliding with existing nats */
 static uint32_t g_nat_addr[NAT_SLOTS];
 static uint8_t  g_nat_kind[NAT_SLOTS];
 static int g_nat_ready = 0;
+static uint32_t g_ntdll_wake_buckets;
+static uint32_t g_msvcrt_memset_loop;
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
+static int g_msvcrt_jit;
+static void msvcrt_gen_build_hash( void );
+#endif
+#ifdef WEBWINE_GENBLOCKS
+/* GDI32 is relocatable too; keep this experimental table separate from the
+ * executable table because its image base is chosen independently by Wine. */
+static int32_t gdi32_slide;
+static int gdi32_jit, gdi32_gen_loaded;
+static int gdi32_relay_armed;
+static uint32_t g_gdi_client_teb, g_gdi_client_shared;
+static void gdi32_gen_build_hash( void );
+#endif
 #define NAT_SLOT(a) (((a) >> 4) & (NAT_SLOTS - 1))
 
 static void nat_register( uint32_t addr, int kind, const char *what )
@@ -253,6 +288,139 @@ static void nat_register( uint32_t addr, int kind, const char *what )
     g_nat_addr[s] = addr; g_nat_kind[s] = (uint8_t)kind;
     fprintf( stderr, "wasm_x86: native %s @ %08x\n", what, addr );
 }
+
+#ifdef WEBWINE_GENBLOCKS
+extern int wasm_x86_dispatch( struct x86cpu *c, uint32_t target );
+/* Wine's builtin PE DLLs begin exported calls with a generated relay thunk.
+ * The thunk is deliberately boring but very hot: it pushes the relay index
+ * and descriptor, calls the native relay dispatcher, then executes a stdcall
+ * ret.  Keep the actual DLL implementation and dispatcher untouched; this
+ * shortcut only removes the fixed guest instructions around that call. */
+static int nat_gdi_relay( struct x86cpu *c )
+{
+    uint32_t b = c->eip, table, target;
+    if (rd8(b + 6) != 0x68 || rd8(b + 11) != 0xb8 || rd8(b + 16) != 0x50 ||
+        rd8(b + 17) != 0xff || rd8(b + 18) != 0x50 || rd8(b + 19) != 0x04 ||
+        rd8(b + 20) != 0xc2) return 0;
+    table = rd32( b + 12 );
+    if (!table || table >= 0x70000000u - 8u) return 0;
+    target = rd32( table + 4 );
+    if (!target || target >= 0x10000u) return 0;
+    c->regs[EAX] = table;                 /* mov eax, descriptor */
+    c->regs[ESP] -= 4; wr32( c->regs[ESP], rd32( b + 7 ) ); /* relay ordinal */
+    c->regs[ESP] -= 4; wr32( c->regs[ESP], table );
+    c->regs[ESP] -= 4; wr32( c->regs[ESP], b + 20 );        /* call continuation */
+    c->eip = target;                      /* native relay trampoline */
+    if (target == addr_unixcall)          /* skip one interpreter dispatch turn */
+        return wasm_x86_dispatch( c, target );
+    return 1;
+}
+
+static void nat_arm_gdi_relays( uint32_t base )
+{
+    unsigned armed = 0, busy = 0;
+    if (gdi32_relay_armed) return;
+    gdi32_relay_armed = 1;
+    if (!getenv( "WASM_GDI32_RELAY" )) return;
+    /* This range is the generated gdi32 relay-entry cluster.  Verify every
+     * candidate before placing it in the native table; the DLL body starts
+     * after 0x582c and is never covered by this shortcut. */
+    for (uint32_t rva = 0x1a4c; rva < 0x582c; rva += 4)
+    {
+        uint32_t b = base + rva;
+        if (rd8(b) != 0x8b || rd8(b+1) != 0xff || rd8(b+2) != 0x55 ||
+            rd8(b+3) != 0x8b || rd8(b+4) != 0xec || rd8(b+5) != 0x5d ||
+            rd8(b+6) != 0x68 || rd8(b+11) != 0xb8 || rd8(b+16) != 0x50 ||
+            rd8(b+17) != 0xff || rd8(b+18) != 0x50 || rd8(b+19) != 0x04 ||
+            rd8(b+20) != 0xc2) continue;
+        unsigned s = NAT_SLOT(b);
+        if (g_nat_addr[s]) { busy++; continue; }
+        g_nat_addr[s] = b; g_nat_kind[s] = NAT_GDI_RELAY; armed++;
+    }
+    fprintf( stderr, "wasm_x86: native gdi32 relay thunks armed=%u busy=%u\n", armed, busy );
+}
+
+/* gdi32's private get_gdi_client_ptr() is on the software-renderer's hot
+ * handle path.  Its normal i386 path is a bounds/type/generation check in the
+ * PEB's shared GDI table followed by one UserPointer load.  Keep the unusual
+ * TEB64/GdiBatchCount path and invalid handles in the guest: those paths also
+ * carry diagnostics, whereas the common path below has no observable side
+ * effect beyond EAX and the return address.
+ *
+ * This is opt-in until the differential run has covered handle creation and
+ * teardown.  The exact function skeleton is checked when the DLL is loaded,
+ * so a Wine update cannot silently apply the layout assumption to a different
+ * implementation. */
+static int nat_gdi_client_ptr( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], teb, teb64, peb, shared, obj, type, entry, unique, ret;
+    uint32_t idx;
+    if (sp >= 0x70000000u - 16u) return 0;
+    teb = c->fs_base;
+    if (!teb || teb >= 0x70000000u - 0xf74u) return 0;
+    if (g_gdi_client_teb == teb && g_gdi_client_shared)
+        shared = g_gdi_client_shared;
+    else
+    {
+        teb64 = rd32(teb + 0xf70u);
+        if (teb64)
+        {
+            /* The i386 Wine DLL uses TEB64+0x60 -> PEB64 and PEB64+0xf8 for
+             * GdiSharedHandleTable when the WoW64 compatibility TEB is present. */
+            if (teb64 >= 0x70000000u - 0x64u) return 0;
+            peb = rd32(teb64 + 0x60u);
+            if (!peb || peb >= 0x70000000u - 0xfcu) return 0;
+            shared = rd32(peb + 0xf8u);
+        }
+        else
+        {
+            peb = rd32(teb + 0x30u);
+            if (!peb || peb >= 0x70000000u - 0x98u) return 0;
+            shared = rd32(peb + 0x94u);
+        }
+        if (shared) { g_gdi_client_teb = teb; g_gdi_client_shared = shared; }
+    }
+    if (!shared || shared >= 0x70000000u - 0x100000u) return 0;
+    /* The dispatch seam is immediately after the function's initial
+     * push ebp (the loader may enter at the hotpatch byte, but the
+     * interpreter advances once before the native check).  Thus [sp+4] is
+     * the caller return address and the two arguments start at [sp+8]. */
+    obj = rd32(sp + 8u); type = rd32(sp + 12u); idx = obj & 0xffffu;
+    ret = rd32(sp + 4u);
+    /* A few loader-generated calls do not have the ordinary internal-call
+     * frame at this seam.  A return into the guest stack is never valid here;
+     * decline before touching ESP and let the already-entered interpreter
+     * body handle it. */
+    if (ret < 0x400000u || ret >= 0x70000000u) return 0;
+    entry = shared + idx * 24u;
+    if (idx >= 0x10000u || entry < shared || entry >= 0x70000000u - 0x18u)
+        return 0;
+    if (!rd8(entry + 0x0eu)) return 0; /* invalid: let Wine emit its warning */
+    unique = rd16(entry + 0x0cu);
+    if ((obj >> 16) && (obj >> 16) != unique) return 0;
+    if (type && (((uint32_t)(rd8(entry + 0x0du) & 0x7fu) << 16) != type))
+        return 0;
+    c->regs[EAX] = rd32(entry + 0x10u);
+    c->regs[ESP] = sp + 8u; /* leave restores EBP, then ret pops [sp+4] */
+    c->eip = ret;
+    return 1;
+}
+
+static void nat_arm_gdi_client_ptr( uint32_t base )
+{
+    static const uint8_t head[] = {
+        0x64,0x8b,0x15,0x18,0x00,0x00,0x00,0x89,0xe5,0x53,0x83,0xec,0x14,
+        0x8b,0x9a,0x70,0x0f,0x00,0x00,0x8b,0x45,0x08,0x8b,0x4d,0x0c
+    };
+    uint32_t a = base + 0x4abc1u;
+    unsigned i;
+    if (!getenv( "WASM_GDI_CLIENT" )) return;
+    for (i = 0; i < sizeof(head); i++)
+        if (rd8(a + i) != head[i]) break;
+    if (i == sizeof(head)) nat_register(a, NAT_GDI_CLIENT, "gdi32 get_gdi_client_ptr");
+    else fprintf(stderr, "wasm_x86: gdi32 get_gdi_client_ptr skeleton differs at %08x+%x - left interpreted\n", a, i);
+}
+#endif
 
 /* Resolve one export by name from a loaded PE image. */
 static uint32_t pe_export( uint32_t base, const char *want )
@@ -333,11 +501,252 @@ static void nat_init( struct x86cpu *c )
     /* msvcrt is loaded well after the exe base is known, so keep retrying on
      * later ticks rather than giving up on the first look. */
     uint32_t base = find_module( c, "msvcrt.dll" );
+#ifdef WEBWINE_GENBLOCKS
+    /* GDI32 can enter the loader list after msvcrt.  Do not consume the
+     * one-shot initialization attempt while it is still absent: the relay
+     * cluster is a measured frame hotspot, and a late-loaded DLL must still
+     * get its relocatable base and verified hooks. */
+    if (!gdi32_gen_loaded)
+    {
+        uint32_t gbase = find_module( c, "gdi32.dll" );
+        if (gbase)
+        {
+            gdi32_slide = (int32_t)(gbase - 0x10000000u);
+            gdi32_jit = getenv( "WASM_GDI32_JIT" ) ? 1 : 0;
+            gdi32_gen_loaded = 1;
+            if (gdi32_jit) gdi32_gen_build_hash();
+            nat_arm_gdi_relays( gbase );
+            nat_arm_gdi_client_ptr( gbase );
+        }
+    }
+#endif
     if (!base) return;
+    msvcrt_base = base;
+    msvcrt_slide = (int32_t)(base - 0x10000000u);
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
+    /* This first DLL AOT pass is opt-in until its full PE ABI surface has
+     * differential coverage.  The generated table is kept available for
+     * focused testing, while normal builds retain the proven native CRT hooks
+     * and interpreter fallback. */
+    g_msvcrt_jit =
+#ifdef WEBWINE_MSVCRT_FOCUSED_AOT
+        getenv( "WASM_NO_MSVCRT_JIT" ) ? 0 : 1;
+#else
+        getenv( "WASM_MSVCRT_JIT" ) ? 1 : 0;
+#endif
+    if (g_msvcrt_jit) msvcrt_gen_build_hash();
+#endif
     g_nat_ready = 1;
     nat_register( pe_export( base, "memmove" ), NAT_MEMMOVE, "memmove" );
     nat_register( pe_export( base, "memcpy" ),  NAT_MEMMOVE, "memcpy" );
     nat_register( pe_export( base, "memset" ),  NAT_MEMSET,  "memset" );
+    { uint32_t loop = base + 0x49b80u;
+      static const uint8_t code[] = { 0x0f,0x29,0x06,0x83,0xc6,0x20,
+                                      0x0f,0x29,0x46,0xf0,0x39,0xde,0x72,0xf2 };
+      unsigned i; int ok = !getenv( "WASM_NO_MEMSET_LOOP" );
+      for (i = 0; ok && i < sizeof(code); i++) if (rd8( loop + i ) != code[i]) ok = 0;
+      if (ok) { g_msvcrt_memset_loop = loop; nat_register( loop, NAT_MEMSET_LOOP, "msvcrt memset SIMD loop" ); }
+      else if (!getenv( "WASM_NO_MEMSET_LOOP" ))
+          fprintf( stderr, "wasm_x86: msvcrt memset loop differs at %08x - left interpreted\n", loop );
+    }
+    nat_register( pe_export( base, "memcmp" ),  NAT_MEMCMP,  "memcmp" );
+    nat_register( pe_export( base, "strcmp" ),  NAT_STRCMP,  "strcmp" );
+    nat_register( pe_export( base, "strlen" ),  NAT_STRLEN,  "strlen" );
+    nat_register( pe_export( base, "memchr" ),  NAT_MEMCHR,  "memchr" );
+    nat_register( pe_export( base, "strncmp" ), NAT_STRncmp,  "strncmp" );
+    nat_register( pe_export( base, "strchr" ),  NAT_STRCHR,  "strchr" );
+    nat_register( pe_export( base, "strcpy" ),  NAT_STRCPY,  "strcpy" );
+    nat_register( pe_export( base, "strncpy" ), NAT_STRNCPY, "strncpy" );
+    nat_register( pe_export( base, "__toascii" ), NAT_TOASCII, "__toascii" );
+    nat_register( pe_export( base, "tolower" ), NAT_TOLOWER, "tolower" );
+    nat_register( pe_export( base, "toupper" ), NAT_TOUPPER, "toupper" );
+    /* Non-exported GCC helper used by libdivide's 64-bit arithmetic. */
+    { uint32_t udiv = base + 0x100f0u;
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x57,0x56,0x53,
+                                      0x83,0xe4,0xf8,0x83,0xec,0x20 };
+      int ok = !getenv( "WASM_NO_UDIV_NATIVE" );
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( udiv + i ) != head[i]) ok = 0;
+      if (ok) nat_register( udiv, NAT_UDIVMODDI4, "__udivmoddi4" );
+      else if (!getenv( "WASM_NO_UDIV_NATIVE" ))
+          fprintf( stderr, "wasm_x86: __udivmoddi4 skeleton differs at %08x - left interpreted\n", udiv );
+    }
+    { uint32_t adj = pe_export( base, "_adj_fptan" );
+      uint32_t b = adj; int ok = adj != 0;
+      /* Wine's i386 implementation is a trace-only Pentium workaround stub:
+       * test a debug flag, optionally emit TRACE, then return.  Bypass that
+       * wrapper only when its stable test/branch/return skeleton matches. */
+      static const uint8_t head[] = { 0xf6,0x05,0,0,0,0,0x08,0x75,0x07 };
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (head[i] && rd8( b + i ) != head[i]) ok = 0;
+      if (ok && rd8(b+9) != 0xc3 && rd8(b+16) != 0xc3) ok = 0;
+      if (ok) nat_register( adj, NAT_MIDEBUG, "_adj_fptan (stub)" );
+      else if (adj) fprintf( stderr, "wasm_x86: _adj_fptan skeleton differs at %08x - left interpreted\n", adj );
+    }
+    base = find_module( c, "ntdll.dll" );
+    /* NTDLL carries the same cdecl byte-copy ABI as msvcrt.  These exports are
+     * used by Wine's loader and allocator paths, and the existing nat_call
+     * bounds checks make the host implementations byte-exact for guest memory.
+     * Keep the hooks separate from the msvcrt addresses: the two DLLs can be
+     * loaded at unrelated bases and their slot identities must not collide. */
+    nat_register( pe_export( base, "memcpy" ),  NAT_MEMMOVE, "ntdll memcpy" );
+    nat_register( pe_export( base, "memmove" ), NAT_MEMMOVE, "ntdll memmove" );
+    nat_register( pe_export( base, "memset" ),  NAT_MEMSET,  "ntdll memset" );
+    nat_register( pe_export( base, "wcslen" ), NAT_WCSLEN, "wcslen" );
+    { uint32_t qpf = pe_export( base, "RtlQueryPerformanceFrequency" );
+      int ok = qpf != 0;
+      { uint32_t b = qpf + (uint32_t)nd_slide;
+        static const uint8_t head[] = { 0x8b,0xff,0x55,0x8b,0xec,0x8b,0x45,0x08 };
+        for (unsigned i = 0; ok && i < sizeof(head); i++)
+            if (rd8( b + i ) != head[i]) ok = 0;
+        /* The two stores and their immediate values are the semantic body;
+         * allow harmless hotpatch/padding differences in the surrounding
+         * compiler-generated sequence. */
+        if (ok && (rd8(b+8)!=0xc7 || rd8(b+9)!=0x00 || rd8(b+10)!=0x80 ||
+                   rd8(b+11)!=0x96 || rd8(b+12)!=0x98 || rd8(b+13)!=0x00 ||
+                   rd8(b+14)!=0xc7 || rd8(b+15)!=0x40 || rd8(b+16)!=0x04 ||
+                   rd32(b+17)!=0)) ok = 0;
+        /* Keep the export identity and store sequence as the guard.  The
+         * trailing return sequence is allowed to differ across Wine builds;
+         * nat_qpf supplies the same stdcall result and stack cleanup. */
+      }
+      if (ok) nat_register( qpf, NAT_QPF, "RtlQueryPerformanceFrequency" );
+      else if (qpf) fprintf( stderr, "wasm_x86: RtlQueryPerformanceFrequency skeleton differs at %08x - left interpreted\n", qpf );
+    }
+    { uint32_t qpc = pe_export( base, "RtlQueryPerformanceCounter" );
+      static const uint8_t head[] = { 0x8b,0xff,0x55,0x8b,0xec,0x83,0xec,0x08,
+                                      0x8b,0x45,0x08,0xc7,0x44,0x24 };
+      uint32_t b = qpc + (uint32_t)nd_slide; int ok = qpc != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      /* The call displacement is relocation-dependent.  The return value and
+       * ret 4 are stable and bound the helper we replace. */
+      if (ok && (rd8(b+27)!=0xb8 || rd32(b+28)!=1 || rd8(b+36)!=0xc2 || rd16(b+37)!=4)) ok = 0;
+      if (ok) nat_register( qpc, NAT_QPC, "RtlQueryPerformanceCounter" );
+      else if (qpc) fprintf( stderr, "wasm_x86: RtlQueryPerformanceCounter skeleton differs at %08x - left interpreted\n", qpc );
+    }
+    { uint32_t srw = pe_export( base, "RtlAcquireSRWLockExclusive" );
+      /* Wine's i386 implementation first adds two to the waiter field, then
+       * CASes the unchanged waiter field plus the exclusive bit.  When the
+       * waiter field is zero, the net effect is one atomic dword transition;
+       * the native path below performs exactly that uncontended transition.
+       * Keep the guard tied to the implementation's entry and lock-add
+       * skeleton, and leave every contended/unrecognised state interpreted. */
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x57,0x56,0x53,0x83,0xec,
+                                      0x14,0x8b,0x7d,0x08,0x66,0xf0,0x83,0x07,0x02 };
+      uint32_t b = srw + (uint32_t)nd_slide; int ok = srw != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok && (rd8(b+0x40)!=0x8b || rd8(b+0x41)!=0x17 ||
+                 rd8(b+0x42)!=0x89 || rd8(b+0x43)!=0xd0 ||
+                 rd8(b+0x44)!=0x89 || rd8(b+0x45)!=0x55 || rd8(b+0x46)!=0xf0)) ok = 0;
+      if (ok && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          nat_register( srw, NAT_NTDLL_SRW_EXCL, "ntdll RtlAcquireSRWLockExclusive fast path" );
+      else if (srw && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          fprintf( stderr, "wasm_x86: RtlAcquireSRWLockExclusive skeleton differs at %08x - left interpreted\n", srw );
+    }
+    { uint32_t srw = pe_export( base, "RtlAcquireSRWLockShared" );
+      /* Shared acquisition increments the high half-word only when the low
+       * half-word (exclusive bit plus waiter state) is zero.  A single CAS is
+       * therefore the exact uncontended operation; a nonzero low half-word or
+       * a CAS race returns to Wine's wait protocol. */
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x56,0x53,0x8d,0x75,0xf4,
+                                      0x83,0xec,0x14,0x8b,0x5d,0x08 };
+      uint32_t b = srw + (uint32_t)nd_slide; int ok = srw != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          nat_register( srw, NAT_NTDLL_SRW_SHARED, "ntdll RtlAcquireSRWLockShared fast path" );
+      else if (srw && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          fprintf( stderr, "wasm_x86: RtlAcquireSRWLockShared skeleton differs at %08x - left interpreted\n", srw );
+    }
+    { uint32_t srw = pe_export( base, "RtlReleaseSRWLockExclusive" );
+      /* Wine stores owners in the high half-word and the exclusive ownership
+       * bit in the low half-word.  With no waiters, release is exactly the
+       * uncontended atomic transition 0x00010001 -> 0.  Any other state is
+       * left to Wine so its waiter wake protocol remains authoritative. */
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x56,0x53,0x83,0xec,0x14,
+                                      0x8b,0x75,0x08,0xeb,0x25 };
+      uint32_t b = srw + (uint32_t)nd_slide; int ok = srw != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          nat_register( srw, NAT_NTDLL_SRW_EXCL_REL,
+                        "ntdll RtlReleaseSRWLockExclusive uncontended fast path" );
+      else if (srw && !getenv( "WASM_NO_NTDLL_SRW_FAST" ))
+          fprintf( stderr, "wasm_x86: RtlReleaseSRWLockExclusive skeleton differs at %08x - left interpreted\n", srw );
+    }
+    { uint32_t wake = pe_export( base, "RtlWakeAddressAll" );
+      /* RtlWakeAddressAll takes a per-address bucket lock before inspecting
+       * the waiter list.  When that list is empty, the complete operation is
+       * an observable no-op.  The packaged NTDLL export is pinned by the
+       * loader/root artifact; retain its stable entry signature as the guard
+       * and leave contended/non-empty buckets in Wine. */
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x81,0xec,0x2c,
+                                      0x04,0x00,0x00,0x89,0x7d,0xfc,
+                                      0x8b,0x7d,0x08 };
+      uint32_t b = wake + (uint32_t)nd_slide; int ok = wake != 0;
+      for (unsigned i = 0; ok && i < 3; i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok && !getenv( "WASM_NO_NTDLL_WAKE_FAST" )) {
+          g_ntdll_wake_buckets = rd32( b + 17 );
+          nat_register( wake, NAT_NTDLL_WAKE_ALL_EMPTY,
+                        "ntdll RtlWakeAddressAll empty-bucket fast path" );
+      } else if (wake && !getenv( "WASM_NO_NTDLL_WAKE_FAST" ))
+          fprintf( stderr, "wasm_x86: RtlWakeAddressAll skeleton differs at %08x - left interpreted\n", wake );
+    }
+    if (getenv( "WASM_FAST_MATH" ))
+        nat_register( pe_export( base, "floor" ), NAT_FLOOR, "floor (x87 return)" );
+    base = find_module( c, "kernel32.dll" );
+    { uint32_t tid = pe_export( base, "GetCurrentThreadId" );
+      static const uint8_t code[] = { 0x64,0xa1,0x18,0x00,0x00,0x00,
+                                      0x8b,0x40,0x24,0xc3 };
+      uint32_t b = tid + (uint32_t)nd_slide; int ok = tid != 0;
+      for (unsigned i = 0; ok && i < sizeof(code); i++)
+          if (rd8( b + i ) != code[i]) ok = 0;
+      if (ok) nat_register( tid, NAT_GETTID, "GetCurrentThreadId" );
+      else if (tid) fprintf( stderr, "wasm_x86: GetCurrentThreadId skeleton differs at %08x - left interpreted\n", tid );
+    }
+    { uint32_t qpc = pe_export( base, "QueryPerformanceCounter" );
+      uint32_t qpf = pe_export( base, "QueryPerformanceFrequency" );
+      static const uint8_t thunk[] = { 0x8b,0xff,0x55,0x8b,0xec,0x5d,0xff,0x25 };
+      uint32_t b = qpc + (uint32_t)nd_slide; int ok = qpc != 0;
+      for (unsigned i = 0; ok && i < sizeof(thunk); i++)
+          if (rd8( b + i ) != thunk[i]) ok = 0;
+      if (ok) nat_register( qpc, NAT_QPC, "QueryPerformanceCounter" );
+      else if (qpc) fprintf( stderr, "wasm_x86: QueryPerformanceCounter thunk differs at %08x - left interpreted\n", qpc );
+      b = qpf + (uint32_t)nd_slide; ok = qpf != 0;
+      for (unsigned i = 0; ok && i < sizeof(thunk); i++)
+          if (rd8( b + i ) != thunk[i]) ok = 0;
+      if (ok) nat_register( qpf, NAT_QPF, "QueryPerformanceFrequency" );
+      else if (qpf) fprintf( stderr, "wasm_x86: QueryPerformanceFrequency thunk differs at %08x - left interpreted\n", qpf );
+    }
+    { uint32_t tls = pe_export( base, "TlsGetValue" );
+      static const uint8_t thunk[] = { 0x8b,0xff,0x55,0x8b,0xec,0x5d,0xff,0x25 };
+      uint32_t b = tls + (uint32_t)nd_slide; int ok = tls != 0;
+      for (unsigned i = 0; ok && i < sizeof(thunk); i++)
+          if (rd8( b + i ) != thunk[i]) ok = 0;
+      if (ok) nat_register( tls, NAT_TLSGETVALUE, "TlsGetValue" );
+      else if (tls) fprintf( stderr, "wasm_x86: TlsGetValue thunk differs at %08x - left interpreted\n", tls );
+    }
+    base = find_module( c, "kernelbase.dll" );
+    { uint32_t tls = pe_export( base, "TlsGetValue" );
+      static const uint8_t head[] = { 0x8b,0xff,0x55,0x8b,0xec };
+      uint32_t b = tls + (uint32_t)nd_slide; int ok = tls != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok) nat_register( tls, NAT_TLSGETVALUE, "kernelbase TlsGetValue" );
+      else if (tls) fprintf( stderr, "wasm_x86: kernelbase TlsGetValue skeleton differs at %08x - left interpreted\n", tls );
+    }
+    base = find_module( c, "ucrtbase.dll" );
+    { uint32_t wc = pe_export( base, "wcschr" );
+      static const uint8_t head[] = { 0x55,0x89,0xe5,0x8b,0x45,0x08,0x0f,0xb7,0x4d,0x0c };
+      uint32_t b = wc + (uint32_t)nd_slide; int ok = wc != 0;
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (rd8( b + i ) != head[i]) ok = 0;
+      if (ok) nat_register( wc, NAT_WCSCHR, "ucrtbase wcschr" );
+      else if (wc) fprintf( stderr, "wasm_x86: ucrtbase wcschr skeleton differs at %08x - left interpreted\n", wc );
+    }
 }
 
 /* Run an intercepted CRT call natively.  cdecl: [esp]=return, args follow, the
@@ -554,7 +963,62 @@ static int nat_ageblocks( struct x86cpu *c )
  * require the copies to agree.  Args arrive on the stack (cdecl): count then the
  * initial ebx/ecx/edx/esi/edi.  The routine saves and restores every register it uses,
  * so to the caller nothing but memory and eip changes.  WASM_NO_QRHLINE disables it. */
+#define ND_SETUPQRHLINE 0x633290u
 #define ND_QRHLINE 0x633310u
+
+/* setupqrhlineasm4 is the SMC prologue immediately before qrhlineasm4.  The
+ * mapper reads these values back from its instruction stream, so translating
+ * only the body leaves stale steps behind and can strand the render loop. */
+static int nat_setupqrhline( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], base = ND_QRHLINE + (uint32_t)nd_slide;
+    uint32_t arg0 = rd32( sp + 4 ), ebx = rd32( sp + 8 );
+    uint32_t ecx = rd32( sp + 12 ), edx = rd32( sp + 16 );
+    uint32_t doubled = ebx << 1, carry = ebx >> 31;
+    uint32_t doubled_ecx = (ecx << 1) + carry;
+    uint32_t neg_ecx = 0 - ecx;
+
+    wr32( base + 0x45, ebx );       /* mov [qrhline+45], ebx */
+    wr32( base + 0x4c, ecx );
+    wr32( base + 0x72, neg_ecx );
+    wr32( base + 0x98, neg_ecx );
+    wr32( base + 0x78, doubled );
+    wr32( base + 0x9e, doubled );
+    wr32( base + 0x7e, doubled_ecx );
+    wr32( base + 0xa4, doubled_ecx );
+    wr32( base + 0x84, edx );
+    wr32( base + 0x8a, edx );
+    wr32( base + 0xaa, edx );
+    wr32( base + 0xb0, edx );
+    wr32( base + 0x52, edx );
+
+    c->regs[EAX] = arg0;            /* the setup routine's final EAX value */
+    set_lazy( c, K_ADC, ecx, ecx, doubled_ecx, 4 );
+    c->lf_cin = (int)carry;
+    c->eip = rd32( sp );            /* cdecl */
+    c->regs[ESP] = sp + 4;
+    return 1;
+}
+
+static void nat_arm_setupqrhline( void )
+{
+    static const uint8_t prefix[] = {
+        0x53,0x51,0x52,0x56,0x57,
+        0x8b,0x44,0x24,0x18, 0x8b,0x5c,0x24,0x1c,
+        0x8b,0x4c,0x24,0x20, 0x8b,0x54,0x24,0x24,
+        0x8b,0x74,0x24,0x28, 0x8b,0x7c,0x24,0x2c
+    };
+    uint32_t a = ND_SETUPQRHLINE + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(prefix); i++) if (rd8( a + i ) != prefix[i]) break;
+    if (i == sizeof(prefix) && rd8(a+0x1d)==0x89 && rd8(a+0x1e)==0x1d &&
+        rd8(a+0x23)==0x89 && rd8(a+0x24)==0x0d && rd8(a+0x29)==0x31 &&
+        rd8(a+0x2b)==0x29 && rd8(a+0x2d)==0x89 && rd8(a+0x39)==0x01 &&
+        rd8(a+0x3b)==0x11)
+        nat_register( a, NAT_SETUPQRHLINE, "setupqrhlineasm4" );
+    else
+        fprintf( stderr, "wasm_x86: setupqrhlineasm4 skeleton differs at %08x+%x - left interpreted\n", a, i );
+}
 static const uint8_t nd_qrhline_code[196] = {
     0x53,0x51,0x52,0x56,0x57,0x8b,0x44,0x24,0x18,0x8b,0x5c,0x24,0x1c,0x8b,0x4c,0x24,
     0x20,0x8b,0x54,0x24,0x24,0x8b,0x74,0x24,0x28,0x8b,0x7c,0x24,0x2c,0x55,0x83,0xf8,
@@ -891,6 +1355,7 @@ static void nat_arm_audio( void )
  */
 #define ND_VLINE 0x6321f3u
 #define ND_VLINE_LEN 0x77u
+#define ND_VLINE_DISPATCH 0x6320b3u
 
 /* offset -> number of wildcard (patched) bytes; everything else must match */
 static const struct { uint16_t off; uint8_t len; } nd_vline_imm[] = {
@@ -919,6 +1384,106 @@ static int nd_vline_skeleton_ok( uint32_t va )
         for (k = 0; k < nd_vline_imm[i].len; k++) wild[nd_vline_imm[i].off + k] = 1;
     for (i = 0; i < ND_VLINE_LEN; i++)
         if (!wild[i] && rd8( va + i ) != nd_vline_code[i]) return 0;
+    return 1;
+}
+
+/* The fixed prologue immediately before vlineasm4 is also hot.  It patches the
+ * loop's immediates from the renderer globals and then jumps to ND_VLINE.  It
+ * is safe to bypass only when both its entry bytes and its final jump still
+ * have the expected shape; the absolute globals are deliberately read from
+ * the guest memory rather than baked into this shortcut. */
+static int nd_vline_dispatch_skeleton_ok( uint32_t va )
+{
+    static const uint8_t head[] = { 0x56,0x57,0x8b,0x4c,0x24,0x18,
+                                    0x8b,0x7c,0x24,0x1c,0x55 };
+    unsigned i;
+    for (i = 0; i < sizeof(head); i++)
+        if (rd8( va + i ) != head[i]) goto bad;
+    if (rd8( va + 0x12a ) != 0x89 || rd8( va + 0x12b ) != 0xf1 ||
+        rd8( va + 0x12c ) != 0xeb || rd8( va + 0x12d ) != 0x12) goto bad;
+    return 1;
+bad:
+    if (getenv( "WASM_DUMP_VLINE_DISPATCH" ))
+    {
+        fprintf( stderr, "wasm_x86: vline dispatcher bytes:");
+        for (i = 0; i < sizeof(head); i++) fprintf( stderr, " %02x", rd8( va + i ) );
+        fprintf( stderr, " ...");
+        for (i = 0; i < 9; i++) fprintf( stderr, " %02x", rd8( va + 0x12a + i ) );
+        fprintf( stderr, "\n" );
+    }
+    return 0;
+}
+
+static int nat_vline_dispatch( struct x86cpu *c )
+{
+    uint32_t b = ND_VLINE + (uint32_t)nd_slide;
+    uint32_t oldsp = c->regs[ESP], sp = oldsp - 8;
+    uint32_t ecx, edi, eax, ebx, edx, esi, ebp, tab;
+
+    /* The true dispatcher entry is three pushes before the verified setup
+     * sequence.  If armed there, reproduce those pushes before sharing the
+     * setup below.  The old one-instruction-late entry remains valid for a
+     * previously generated table. */
+    if (c->eip == ND_VLINE_DISPATCH + (uint32_t)nd_slide - 3u)
+    {
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        oldsp = c->regs[ESP]; sp = oldsp - 8;
+    }
+
+    /* push %esi; push %edi; push %ebp */
+    wr32( sp,     c->regs[EDI] );
+    wr32( sp + 4, c->regs[ESI] );
+
+    ecx = rd32( sp + 0x18 );
+    edi = rd32( sp + 0x1c );
+    wr32( sp - 4, c->regs[EBP] );
+    c->regs[ESP] = sp - 4;
+    tab = rd32( 0x0e168c4u + (uint32_t)nd_slide );
+    eax = rd32( tab + ecx * 4 ) + edi;
+    wr32( b + 0x69, eax );
+    edi -= eax;
+
+    /* The eight writes below are the call-specific immediates in the loop. */
+    eax = rd32( 0x118b59cu + (uint32_t)nd_slide );
+    ebx = rd32( 0x118b5a0u + (uint32_t)nd_slide );
+    wr32( b + 0x1a, rd32( 0x118b5a4u + (uint32_t)nd_slide ) );
+    wr32( b + 0x21, rd32( 0x118b5a8u + (uint32_t)nd_slide ) );
+    wr32( b + 0x47, eax );
+    wr32( b + 0x51, ebx );
+    wr32( b + 0x2c, rd32( 0x118b5b8u + (uint32_t)nd_slide ) );
+    wr32( b + 0x32, rd32( 0x118b5bcu + (uint32_t)nd_slide ) );
+    wr32( b + 0x5d, rd32( 0x118b5b0u + (uint32_t)nd_slide ) );
+    wr32( b + 0x63, rd32( 0x118b5b4u + (uint32_t)nd_slide ) );
+
+    /* First pair: the x86 rol $0x88 is a rotate by eight bits. */
+    ebp = rd32( 0x118b57cu + (uint32_t)nd_slide );
+    ebx = rd32( 0x118b580u + (uint32_t)nd_slide );
+    esi = rd32( 0x118b584u + (uint32_t)nd_slide );
+    eax = rd32( 0x118b588u + (uint32_t)nd_slide );
+    esi &= 0xfffffe00u; ebp &= 0xfffffe00u;
+    eax = (eax << 8) | (eax >> 24); ebx = (ebx << 8) | (ebx >> 24);
+    edx = (eax & 0xffff0000u) + (ebx >> 16);
+    esi += eax & 0x1ffu; ebp += ebx & 0x1ffu;
+    wr32( b + 0x0d, edx & 0xffff0000u );
+    wr32( b + 0x13, esi );
+    wr8 ( b + 0x43, (uint8_t)edx );
+    wr8 ( b + 0x4d, (uint8_t)(edx >> 8) );
+    wr32( b + 0x57, ebp );
+
+    /* Second pair becomes the live register state at the loop entry. */
+    ebp = rd32( 0x118b58cu + (uint32_t)nd_slide );
+    ebx = rd32( 0x118b590u + (uint32_t)nd_slide );
+    esi = rd32( 0x118b594u + (uint32_t)nd_slide );
+    eax = rd32( 0x118b598u + (uint32_t)nd_slide );
+    esi &= 0xfffffe00u; ebp &= 0xfffffe00u;
+    eax = (eax << 8) | (eax >> 24); ebx = (ebx << 8) | (ebx >> 24);
+    edx = (eax & 0xffff0000u) + (ebx >> 16);
+    esi += eax & 0x1ffu; ebp += ebx & 0x1ffu;
+    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = esi;
+    c->regs[EDX] = edx; c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
+    c->eip = b;
     return 1;
 }
 
@@ -974,10 +1539,35 @@ static int nat_vlineasm4( struct x86cpu *c )
     } while (!cf && guard < (1u << 24));
     g_vl_calls++; g_vl_iters += guard;
 
-    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = ecx;
-    c->regs[EDX] = edx; c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
-    set_lazy( c, K_ADD, prev_edi, fbstep, edi, 4 );      /* the add that ended it */
-    c->eip = b + ND_VLINE_LEN;
+    /* Fold the guest tail: publish the two fixed-point accumulators, then
+     * synthesize the final add's flags and perform the six-register return.
+     * The native entry is reached after the dispatcher's three initial pushes,
+     * so this stack is exactly the layout consumed by the guest epilogue. */
+    {
+        uint32_t tail_eax, tail_edx, tail_esi, tail_ebp, sp = c->regs[ESP];
+        wr32( 0x118b594u + (uint32_t)nd_slide, esi );
+        wr32( 0x118b58cu + (uint32_t)nd_slide, ebp );
+        tail_esi = esi << 8;
+        tail_eax = edx;
+        tail_ebp = ebp << 8;
+        tail_edx = edx & 0xffffu;
+        tail_eax >>= 8;
+        tail_esi += tail_eax;
+        tail_edx <<= 8;
+        tail_ebp += tail_edx;
+        wr32( 0x118b598u + (uint32_t)nd_slide, tail_esi );
+        wr32( 0x118b590u + (uint32_t)nd_slide, tail_ebp );
+        set_lazy( c, K_ADD, (ebp << 8), tail_edx, tail_ebp, 4 );
+        c->regs[EAX] = tail_eax;
+        c->regs[EBX] = rd32( sp + 20 );
+        c->regs[ECX] = rd32( sp + 16 );
+        c->regs[EDX] = rd32( sp + 12 );
+        c->regs[ESI] = rd32( sp + 8 );
+        c->regs[EDI] = rd32( sp + 4 );
+        c->regs[EBP] = rd32( sp );
+        c->regs[ESP] = sp + 24;
+        c->eip = rd32( sp + 24 );
+    }
     return 1;
 }
 
@@ -986,6 +1576,14 @@ static void nat_arm_vline( void )
     uint32_t va = ND_VLINE + (uint32_t)nd_slide;
     if (nd_vline_skeleton_ok( va )) nat_register( va, NAT_VLINE, "vlineasm4" );
     else fprintf( stderr, "wasm_x86: vlineasm4 skeleton differs at %08x - left interpreted\n", va );
+}
+
+static void nat_arm_vline_dispatch( void )
+{
+    uint32_t va = ND_VLINE_DISPATCH + (uint32_t)nd_slide;
+    if (nd_vline_dispatch_skeleton_ok( va ))
+        nat_register( va - 3u, NAT_VLINE_DISPATCH, "vlineasm4 dispatcher" );
+    else fprintf( stderr, "wasm_x86: vlineasm4 dispatcher skeleton differs at %08x - left interpreted\n", va );
 }
 
 /* ---- mvlineasm4: the masked (transparent) 4-column texture mapper ----------
@@ -1023,6 +1621,7 @@ static void nat_arm_vline( void )
 #define ND_MVLINE     0x6325a0u
 #define ND_MVLINE_LEN 0x90u
 #define ND_MVCOUNT    0x00e18f88u    /* the outer counter (a shared scratch global) */
+#define ND_MVLINE_DISPATCH 0x6324d5u
 
 /* offset -> number of patched (wildcard) bytes; everything else must match */
 static const struct { uint16_t off; uint8_t len; } nd_mvline_imm[] = {
@@ -1168,11 +1767,95 @@ static int nat_mvlineasm4( struct x86cpu *c )
     return 1;
 }
 
+static int nd_mvline_dispatch_skeleton_ok( uint32_t va )
+{
+    static const uint8_t head[] = { 0x8b,0x4c,0x24,0x18,0x8b,0x7c,0x24,0x1c,0x55 };
+    static const uint8_t tail[] = { 0x81,0xef,0x40,0x01,0x00,0x00,0xeb,0x0c };
+    unsigned i;
+    for (i = 0; i < sizeof(head); i++) if (rd8( va + i ) != head[i]) return 0;
+    for (i = 0; i < sizeof(tail); i++) if (rd8( va + 0xb7 + i ) != tail[i]) return 0;
+    return 1;
+}
+
+/* Bypass mvlineasm4's self-modifying setup while preserving the six-register
+ * frame expected by the existing native loop and its guest epilogue. */
+static int nat_mvline_dispatch( struct x86cpu *c )
+{
+    uint32_t b = ND_MVLINE + (uint32_t)nd_slide;
+    uint32_t entrysp, sp;
+    uint32_t arg, edi, ebx, cl, mem;
+
+    /* Calls enter at the true SMC preamble, which pushes five registers before
+     * reaching the old hook at ND_MVLINE_DISPATCH.  When this hook is armed at
+     * the true entry, reproduce all five pushes.  Keep the one-instruction-late
+     * case as a compatibility guard for an already-installed older table. */
+    if (c->eip == ND_MVLINE_DISPATCH + (uint32_t)nd_slide - 5u)
+    {
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ESI] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDI] );
+    }
+    else if (c->eip == ND_MVLINE_DISPATCH + (uint32_t)nd_slide - 4u)
+    {
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ESI] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDI] );
+    }
+    entrysp = c->regs[ESP];
+    sp = entrysp - 4;
+
+    /* The first five pushes (ebx, ecx, edx, esi, edi) precede the registered
+     * address.  This address performs the final push ebp. */
+    wr32( sp, c->regs[EBP] );
+    c->regs[ESP] = sp;
+    arg = rd32( entrysp + 0x18 );
+    edi = rd32( entrysp + 0x1c );
+
+    wr32( b + 0x6e, rd32( 0x118b59cu + (uint32_t)nd_slide ) );
+    wr32( b + 0x4c, rd32( 0x118b5a0u + (uint32_t)nd_slide ) );
+    wr32( b + 0x28, rd32( 0x118b5a4u + (uint32_t)nd_slide ) );
+    wr32( b + 0x21, rd32( 0x118b5a8u + (uint32_t)nd_slide ) );
+    wr32( b + 0x78, rd32( 0x118b5b0u + (uint32_t)nd_slide ) );
+    wr32( b + 0x5c, rd32( 0x118b5b4u + (uint32_t)nd_slide ) );
+    wr32( b + 0x37, rd32( 0x118b5b8u + (uint32_t)nd_slide ) );
+    wr32( b + 0x3d, rd32( 0x118b5bcu + (uint32_t)nd_slide ) );
+    wr32( b + 0x67, rd32( 0x118b57cu + (uint32_t)nd_slide ) & 0xffffff00u );
+    wr32( b + 0x56, rd32( 0x118b580u + (uint32_t)nd_slide ) & 0xffffff00u );
+    wr32( b + 0x1a, rd32( 0x118b584u + (uint32_t)nd_slide ) );
+    wr32( b + 0x14, rd32( 0x118b588u + (uint32_t)nd_slide ) );
+
+    ebx = arg;
+    c->regs[ECX] = rd32( 0x118b58cu + (uint32_t)nd_slide );
+    c->regs[EDX] = rd32( 0x118b590u + (uint32_t)nd_slide );
+    c->regs[ESI] = rd32( 0x118b594u + (uint32_t)nd_slide );
+    c->regs[EBP] = rd32( 0x118b598u + (uint32_t)nd_slide );
+    cl = ((c->regs[ECX] & 0xffffff00u) | (ebx & 0xffu)) + 1u;
+    ebx += 0x00000100u;
+    mem = (ebx >> 8) & 0xffu;
+    wr8( ND_MVCOUNT + (uint32_t)nd_slide, (uint8_t)mem );
+    c->regs[ECX] = (cl & 0xffu) | (c->regs[ECX] & 0xffffff00u);
+    c->regs[EBX] = ebx;
+    c->regs[EDI] = edi - 0x140u;
+    c->eip = b;
+    return 1;
+}
+
 static void nat_arm_mvline( void )
 {
     uint32_t va = ND_MVLINE + (uint32_t)nd_slide, cb = 0;
     if (nd_mvline_skeleton_ok( va, &cb )) nat_register( va, NAT_MVLINE, "mvlineasm4" );
     else fprintf( stderr, "wasm_x86: mvlineasm4 skeleton differs at %08x - left interpreted\n", va );
+}
+
+static void nat_arm_mvline_dispatch( void )
+{
+    uint32_t va = ND_MVLINE_DISPATCH + (uint32_t)nd_slide;
+    if (nd_mvline_dispatch_skeleton_ok( va ))
+        nat_register( va - 5u, NAT_MVLINE_DISPATCH, "mvlineasm4 dispatcher" );
+    else fprintf( stderr, "wasm_x86: mvlineasm4 dispatcher skeleton differs at %08x - left interpreted\n", va );
 }
 
 /* ---- 8-bpp -> 32-bpp surface blit, run natively -----------------------------
@@ -1266,6 +1949,34 @@ static void nat_arm_surfblit( void )
 int g_mouse_dx, g_mouse_dy;      /* accumulated pointer-lock motion */
 int g_mouse_buttons;             /* live SDL button mask (win32u ring drain) */
 int g_mouse_x = 160, g_mouse_y = 100;
+int g_wasm_sdl_poll_fallback;    /* short window in which real SDL must drain input */
+
+/* Browser input is drained by win32u while SDL is being polled.  The native
+ * SDL_PollEvent hook cannot call back into the original Windows SDL thunk, so
+ * retain the posted events here and expose them as real SDL event records on
+ * the next poll.  This also avoids relying on the null Wine user driver to
+ * route a message to the SDL window. */
+#define WASM_INPUT_Q 128
+struct wasm_key_input { int vk, scancode, up; };
+static struct wasm_key_input g_wasm_key_q[WASM_INPUT_Q];
+static unsigned g_wasm_key_head, g_wasm_key_tail;
+struct wasm_mouse_input { int type, a, b, c; };
+static struct wasm_mouse_input g_wasm_mouse_q[WASM_INPUT_Q];
+static unsigned g_wasm_mouse_head, g_wasm_mouse_tail;
+void wasm_queue_key_input( int vk, int scancode, int up )
+{
+    unsigned next = (g_wasm_key_head + 1) % WASM_INPUT_Q;
+    if (next == g_wasm_key_tail) return;
+    g_wasm_key_q[g_wasm_key_head] = (struct wasm_key_input){ vk, scancode, up };
+    g_wasm_key_head = next;
+}
+void wasm_queue_mouse_input( int type, int a, int b, int c )
+{
+    unsigned next = (g_wasm_mouse_head + 1) % WASM_INPUT_Q;
+    if (next == g_wasm_mouse_tail) return;
+    g_wasm_mouse_q[g_wasm_mouse_head] = (struct wasm_mouse_input){ type, a, b, c };
+    g_wasm_mouse_head = next;
+}
 static int g_rel_mouse_on;       /* game asked for SDL relative (aiming) mode */
 static int g_mb_reported;        /* button mask the game has already been given */
 
@@ -1273,14 +1984,80 @@ static int g_mb_reported;        /* button mask the game has already been given 
  * windowID@8 which@12 button@16(u8) state@17(u8) clicks@18(u8) pad@19 x@20 y@24. */
 #define SDL_EV_MOUSEBUTTONDOWN 1025u
 #define SDL_EV_MOUSEBUTTONUP   1026u
+#define SDL_EV_KEYDOWN         768u
+#define SDL_EV_KEYUP           769u
+
+static int wasm_sdl_queued_event( struct x86cpu *c, uint32_t ev )
+{
+    if (g_wasm_key_tail != g_wasm_key_head)
+    {
+        struct wasm_key_input in = g_wasm_key_q[g_wasm_key_tail];
+        g_wasm_key_tail = (g_wasm_key_tail + 1) % WASM_INPUT_Q;
+        wr32( ev + 0, in.up ? SDL_EV_KEYUP : SDL_EV_KEYDOWN );
+        wr32( ev + 4, 0 );                 /* timestamp */
+        wr32( ev + 8, 1 );                 /* windowID */
+        wr8 ( ev + 12, in.up ? 0 : 1 );    /* state */
+        wr8 ( ev + 13, 0 );                /* repeat */
+        wr32( ev + 16, (uint32_t)in.scancode );
+        wr32( ev + 20, (uint32_t)in.vk );  /* SDL keycode == VK for these keys */
+        wr32( ev + 24, 0 );                /* modifier */
+        wr32( ev + 28, 0 );
+        gret( c, 1 );
+        return 1;
+    }
+    if (g_wasm_mouse_tail != g_wasm_mouse_head)
+    {
+        struct wasm_mouse_input in = g_wasm_mouse_q[g_wasm_mouse_tail];
+        g_wasm_mouse_tail = (g_wasm_mouse_tail + 1) % WASM_INPUT_Q;
+        if (in.type == 3)
+        {
+            wr32( ev + 0, SDL_EV_MOUSEMOTION ); wr32( ev + 4, 0 );
+            wr32( ev + 8, 1 ); wr32( ev + 12, 0 );
+            wr32( ev + 16, (uint32_t)g_mouse_buttons );
+            wr32( ev + 20, (uint32_t)in.a ); wr32( ev + 24, (uint32_t)in.b );
+            wr32( ev + 28, 0 ); wr32( ev + 32, 0 );
+        }
+        else
+        {
+            int button = in.a == 2 ? 3 : in.a == 1 ? 2 : 1;
+            wr32( ev + 0, in.type == 4 ? SDL_EV_MOUSEBUTTONDOWN : SDL_EV_MOUSEBUTTONUP );
+            wr32( ev + 4, 0 ); wr32( ev + 8, 1 ); wr32( ev + 12, 0 );
+            wr8 ( ev + 16, (uint8_t)button ); wr8( ev + 17, in.type == 4 );
+            wr8 ( ev + 18, 1 ); wr8( ev + 19, 0 );
+            wr32( ev + 20, (uint32_t)in.b ); wr32( ev + 24, (uint32_t)in.c );
+        }
+        gret( c, 1 );
+        return 1;
+    }
+    return 0;
+}
 
 static int sdl_poll_event( struct x86cpu *c )
 {
     static uint64_t last_synth_flip;
+    static int fast_empty = -1;
     uint32_t ev = garg( c, 0 );
     int dx, dy;
 
     if (!ev) return 0;
+    if (fast_empty < 0) fast_empty = getenv( "WASM_NO_FAST_EMPTY_POLL" ) ? 0 : 1;
+
+    /* In the browser, win32u marks polls that may have a newly posted input
+     * message so the real SDL queue gets a chance to drain it.  Outside that
+     * short window there cannot be an OS event source: all browser input enters
+     * through the same ring, and relative mouse/buttons are handled below.
+     * Returning zero here avoids re-entering the large SDL thunk on every empty
+     * gameplay poll.  The opt-out is useful as a differential control. */
+    if (!g_wasm_sdl_poll_fallback && fast_empty &&
+        (!g_rel_mouse_on || (!g_mouse_dx && !g_mouse_dy &&
+                             g_mouse_buttons == g_mb_reported)))
+    {
+        gret( c, 0 );
+        return 1;
+    }
+    if (g_wasm_sdl_poll_fallback) g_wasm_sdl_poll_fallback--;
+
+    if (wasm_sdl_queued_event( c, ev )) return 1;
 
     /* Emit one pending mouse-button transition per poll (a click is two: down
      * then up, so the game's drain loop still empties).  Gated on relative mode:
@@ -1545,6 +2322,10 @@ static struct ld_ent g_ld[LD_SETS][LD_WAYS];
 static uint64_t g_ld_calls, g_ld_hits;
 static int g_ld_filling, g_ld_verify;
 static uint64_t g_ld_ok, g_ld_bad;
+static uint64_t g_ld_last_key;
+static uint32_t g_ld_last_lo, g_ld_last_hi;
+static uint8_t g_ld_last_more, g_ld_last_valid;
+static int g_ld_last_on = -1;
 
 static int nat_libdivide( struct x86cpu *c )
 {
@@ -1560,6 +2341,13 @@ static int nat_libdivide( struct x86cpu *c )
     h   = (uint32_t)((key * 0x9e3779b97f4a7c15ull) >> 52) & (LD_SETS - 1);
 
     g_ld_calls++;
+    if (g_ld_last_on < 0) g_ld_last_on = getenv( "WASM_NO_LD_LAST" ) ? 0 : 1;
+    if (g_ld_last_on && !g_ld_verify && g_ld_last_valid && g_ld_last_key == key)
+    {
+        wr32( sret, g_ld_last_lo ); wr32( sret + 4, g_ld_last_hi ); wr8( sret + 8, g_ld_last_more );
+        g_ld_hits++;
+        goto ret_to_caller;
+    }
     for (w = 0; w < LD_WAYS; w++)
     {
         struct ld_ent *e = &g_ld[h][w];
@@ -1589,6 +2377,8 @@ static int nat_libdivide( struct x86cpu *c )
                 }
             }
             wr32( sret, e->lo ); wr32( sret + 4, e->hi ); wr8( sret + 8, e->more );
+            g_ld_last_key = e->key; g_ld_last_lo = e->lo; g_ld_last_hi = e->hi;
+            g_ld_last_more = e->more; g_ld_last_valid = 1;
             if (w) { struct ld_ent t = *e; g_ld[h][w] = g_ld[h][w-1]; g_ld[h][w-1] = t; }
             g_ld_hits++;
             goto ret_to_caller;
@@ -1606,6 +2396,8 @@ static int nat_libdivide( struct x86cpu *c )
         g_ld[h][0].hi   = rd32( sret + 4 );
         g_ld[h][0].more = rd8 ( sret + 8 );
         g_ld[h][0].used = 1;
+        g_ld_last_key = key; g_ld_last_lo = g_ld[h][0].lo; g_ld_last_hi = g_ld[h][0].hi;
+        g_ld_last_more = g_ld[h][0].more; g_ld_last_valid = 1;
     }
 ret_to_caller:
     c->regs[EAX] = sret;                         /* the generator returns the sret ptr */
@@ -1622,6 +2414,814 @@ static void nat_arm_libdivide( void )
         if (rd8( va + i ) != nd_libdiv_code[i])
         { fprintf( stderr, "wasm_x86: libdivide gen differs at %08x - left interpreted\n", va ); return; }
     nat_register( va, NAT_LIBDIV, "libdivide gen cache" );
+}
+
+/* Read-only msvcrt calls are common around the renderer's asset and command
+ * paths.  Keep these bounded to the guest address space and exact about the
+ * byte-wise result, then use the same cdecl return convention as the existing
+ * memcpy/memmove fast paths. */
+#define NAT_GUEST_END 0x70000000u
+static int nat_ret_eax( struct x86cpu *c, uint32_t esp, uint32_t value )
+{
+    c->regs[EAX] = value;
+    c->regs[ESP] = esp + 4;
+    c->eip = rd32( esp );
+    return 1;
+}
+
+/* SDL's REAL atomic getters are tiny cdecl wrappers around one guest-memory
+ * load.  They are called heavily by the renderer's lock-free queues.  Use a
+ * sequentially consistent host load so the shortcut retains the ordering
+ * promised by the original x86 instruction, while refusing addresses outside
+ * the guest linear-memory range. */
+#define ND_SDL_ATOMIC_GET     0x73cac0u
+#define ND_SDL_ATOMIC_GETPTR  0x73cad0u
+#define ND_SDL_ATOMIC_XADD    0x73cab0u
+static int nat_sdl_atomic_get( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 );
+    if (p > NAT_GUEST_END - 4u) return 0;
+    return nat_ret_eax( c, sp, __atomic_load_n( (uint32_t *)(uintptr_t)p, __ATOMIC_SEQ_CST ) );
+}
+
+/* SDL_TLSGet_REAL is a cdecl wrapper around SDL_SYS_GetTLSData.  Once SDL has
+ * initialized its per-thread array, the common path is only the bounds check
+ * and one indexed load; the initialization/slow path must remain in SDL. */
+#define ND_SDL_TLSGET 0x6ff720u
+#define ND_SDL_TLSKEY 0x831900u
+static int nat_sdl_tlsget( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], key = rd32( sp + 4 );
+    uint32_t data = rd32( ND_SDL_TLSKEY + (uint32_t)nd_slide );
+    uint32_t count, slot;
+
+    if (!data || !key || data >= NAT_GUEST_END - 4u) return 0;
+    count = rd32( data );
+    if (key > count || key > (NAT_GUEST_END - data + 4u) / 8u) return 0;
+    slot = data + key * 8u - 4u;
+    if (slot < data || slot >= NAT_GUEST_END - 4u) return 0;
+    return nat_ret_eax( c, sp, rd32( slot ) );
+}
+
+static void nat_arm_sdl_tlsget( void )
+{
+    uint32_t b = ND_SDL_TLSGET + (uint32_t)nd_slide;
+    /* The call displacement is relocation-dependent; the wrapper body and
+     * its branch/load/return sequence are the ABI guard. */
+    static const uint8_t code[] = {
+        0x53, 0x8b,0x5c,0x24,0x08, 0xe8,0,0,0,0, 0x85,0xc0,0x74,0x12,
+        0x85,0xdb,0x74,0x0e,0x39,0x18,0x72,0x0a,0x8b,0x44,0xd8,0xfc,
+        0x5b,0xc3
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(code); i++)
+        if (i < 5 || i > 9)
+            if (rd8( b + i ) != code[i])
+            { fprintf( stderr, "wasm_x86: SDL_TLSGet_REAL skeleton differs at %08x+%u (got %02x want %02x) - left interpreted\n",
+                        b, i, rd8( b + i ), code[i] ); return; }
+    if (!getenv( "WASM_NO_SDL_TLSGET" ))
+        nat_register( b, NAT_SDL_TLSGET, "SDL_TLSGet_REAL cached path" );
+}
+
+static int nat_sdl_atomic_xadd( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 ), v = rd32( sp + 8 );
+    if (p > NAT_GUEST_END - 4u) return 0;
+    return nat_ret_eax( c, sp,
+        __atomic_fetch_add( (uint32_t *)(uintptr_t)p, v, __ATOMIC_SEQ_CST ) );
+}
+
+/* Fast path for ntdll's stdcall RtlAcquireSRWLockExclusive.  The original
+ * implementation waits when the upper waiter field is nonzero.  Declining in
+ * that case is important: the interpreter remains responsible for the wait
+ * protocol, while the common uncontended case is one host atomic CAS. */
+static int nat_ntdll_srw_excl( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 );
+    if ((p & 3u) || p > NAT_GUEST_END - 4u) return 0;
+    uint32_t old = __atomic_load_n( (uint32_t *)(uintptr_t)p, __ATOMIC_SEQ_CST );
+    if (old != 0) return 0;                      /* no waiters or owners */
+    uint32_t expected = old;
+    if (!__atomic_compare_exchange_n( (uint32_t *)(uintptr_t)p, &expected,
+                                      0x00010001u, 0, __ATOMIC_SEQ_CST,
+                                      __ATOMIC_SEQ_CST )) return 0;
+    c->eip = rd32( sp );                         /* stdcall: ret 4 */
+    c->regs[ESP] = sp + 8;
+    return 1;
+}
+
+static int nat_ntdll_srw_shared( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 );
+    if ((p & 3u) || p > NAT_GUEST_END - 4u) return 0;
+    uint32_t old = __atomic_load_n( (uint32_t *)(uintptr_t)p, __ATOMIC_SEQ_CST );
+    if (old & 0xffffu) return 0;                  /* exclusive/waiter state */
+    uint32_t expected = old;
+    if (!__atomic_compare_exchange_n( (uint32_t *)(uintptr_t)p, &expected,
+                                      old + 0x00010000u, 0, __ATOMIC_SEQ_CST,
+                                      __ATOMIC_SEQ_CST )) return 0;
+    c->eip = rd32( sp );                           /* stdcall: ret 4 */
+    c->regs[ESP] = sp + 8;
+    return 1;
+}
+
+static int nat_ntdll_srw_excl_rel( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 );
+    if ((p & 3u) || p > NAT_GUEST_END - 4u) return 0;
+    uint32_t expected = 0x00010001u;
+    if (!__atomic_compare_exchange_n( (uint32_t *)(uintptr_t)p, &expected, 0,
+                                      0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) return 0;
+    c->eip = rd32( sp );
+    c->regs[ESP] = sp + 8;
+    return 1;
+}
+
+static int nat_ntdll_wake_all_empty( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4 );
+    if (!p || p > NAT_GUEST_END - 1u || !g_ntdll_wake_buckets) return 0;
+    uint32_t bucket = g_ntdll_wake_buckets + (((p >> 4) & 0xffu) * 12u);
+    uint32_t lock = bucket + 8u, expected = 0;
+    if (!__atomic_compare_exchange_n( (uint32_t *)(uintptr_t)lock, &expected,
+                                      0xffffffffu, 0, __ATOMIC_SEQ_CST,
+                                      __ATOMIC_SEQ_CST )) return 0;
+    int empty = rd32( bucket ) == 0;
+    __atomic_store_n( (uint32_t *)(uintptr_t)lock, 0, __ATOMIC_SEQ_CST );
+    if (!empty) return 0;
+    c->eip = rd32( sp );                           /* stdcall: ret 4 */
+    c->regs[ESP] = sp + 8;
+    return 1;
+}
+
+static int nat_arm_sdl_atomics( void )
+{
+    static const uint8_t code[] = { 0x8b,0x44,0x24,0x04,0x8b,0x00,0xc3 };
+    static const uint8_t xadd[] = { 0x8b,0x54,0x24,0x04,0x8b,0x44,0x24,0x08,
+                                    0xf0,0x0f,0xc1,0x02,0xc3 };
+    uint32_t get = ND_SDL_ATOMIC_GET + (uint32_t)nd_slide;
+    uint32_t ptr = ND_SDL_ATOMIC_GETPTR + (uint32_t)nd_slide;
+    uint32_t add = ND_SDL_ATOMIC_XADD + (uint32_t)nd_slide;
+    unsigned i; int gok = 1, pok = 1;
+    for (i = 0; i < sizeof(code); i++)
+    { if (rd8( get + i ) != code[i]) gok = 0; if (rd8( ptr + i ) != code[i]) pok = 0; }
+    if (gok && !getenv( "WASM_NO_SDL_ATOMIC_GET" ))
+        nat_register( get, NAT_SDL_ATOMIC_GET, "SDL_AtomicGet_REAL" );
+    if (pok && !getenv( "WASM_NO_SDL_ATOMIC_GET" ))
+        nat_register( ptr, NAT_SDL_ATOMIC_GETPTR, "SDL_AtomicGetPtr_REAL" );
+    if (!getenv( "WASM_NO_SDL_ATOMIC_XADD" ))
+    {
+        int ok = 1;
+        for (i = 0; i < sizeof(xadd); i++) if (rd8( add + i ) != xadd[i]) ok = 0;
+        if (ok) nat_register( add, NAT_SDL_ATOMIC_XADD, "SDL_AtomicAdd_REAL" );
+        else fprintf( stderr, "wasm_x86: SDL_AtomicAdd skeleton differs at %08x - left interpreted\n", add );
+    }
+    return gok && pok;
+}
+
+static int nat_memcmp( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), b = rd32( esp + 8 );
+    uint32_t n = rd32( esp + 12 ), i;
+    if (n > NAT_GUEST_END || a > NAT_GUEST_END - n || b > NAT_GUEST_END - n) return 0;
+    for (i = 0; i < n; i++)
+    {
+        uint8_t x = rd8( a + i ), y = rd8( b + i );
+        if (x != y) return nat_ret_eax( c, esp, (uint32_t)(int)x - (uint32_t)(int)y );
+    }
+    return nat_ret_eax( c, esp, 0 );
+}
+
+static int nat_strcmp( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), b = rd32( esp + 8 );
+    if (a >= NAT_GUEST_END || b >= NAT_GUEST_END) return 0;
+    for (;; a++, b++)
+    {
+        uint8_t x, y;
+        if (a >= NAT_GUEST_END || b >= NAT_GUEST_END) return 0;
+        x = rd8( a ); y = rd8( b );
+        if (x != y) return nat_ret_eax( c, esp, (uint32_t)(int)x - (uint32_t)(int)y );
+        if (!x) return nat_ret_eax( c, esp, 0 );
+    }
+}
+
+static int nat_strlen( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), p;
+    if (a >= NAT_GUEST_END) return 0;
+    for (p = a; p < NAT_GUEST_END; p++)
+        if (!rd8( p )) return nat_ret_eax( c, esp, p - a );
+    return 0;
+}
+
+static int nat_wcslen( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), p;
+    if (a >= NAT_GUEST_END || a & 1) return 0;
+    for (p = a; p + 1 < NAT_GUEST_END; p += 2)
+        if (!rd16( p )) return nat_ret_eax( c, esp, (p - a) / 2 );
+    return 0;
+}
+
+static int nat_wcschr( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), ch = rd32( esp + 8 ) & 0xffffu, p;
+    if (a >= NAT_GUEST_END || (a & 1)) return 0;
+    for (p = a; p + 1 < NAT_GUEST_END; p += 2)
+    {
+        uint32_t x = rd16( p );
+        if (x == ch) return nat_ret_eax( c, esp, p );
+        if (!x) return nat_ret_eax( c, esp, 0 );
+    }
+    return 0;
+}
+
+/* Entry is the verified movaps loop inside msvcrt memset, reached when a
+ * translated/interpreted caller lands at the loop body instead of the export
+ * boundary. EAX/EDX hold the repeated four-byte pattern, ESI is the current
+ * destination, and EBX is the exclusive end. Leave the machine at memset's
+ * epilogue so its original return convention and result are preserved. */
+static int nat_memset_loop( struct x86cpu *c )
+{
+    uint32_t cur = c->regs[ESI], end = c->regs[EBX], eax = c->regs[EAX], edx = c->regs[EDX];
+    if (cur >= NAT_GUEST_END || end > NAT_GUEST_END || end < cur || ((end - cur) & 31u)) return 0;
+    while (cur < end)
+    {
+        wr32( cur +  0, eax ); wr32( cur +  4, edx );
+        wr32( cur +  8, eax ); wr32( cur + 12, edx );
+        wr32( cur + 16, eax ); wr32( cur + 20, edx );
+        wr32( cur + 24, eax ); wr32( cur + 28, edx );
+        cur += 32;
+    }
+    c->regs[ESI] = cur;
+    c->eip = msvcrt_base + 0x49b8eu;
+    return 1;
+}
+
+static void jit_xmm_store( struct x86cpu *c, int src, uint32_t a, int n );
+static inline __attribute__((always_inline)) int cond( struct x86cpu *c, int cc );
+
+/* The loop is sometimes entered at an instruction boundary inside the
+ * movaps sequence by a translated caller.  Those four addresses intentionally
+ * cannot occupy nat_register's direct table independently: they all hash to
+ * the same 16-byte slot as the verified loop entry.  Handle them only when
+ * that slot is already owned by the loop, and only after the exact skeleton
+ * above has been checked. */
+static int nat_memset_loop_tail( struct x86cpu *c )
+{
+    uint32_t off = c->eip - g_msvcrt_memset_loop;
+    uint32_t cur = c->regs[ESI], end = c->regs[EBX];
+    if (off == 12) {
+        /* The preceding `cmp esi,ebx` has already produced the flags used by
+         * this `jb`; do not recompute them or disturb lazy-flag state. */
+        c->eip = cond( c, 2 ) ? g_msvcrt_memset_loop : msvcrt_base + 0x49b8eu;
+        return 1;
+    }
+    if (off != 3 && off != 6 && off != 10) return 0;
+    if (cur >= NAT_GUEST_END || end > NAT_GUEST_END || end < cur) return 0;
+    if (off == 3) { cur += 32; c->regs[ESI] = cur; }
+    if (off == 3 || off == 6) {
+        if (cur < 16 || cur > NAT_GUEST_END) return 0;
+        jit_xmm_store( c, 0, cur - 16, 16 );
+    }
+    set_lazy( c, K_SUB, cur, end, cur - end, 4 );
+    c->eip = cond( c, 2 ) ? g_msvcrt_memset_loop : msvcrt_base + 0x49b8eu;
+    return 1;
+}
+
+/* Runtime-generated CON dispatch glue uses absolute indirect jumps.  This is
+ * miss-only and restricted to the generated-code arena; for ff 25 the encoded
+ * immediate is a pointer to a guest memory slot, so perform both dereferences
+ * just as the interpreter's ModRM path does. */
+static int nat_dynamic_jmp( struct x86cpu *c )
+{
+    uint32_t a = c->eip, p;
+    static int enabled = -1;
+    static int trace = -1;
+    static unsigned trace_n;
+    static int div64_enabled = -1;
+    static uint32_t div64_addr;
+    static unsigned div64_hits;
+    if (enabled < 0) enabled = getenv( "WASM_NO_DYNAMIC_THUNK" ) ? 0 : 1;
+    if (!enabled) return 0;
+    /* Runtime-generated CON helpers end at ordinary near returns.  These
+     * instructions are fully self-contained: the interpreter's implementation
+     * only reads the stack return address (and, for C2, the immediate cleanup)
+     * before continuing at it.  Handle them directly in the generated arena to
+     * avoid re-entering the large opcode decoder for every tiny helper exit.
+     * Keep this independently switchable because generated code is self-
+     * modifying and the range guard is part of the safety contract. */
+    if (!getenv( "WASM_NO_DYNAMIC_RET" ) && a >= 0x00800000u && a < 0x01000000u)
+    {
+        uint32_t sp = c->regs[ESP], n = 0;
+        uint8_t op = rd8( a );
+        if (op == 0xc2) n = rd16( a + 1u );
+        else if (op != 0xc3) n = 0xffffffffu;
+        if (n != 0xffffffffu && sp <= NAT_GUEST_END - 4u - n)
+        {
+            c->eip = rd32( sp );
+            c->regs[ESP] = sp + 4u + n;
+            return 1;
+        }
+    }
+    if (div64_enabled < 0) div64_enabled = getenv( "WASM_NO_NATIVE_DIV64" ) ? 0 : 1;
+    if (div64_enabled && a == 0x008066f0u &&
+        rd8(a+47) == 0xe8)
+    {
+        div64_addr = a + 52u + rd32(a + 48);
+        if (div64_hits == 0) fprintf( stderr, "wasm_x86: DIV_ARM target=%08x\n", div64_addr );
+    }
+    if (div64_enabled && div64_addr && a == div64_addr &&
+        rd8(a+0) == 0x55 && rd8(a+1) == 0x57 && rd8(a+2) == 0x56 &&
+        rd8(a+3) == 0x53 && rd8(a+4) == 0x83 && rd8(a+5) == 0xec &&
+        rd8(a+6) == 0x2c && rd8(a+7) == 0x8b && rd8(a+8) == 0x54 &&
+        rd8(a+9) == 0x24 && rd8(a+10) == 0x44 && rd8(a+11) == 0x8b &&
+        rd8(a+12) == 0x44 && rd8(a+13) == 0x24 && rd8(a+14) == 0x40 &&
+        rd8(a+15) == 0xc7 && rd8(a+16) == 0x44 && rd8(a+17) == 0x24 &&
+        rd8(a+18) == 0x04 && rd8(a+19) == 0x00 && rd8(a+20) == 0x00 &&
+        rd8(a+21) == 0x00 && rd8(a+22) == 0x00)
+    {
+        uint32_t sp = c->regs[ESP], nlo = rd32(sp+4), nhi = rd32(sp+8);
+        uint32_t dlo = rd32(sp+12), dhi = rd32(sp+16), out = rd32(sp+20);
+        uint64_t n = (uint64_t)nlo | ((uint64_t)nhi << 32);
+        uint64_t d = (uint64_t)dlo | ((uint64_t)dhi << 32), q, r;
+        int ns = (nhi >> 31) != 0, ds = (dhi >> 31) != 0;
+        if (!d || out < 0x10000u || out > NAT_GUEST_END - 8u) return 0;
+        if (ns) n = 0 - n;
+        if (ds) d = 0 - d;
+        q = n / d; r = n % d;
+        if (ns) r = 0 - r;
+        if (ns != ds) q = 0 - q;
+        wr32(out, (uint32_t)r); wr32(out+4, (uint32_t)(r >> 32));
+        c->regs[EAX] = (uint32_t)q; c->regs[EDX] = (uint32_t)(q >> 32);
+        c->eip = rd32(sp); c->regs[ESP] = sp + 4;
+        if (++div64_hits == 1) fprintf( stderr, "wasm_x86: DIV_HIT target=%08x\n", a );
+        return 1;
+    }
+    if (trace < 0) trace = getenv( "WASM_TRACE_DYNAMIC" ) ? 1 : 0;
+    if (trace && g_flip_count > 100 && a >= 0x00800000u && a < 0x01000000u && trace_n < 128) {
+        fprintf( stderr, "DYNAMIC_MISS eip=%08x prev=%08x esp=%08x bytes=",
+                 a, c->eip, c->regs[ESP] );
+        for (unsigned i = 0; i < 64; i++) fprintf( stderr, "%02x", rd8(a+i) );
+        if (a == 0x008066f0u && rd8(a+47) == 0xe8)
+            fprintf( stderr, " target=%08x", a + 52u + rd32(a + 48) );
+        fprintf( stderr, "\n" );
+        trace_n++;
+    }
+    /* Small runtime feature predicate called from the generated CON loop:
+     *   xor eax,eax; cmp [f9922c],0; je ret; cmp [829e09],0; je ret;
+     *   cmp [829e08],0; je ret; edx=[dbfa60]; test edx,edx; je ret;
+     *   test byte [edx+494],4; jne ret; eax=[dde944]; ret
+     * Keep the conditional flags as well as the cdecl return value. */
+    if (a == 0x004da630u &&
+        rd8(a) == 0x31 && rd8(a + 1) == 0xc0 &&
+        rd8(a + 2) == 0x80 && rd8(a + 3) == 0x3d &&
+        rd32(a + 4) == 0x00f9922cu && rd8(a + 8) == 0x00 &&
+        rd8(a + 9) == 0x74 && rd8(a + 10) == 0x2a &&
+        rd8(a + 11) == 0x80 && rd8(a + 12) == 0x3d &&
+        rd32(a + 13) == 0x00829e09u && rd8(a + 17) == 0x00 &&
+        rd8(a + 18) == 0x74 && rd8(a + 19) == 0x21 &&
+        rd8(a + 20) == 0x80 && rd8(a + 21) == 0x3d &&
+        rd32(a + 22) == 0x00829e08u && rd8(a + 26) == 0x00 &&
+        rd8(a + 27) == 0x74 && rd8(a + 28) == 0x18)
+    {
+        uint32_t v;
+        c->regs[EAX] = 0;
+        set_lazy( c, K_LOGIC, 0, 0, 0, 4 );
+        v = rd8( 0x00f9922cu );
+        set_lazy( c, K_SUB, v, 0, v, 1 );
+        if (v == 0) goto feature_predicate_return;
+        v = rd8( 0x00829e09u );
+        set_lazy( c, K_SUB, v, 0, v, 1 );
+        if (v == 0) goto feature_predicate_return;
+        v = rd8( 0x00829e08u );
+        set_lazy( c, K_SUB, v, 0, v, 1 );
+        if (v == 0) goto feature_predicate_return;
+        v = rd32( 0x00dbfa60u );
+        set_lazy( c, K_LOGIC, v, v, v, 4 );
+        if (v == 0) goto feature_predicate_return;
+        if (v > NAT_GUEST_END - 0x498u) return 0;
+        v = rd8( v + 0x494u );
+        set_lazy( c, K_LOGIC, v, 4, v & 4u, 1 );
+        if (v & 4u) goto feature_predicate_return;
+        c->regs[EAX] = rd32( 0x00dde944u );
+    feature_predicate_return:
+        c->eip = rd32( c->regs[ESP] );
+        c->regs[ESP] += 4u;
+        return 1;
+    }
+    /* The CON compiler emits this stable wrapper around the already-translated
+     * bit-index helper at 0073ac20.  Keep the wrapper's ABI-visible effects,
+     * then enter the translated callee directly.  The continuation starts at
+     * +0x10 (the TEST EAX instruction) after the five-byte CALL. */
+    if (a >= 0x006f33a0u && a < 0x006f33a4u &&
+        rd8(a) == 0x53 && rd8(a + 1) == 0x83 && rd8(a + 2) == 0xec &&
+        rd8(a + 3) == 0x04 && rd8(a + 4) == 0xc7 && rd8(a + 5) == 0x04 &&
+        rd8(a + 6) == 0x24 && rd32(a + 7) == 0x00008000u &&
+        rd8(a + 11) == 0xe8 && rd32(a + 12) == 0x00047870u &&
+        rd8(0x0073ac20u + (uint32_t)nd_slide) == 0x57)
+    {
+        uint32_t oldesp = c->regs[ESP];
+        if (oldesp >= 0x40u && oldesp <= NAT_GUEST_END - 0x20u)
+        {
+            wr32( oldesp - 4u, c->regs[EBX] );
+            c->regs[ESP] = oldesp - 8u;
+            set_lazy( c, K_SUB, oldesp - 4u, 4u, oldesp - 8u, 4 );
+            wr32( c->regs[ESP], 0x8000u );
+            c->regs[ESP] -= 4u;
+            wr32( c->regs[ESP], a + 16u );
+            c->eip = 0x0073ac20u + (uint32_t)nd_slide;
+            return 1;
+        }
+    }
+    /* Wine's hot shared-user-data helper is a stack-neutral prologue around
+     * one absolute load:
+     *   mov edi,edi; push ebp; mov ebp,esp; mov eax,[0x7ffe0320];
+     *   pop ebp; ret
+     * The +2 entry is also reached through an indirect function pointer. */
+    if ((rd8(a) == 0x8b && rd8(a+1) == 0xff && rd8(a+2) == 0x55 &&
+         rd8(a+3) == 0x8b && rd8(a+4) == 0xec && rd8(a+5) == 0xa1 &&
+         rd32(a+6) == 0x7ffe0320u && rd8(a+10) == 0x5d && rd8(a+11) == 0xc3) ||
+        (rd8(a) == 0x55 && rd8(a+1) == 0x8b && rd8(a+2) == 0xec &&
+         rd8(a+3) == 0xa1 && rd32(a+4) == 0x7ffe0320u &&
+         rd8(a+8) == 0x5d && rd8(a+9) == 0xc3))
+    {
+        c->regs[EAX] = rd32( 0x7ffe0320u );
+        c->eip = rd32( c->regs[ESP] );
+        c->regs[ESP] += 4u;
+        return 1;
+    }
+    /* Continuation of the shuffle/call veneer above.  Its fixed epilogue is
+     * reached after the callee returns at +36:
+     *   mov [ebx],eax; mov [ebx+4],edx; mov eax,[esp+28];
+     *   mov edx,[esp+2c]; mov [ebx+8],eax; mov eax,ebx;
+     *   mov [ebx+c],edx; add esp,38; pop ebx; ret
+     * Match both the tail and the preceding call site so an unrelated ret
+     * sequence in generated code cannot enter this shortcut. */
+    if (a >= 0x00800000u + 36u && a < 0x01000000u &&
+        rd8(a) == 0x89 && rd8(a+1) == 0x03 &&
+        rd8(a+2) == 0x89 && rd8(a+3) == 0x53 && rd8(a+4) == 0x04 &&
+        rd8(a+5) == 0x8b && rd8(a+6) == 0x44 && rd8(a+7) == 0x24 && rd8(a+8) == 0x28 &&
+        rd8(a+9) == 0x8b && rd8(a+10) == 0x54 && rd8(a+11) == 0x24 && rd8(a+12) == 0x2c &&
+        rd8(a+13) == 0x89 && rd8(a+14) == 0x43 && rd8(a+15) == 0x08 &&
+        rd8(a+16) == 0x89 && rd8(a+17) == 0xd8 &&
+        rd8(a+18) == 0x89 && rd8(a+19) == 0x53 && rd8(a+20) == 0x0c &&
+        rd8(a+21) == 0x83 && rd8(a+22) == 0xc4 && rd8(a+23) == 0x38 &&
+        rd8(a+24) == 0x5b && rd8(a+25) == 0xc3 &&
+        rd8(a-5) == 0xe8 &&
+        ((rd8(a-36) == 0x89 && rd8(a-32) == 0x8b &&
+          rd8(a-28) == 0x89 && rd8(a-24) == 0x8b) ||
+         (a >= 0x00800000u + 52u && rd8(a-52) == 0x53 &&
+          rd8(a-51) == 0x83 && rd8(a-50) == 0xec && rd8(a-49) == 0x38 &&
+          rd8(a-5) == 0xe8)))
+    {
+        uint32_t esp = c->regs[ESP], ebx = c->regs[EBX];
+        if (ebx <= NAT_GUEST_END - 0x10u && esp <= NAT_GUEST_END - 0x30u)
+        {
+            wr32( ebx, c->regs[EAX] );
+            wr32( ebx + 4u, c->regs[EDX] );
+            c->regs[EAX] = rd32( esp + 0x28u );
+            c->regs[EDX] = rd32( esp + 0x2cu );
+            wr32( ebx + 8u, c->regs[EAX] );
+            c->regs[EAX] = ebx;
+            wr32( ebx + 0x0cu, c->regs[EDX] );
+            set_lazy( c, K_ADD, esp, 0x38u, esp + 0x38u, 4 );
+            esp += 0x38u;
+            c->regs[EBX] = rd32( esp );
+            c->eip = rd32( esp + 4u );
+            c->regs[ESP] = esp + 8u;
+            return 1;
+        }
+    }
+    /* Sibling veneer with a small stack frame and the same call/epilogue
+     * layout.  The sub instruction is included in the lazy flags, since its
+     * result may be observed by the called generated code. */
+    if (a >= 0x00800000u && a < 0x01000000u &&
+        rd8(a) == 0x53 && rd8(a+1) == 0x83 && rd8(a+2) == 0xec && rd8(a+3) == 0x38 &&
+        rd8(a+4) == 0x8d && rd8(a+5) == 0x44 && rd8(a+6) == 0x24 && rd8(a+7) == 0x28 &&
+        rd8(a+8) == 0x8b && rd8(a+9) == 0x54 && rd8(a+10) == 0x24 && rd8(a+11) == 0x50 &&
+        rd8(a+12) == 0x8b && rd8(a+13) == 0x5c && rd8(a+14) == 0x24 && rd8(a+15) == 0x40 &&
+        rd8(a+16) == 0x89 && rd8(a+17) == 0x44 && rd8(a+18) == 0x24 && rd8(a+19) == 0x10 &&
+        rd8(a+20) == 0x8b && rd8(a+21) == 0x44 && rd8(a+22) == 0x24 && rd8(a+23) == 0x4c &&
+        rd8(a+24) == 0x89 && rd8(a+25) == 0x54 && rd8(a+26) == 0x24 && rd8(a+27) == 0x0c &&
+        rd8(a+28) == 0x8b && rd8(a+29) == 0x54 && rd8(a+30) == 0x24 && rd8(a+31) == 0x48 &&
+        rd8(a+32) == 0x89 && rd8(a+33) == 0x44 && rd8(a+34) == 0x24 && rd8(a+35) == 0x08 &&
+        rd8(a+36) == 0x8b && rd8(a+37) == 0x44 && rd8(a+38) == 0x24 && rd8(a+39) == 0x44 &&
+        rd8(a+40) == 0x89 && rd8(a+41) == 0x54 && rd8(a+42) == 0x24 && rd8(a+43) == 0x04 &&
+        rd8(a+44) == 0x89 && rd8(a+45) == 0x04 && rd8(a+46) == 0x24 && rd8(a+47) == 0xe8)
+    {
+        uint32_t oldesp = c->regs[ESP], esp, target = a + 52u + rd32(a + 48);
+        if (oldesp >= 0x3cu && oldesp <= NAT_GUEST_END - 0x50u &&
+            target >= 0x00800000u && target < 0x01000000u)
+        {
+            wr32( oldesp - 4u, c->regs[EBX] );
+            esp = oldesp - 0x3cu;
+            c->regs[ESP] = esp;
+            set_lazy( c, K_SUB, oldesp - 4u, 0x38u, esp, 4 );
+            c->regs[EAX] = esp + 0x28u;
+            c->regs[EDX] = rd32( esp + 0x50u );
+            c->regs[EBX] = rd32( esp + 0x40u );
+            wr32( esp + 0x10u, c->regs[EAX] );
+            c->regs[EAX] = rd32( esp + 0x4cu );
+            wr32( esp + 0x0cu, c->regs[EDX] );
+            c->regs[EDX] = rd32( esp + 0x48u );
+            wr32( esp + 0x08u, c->regs[EAX] );
+            c->regs[EAX] = rd32( esp + 0x44u );
+            wr32( esp + 0x04u, c->regs[EDX] );
+            wr32( esp, c->regs[EAX] );
+            esp -= 4u;
+            wr32( esp, a + 52u );
+            c->regs[ESP] = esp;
+            c->eip = target;
+            return 1;
+        }
+    }
+    /* The runtime CON compiler emits this hot, flag-neutral argument shuffle
+     * before a direct call:
+     *   mov [esp+10],eax; mov eax,[esp+4c]; mov [esp+c],edx;
+     *   mov edx,[esp+48]; mov [esp+8],eax; mov eax,[esp+44];
+     *   mov [esp+4],edx; mov [esp],eax; call rel32
+     * It lives in the 0080… generated-code arena, outside the DLL thunk range
+     * below.  Execute the moves directly, then retain normal x86 call/return
+     * behavior by pushing the exact post-call EIP. */
+    if (a >= 0x00800000u && a < 0x01000000u &&
+        rd8(a) == 0x89 && rd8(a+1) == 0x44 && rd8(a+2) == 0x24 && rd8(a+3) == 0x10 &&
+        rd8(a+4) == 0x8b && rd8(a+5) == 0x44 && rd8(a+6) == 0x24 && rd8(a+7) == 0x4c &&
+        rd8(a+8) == 0x89 && rd8(a+9) == 0x54 && rd8(a+10) == 0x24 && rd8(a+11) == 0x0c &&
+        rd8(a+12) == 0x8b && rd8(a+13) == 0x54 && rd8(a+14) == 0x24 && rd8(a+15) == 0x48 &&
+        rd8(a+16) == 0x89 && rd8(a+17) == 0x44 && rd8(a+18) == 0x24 && rd8(a+19) == 0x08 &&
+        rd8(a+20) == 0x8b && rd8(a+21) == 0x44 && rd8(a+22) == 0x24 && rd8(a+23) == 0x44 &&
+        rd8(a+24) == 0x89 && rd8(a+25) == 0x54 && rd8(a+26) == 0x24 && rd8(a+27) == 0x04 &&
+        rd8(a+28) == 0x89 && rd8(a+29) == 0x04 && rd8(a+30) == 0x24 && rd8(a+31) == 0xe8)
+    {
+        uint32_t esp = c->regs[ESP];
+        uint32_t target = a + 36u + rd32( a + 32 );
+        if (esp >= 4u && esp <= NAT_GUEST_END - 0x50u &&
+            target >= 0x00800000u && target < 0x01000000u)
+        {
+            wr32( esp + 0x10, c->regs[EAX] );
+            c->regs[EAX] = rd32( esp + 0x4c );
+            wr32( esp + 0x0c, c->regs[EDX] );
+            c->regs[EDX] = rd32( esp + 0x48 );
+            wr32( esp + 0x08, c->regs[EAX] );
+            c->regs[EAX] = rd32( esp + 0x44 );
+            wr32( esp + 0x04, c->regs[EDX] );
+            wr32( esp, c->regs[EAX] );
+            esp -= 4u;
+            wr32( esp, a + 36u );
+            c->regs[ESP] = esp;
+            c->eip = target;
+            return 1;
+        }
+    }
+    if (a < 0x30000000u || a >= 0x40000000u) return 0;
+    /* Return from the callback veneer above.  The dispatcher has already
+     * popped the synthetic call return address, so this exact wrapper tail
+     * performs the original stdcall return and argument cleanup. */
+    if (a >= 12u && rd8(a) == 0xc2 && rd16(a + 1) == 0x14 &&
+        rd8(a - 12) == 0xb8 && rd8(a - 7) == 0xba &&
+        rd8(a - 2) == 0xff && rd8(a - 1) == 0xd2)
+    {
+        uint32_t esp = c->regs[ESP];
+        c->eip = rd32( esp );
+        c->regs[ESP] = esp + 4u + 0x14u;
+        return 1;
+    }
+    /* Runtime callback veneers repeatedly use:
+     *   mov eax,index; mov edx,veneer; call edx; ret 0x14
+     * The veneer is an absolute-indirect jump to a small wasm dispatch index.
+     * Preserve the call edge (including its return address) and enter that
+     * ordinary dispatcher directly.  This is deliberately byte-pattern and
+     * range guarded: arbitrary generated calls must remain interpreted. */
+    if (rd8(a) == 0xb8 && rd8(a + 5) == 0xba && rd8(a + 10) == 0xff &&
+        rd8(a + 11) == 0xd2 && rd8(a + 12) == 0xc2)
+    {
+        uint32_t veneer = rd32( a + 6 );
+        if (veneer >= 0x30000000u && veneer < NAT_GUEST_END - 6u &&
+            rd8(veneer) == 0xff && rd8(veneer + 1) == 0x25)
+        {
+            uint32_t slot = rd32( veneer + 2 );
+            if (slot < NAT_GUEST_END - 4u)
+            {
+                uint32_t dispatch = rd32( slot ), esp = c->regs[ESP];
+                if (dispatch && dispatch < 0x10000u && esp >= 4u)
+                {
+                    c->regs[EAX] = rd32( a + 1 );
+                    c->regs[EDX] = veneer;
+                    esp -= 4;
+                    wr32( esp, a + 12u );
+                    c->regs[ESP] = esp;
+                    c->eip = dispatch;
+                    return 1;
+                }
+            }
+        }
+    }
+    if (rd8(a) == 0x8b && rd8(a + 1) == 0xff && rd8(a + 2) == 0x55 &&
+        rd8(a + 3) == 0x8b && rd8(a + 4) == 0xec && rd8(a + 5) == 0x5d &&
+        rd8(a + 6) == 0xff && rd8(a + 7) == 0x25)
+    {
+        /* mov edi,edi; push ebp; mov ebp,esp; pop ebp is net-zero. */
+        p = a + 8;
+    }
+    else if (rd8(a) == 0xff && rd8(a + 1) == 0x25) p = a + 2;
+    else if (rd8(a) == 0x5d && rd8(a + 1) == 0xff && rd8(a + 2) == 0x25)
+    {
+        uint32_t esp = c->regs[ESP];
+        if (esp >= NAT_GUEST_END - 4u) return 0;
+        c->regs[EBP] = rd32( esp );
+        c->regs[ESP] = esp + 4;
+        p = a + 3;
+    }
+    else if (rd8(a) == 0x8b && rd8(a + 1) == 0xec && rd8(a + 2) == 0x5d &&
+             rd8(a + 3) == 0xff && rd8(a + 4) == 0x25)
+    {
+        uint32_t esp = c->regs[ESP];
+        if (esp >= NAT_GUEST_END - 4u) return 0;
+        c->regs[EBP] = rd32( esp );
+        c->regs[ESP] = esp + 4;
+        p = a + 5;
+    }
+    else return 0;
+    p = rd32( p );
+    if (p >= NAT_GUEST_END - 4u) return 0;
+    c->eip = rd32( p );
+    return 1;
+}
+
+
+
+/* RtlQueryPerformanceFrequency is a stdcall ntdll helper.  Wine's builtin
+ * implementation returns the fixed 10 MHz performance-counter frequency;
+ * keep the 64-bit store and callee-popped argument exactly as its guest body
+ * does, while avoiding interpretation of the same tiny routine on every timer
+ * query. */
+static int nat_qpf( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], p = rd32( esp + 4 );
+    if (p >= NAT_GUEST_END - 8u) return 0;
+    wr32( p, 10000000u ); wr32( p + 4, 0 );
+    c->regs[EAX] = 1;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 8;       /* ret $4: return address + one argument */
+    return 1;
+}
+
+/* RtlQueryPerformanceCounter is stdcall and returns the same monotonic clock
+ * that the guest frequency helper describes.  emscripten_get_now() is
+ * monotonic in the worker; converting milliseconds to 10 MHz ticks avoids the
+ * nested NtQueryPerformanceCounter/syscall path for the renderer's frame
+ * timing queries. */
+static int nat_qpc( struct x86cpu *c )
+{
+    extern double emscripten_get_now( void );
+    uint32_t esp = c->regs[ESP], p = rd32( esp + 4 );
+    uint64_t ticks = (uint64_t)(emscripten_get_now() * 10000.0);
+    if (p && p < NAT_GUEST_END - 8u) { wr32( p, (uint32_t)ticks ); wr32( p + 4, (uint32_t)(ticks >> 32) ); }
+    c->regs[EAX] = 1;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 8;       /* ret $4 */
+    return 1;
+}
+
+static int nat_gettid( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], teb = c->fs_base;
+    uint32_t self = teb ? rd32( teb + 0x18 ) : 0;
+    c->regs[EAX] = self ? rd32( self + 0x24 ) : 0;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+/* TlsGetValue is a one-argument stdcall helper.  Mirror kernelbase's exact
+ * TEB lookup, including the expansion-slot limit and LastError update. */
+static int nat_tlsgetvalue( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], teb = c->fs_base, index = rd32( esp + 4 );
+    uint32_t value = 0, slots;
+    if (!teb || teb >= NAT_GUEST_END - 0xf98u) return 0;
+    wr32( teb + 0x34, 0 ); /* SetLastError(ERROR_SUCCESS) */
+    if (index < 64)
+        value = rd32( teb + 0xe10u + index * 4u );
+    else if (index < 64 + 256 && (slots = rd32( teb + 0xf94u )) != 0 &&
+             slots < NAT_GUEST_END - 256u)
+        value = rd32( slots + (index - 64u) * 4u );
+    else if (index >= 64 + 256)
+    {
+        wr32( teb + 0x34, 87 ); /* ERROR_INVALID_PARAMETER */
+    }
+    c->regs[EAX] = value;
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 8;       /* stdcall: return address + one argument */
+    return 1;
+}
+
+static int nat_toascii( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP];
+    return nat_ret_eax( c, esp, rd32( esp + 4 ) & 0x7f );
+}
+
+/* GCC's i386 __udivmoddi4 helper is cdecl and takes five stack words:
+ * numerator low/high, denominator low/high, and an optional remainder
+ * pointer.  The cdecl callee pops only the return address; its caller owns
+ * the argument cleanup. */
+static int nat_udivmoddi4( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], rem = rd32( esp + 20 );
+    uint64_t num = (uint64_t)rd32( esp + 4 ) | ((uint64_t)rd32( esp + 8 ) << 32);
+    uint64_t den = (uint64_t)rd32( esp + 12 ) | ((uint64_t)rd32( esp + 16 ) << 32);
+    uint64_t quotient, remainder;
+
+    if (!den || (rem && rem >= NAT_GUEST_END - 8u)) return 0;
+    quotient = num / den;
+    remainder = num % den;
+    if (rem) { wr32( rem, (uint32_t)remainder ); wr32( rem + 4, (uint32_t)(remainder >> 32) ); }
+    c->regs[EAX] = (uint32_t)quotient;
+    c->regs[EDX] = (uint32_t)(quotient >> 32);
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+/* MSVCRT's tolower/toupper exports have a locale-dependent slow path, but
+ * their hot path is an exact unsigned-ASCII range check.  Only take that
+ * path when the guest CRT's locale pointer is initialized (the same test the
+ * guest code performs); otherwise return 0 so the interpreter retains the
+ * full locale semantics. */
+static int nat_casefold( struct x86cpu *c, int upper )
+{
+    uint32_t esp = c->regs[ESP];
+    uint32_t base = 0x10000000u + (uint32_t)msvcrt_slide;
+    uint32_t x = rd32( esp + 4 ), lo = upper ? 0x61u : 0x41u;
+    if (!msvcrt_slide || !rd32( base + 0x7dfa8u )) return 0;
+    if ((uint32_t)(x - lo) < 0x1au) x += upper ? (uint32_t)-0x20 : 0x20u;
+    return nat_ret_eax( c, esp, x );
+}
+
+static int nat_memchr( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), ch = rd32( esp + 8 );
+    uint32_t n = rd32( esp + 12 ), i;
+    if (n > NAT_GUEST_END || a > NAT_GUEST_END - n) return 0;
+    for (i = 0; i < n; i++) if (rd8( a + i ) == (uint8_t)ch)
+        return nat_ret_eax( c, esp, a + i );
+    return nat_ret_eax( c, esp, 0 );
+}
+
+static int nat_strncmp( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), b = rd32( esp + 8 );
+    uint32_t n = rd32( esp + 12 ), i;
+    if (n > NAT_GUEST_END || a > NAT_GUEST_END - n || b > NAT_GUEST_END - n) return 0;
+    for (i = 0; i < n; i++)
+    {
+        uint8_t x = rd8( a + i ), y = rd8( b + i );
+        if (x != y) return nat_ret_eax( c, esp, (uint32_t)(int)x - (uint32_t)(int)y );
+        if (!x) break;
+    }
+    return nat_ret_eax( c, esp, 0 );
+}
+
+static int nat_strchr( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], a = rd32( esp + 4 ), ch = rd32( esp + 8 ), p;
+    if (a >= NAT_GUEST_END) return 0;
+    for (p = a; p < NAT_GUEST_END; p++)
+    {
+        uint8_t x = rd8( p );
+        if (x == (uint8_t)ch) return nat_ret_eax( c, esp, p );
+        if (!x) break;
+    }
+    return nat_ret_eax( c, esp, 0 );
+}
+
+static int nat_strcpy( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], dst = rd32( esp + 4 ), src = rd32( esp + 8 );
+    uint32_t len = 0, i;
+    if (dst >= NAT_GUEST_END || src >= NAT_GUEST_END) return 0;
+    while (len < NAT_GUEST_END - src && rd8( src + len )) len++;
+    if (len == NAT_GUEST_END - src || dst > NAT_GUEST_END - len - 1) return 0;
+    for (i = 0; i <= len; i++) wr8( dst + i, rd8( src + i ));
+    return nat_ret_eax( c, esp, dst );
+}
+
+static int nat_strncpy( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP], dst = rd32( esp + 4 ), src = rd32( esp + 8 );
+    uint32_t n = rd32( esp + 12 ), i;
+    if (n > NAT_GUEST_END || dst > NAT_GUEST_END - n || src > NAT_GUEST_END - n) return 0;
+    for (i = 0; i < n; i++)
+    {
+        uint8_t x = rd8( src );
+        wr8( dst + i, x );
+        if (!x) { for (i++; i < n; i++) wr8( dst + i, 0); break; }
+        src++;
+    }
+    return nat_ret_eax( c, esp, dst );
 }
 
 /* ---- mhlineskipmodify: the masked HORIZONTAL mapper ------------------------
@@ -1798,12 +3398,62 @@ static int nat_inthash_find( struct x86cpu *c )
     uint32_t base = ND_GLSTATE_TAB + (uint32_t)nd_slide;
     uint32_t esp = c->regs[ESP];
 
-    if (tab < base || tab >= base + ND_GLSTATE_LEN) return 0;      /* not a GL table */
-    if (rd32( ND_GLPROC_PROBE + (uint32_t)nd_slide )) return 0;    /* a real GL: run it */
-    c->regs[EAX] = 0;                                /* "not found" */
-    c->eip = rd32( esp );
-    c->regs[ESP] = esp + 4;
-    return 1;
+    if (getenv( "WASM_NO_INTHASH_FAST" )) return 0;
+    if (tab >= base && tab < base + ND_GLSTATE_LEN) {
+        if (!rd32( ND_GLPROC_PROBE + (uint32_t)nd_slide )) {
+            c->regs[EAX] = 0;                        /* no GL => miss */
+            c->eip = rd32( esp ); c->regs[ESP] = esp + 4;
+            return 1;
+        }
+        /* With a real GL context, continue through the exact generic lookup
+         * below: the table contents, not the presence of GL, determine the
+         * return value. */
+    }
+
+    /* General inthash_find is the same register-argument function used by
+     * the GL cache.  The old shortcut deliberately declined this case, but
+     * the resulting interpreter walk was a dominant post-frame hotspot.
+     * Mirror the x86 body exactly: djb2 hash of the four key bytes, the
+     * multiply-high reduction selected by the table's shift, then the
+     * three-word bucket chain ([key], [value], [next]).  If the table is
+     * uninitialized or any guest pointer is malformed, leave it interpreted
+     * so its initialization/error path remains authoritative. */
+    {
+        uint32_t key = c->regs[EDX], buckets, count, shift8, shift;
+        uint32_t hash = 0x1505u, i, node, value;
+        uint64_t product;
+        if (tab >= NAT_GUEST_END - 0x10u || esp >= NAT_GUEST_END - 4u) return 0;
+        buckets = rd32( tab );
+        if (!buckets || buckets >= NAT_GUEST_END - 12u) return 0;
+        count = rd32( tab + 4 ); shift8 = rd8( tab + 0x0c ); shift = shift8 & 31u;
+        for (i = 0; i < 4; i++) { hash = hash * 33u ^ ((key >> (i * 8)) & 0xffu); }
+        if (rd32( tab + 8 )) {
+            product = (uint64_t)rd32( tab + 8 ) * hash;
+            if (shift8 & 0x40u) {
+                uint32_t high = (uint32_t)(product >> 32);
+                uint32_t delta = hash - high;
+                i = (delta >> 1) + high;
+                i >>= shift;
+            } else i = (uint32_t)(product >> 32) >> shift;
+        } else i = hash >> shift;
+        i = (i * count);                         /* x86 imul, low 32 bits */
+        i = hash - i;
+        if (i > 0x55555555u || buckets + i * 12u >= NAT_GUEST_END) return 0;
+        node = rd32( buckets + i * 12u );
+        for (unsigned n = 0; node && n < (1u << 20); n++) {
+            if (node >= NAT_GUEST_END - 12u) return 0;
+            if (rd32( node ) == key) {
+                value = rd32( node + 4 );
+                c->regs[EAX] = value; c->eip = rd32( esp); c->regs[ESP] = esp + 4;
+                return 1;
+            }
+            node = rd32( node + 8 );
+        }
+        if (node) return 0;                       /* malformed cycle */
+        c->regs[EAX] = 0xffffffffu;               /* normal miss */
+        c->eip = rd32( esp ); c->regs[ESP] = esp + 4;
+        return 1;
+    }
 }
 
 static void nat_arm_inthash( void )
@@ -1883,11 +3533,47 @@ static uint64_t g_v1_calls, g_v1_iters;
 static int nat_vlineasm1( struct x86cpu *c )
 {
     uint32_t b   = ND_VLINE1 + (uint32_t)nd_slide;
+    uint32_t entry = 0x631c90u + (uint32_t)nd_slide;
     uint32_t sh  = rd8 ( b + 0x04 ) & 31;
     uint32_t bpl = rd32( b + 0x07 );
     uint32_t eax = c->regs[EAX], ebx = c->regs[EBX], ecx = c->regs[ECX];
     uint32_t edx = c->regs[EDX], esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
     unsigned n = 0;
+
+    /* The true cdecl entry is 0x631c90, 0x67 bytes before beginvline.  The
+     * runtime trace proves its frame: push ebx/ecx/edx/esi/edi, load six args,
+     * test ECX, and on the nonzero path push EBP; the native loop's existing
+     * epilogue then sees exactly [saved EBP, EDI, ESI, EDX, ECX, EBX, RET]. */
+    if (c->eip == entry && !getenv( "WASM_NO_VLINE1_ENTRY" ))
+    {
+        uint32_t sp;
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ESI] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDI] );
+        sp = c->regs[ESP];
+        c->regs[EAX] = rd32( sp + 0x18 );
+        c->regs[EBX] = rd32( sp + 0x1c );
+        c->regs[ECX] = rd32( sp + 0x20 );
+        c->regs[EDX] = rd32( sp + 0x24 );
+        c->regs[ESI] = rd32( sp + 0x28 );
+        c->regs[EDI] = rd32( sp + 0x2c );
+        if (!c->regs[ECX])
+        {
+            c->regs[EBX] = rd32( sp ); c->regs[ECX] = rd32( sp + 4 );
+            c->regs[EDX] = rd32( sp + 8 ); c->regs[ESI] = rd32( sp + 12 );
+            c->regs[EDI] = rd32( sp + 16 ); c->eip = rd32( sp + 20 );
+            c->regs[ESP] = sp + 24;
+            return 1;
+        }
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBP] );
+        c->regs[EBP] = c->regs[EBX];
+        c->regs[ECX]++;
+        eax = c->regs[EAX]; ebx = c->regs[EBX]; ecx = c->regs[ECX];
+        edx = c->regs[EDX]; esi = c->regs[ESI]; edi = c->regs[EDI];
+        ebp = c->regs[EBP];
+    }
 
     if (!ecx) return 0;      /* would wrap to 4G iterations - let the guest have it */
 
@@ -1904,21 +3590,225 @@ static int nat_vlineasm1( struct x86cpu *c )
     } while (ecx);
     g_v1_calls++; g_v1_iters += n;
 
-    c->regs[EAX] = eax; c->regs[EBX] = ebx; c->regs[ECX] = ecx;
-    c->regs[EDX] = edx; c->regs[ESI] = esi; c->regs[EDI] = edi; c->regs[EBP] = ebp;
-    c->eip = b + ND_VLINE1_LEN;          /* the pop %ebp after the loop */
+    /* Complete the same epilogue as mvlineasm1 below.  The final instruction
+     * in this loop is `dec ecx`, so use K_DEC (which preserves CF) rather than
+     * modeling it as a subtraction. */
+    set_lazy(c,K_DEC,1,1,0,4);
+    { uint32_t sp=c->regs[ESP], result=edx;
+      c->regs[EBP]=rd32(sp); c->regs[EDI]=rd32(sp+4); c->regs[ESI]=rd32(sp+8);
+      c->regs[EDX]=rd32(sp+12); c->regs[ECX]=rd32(sp+16); c->regs[EBX]=rd32(sp+20);
+      c->regs[ESP]=sp+24; c->regs[EAX]=result; c->eip=rd32(sp+24); }
     return 1;
 }
 
 static void nat_arm_vline1( void )
 {
     uint32_t b = ND_VLINE1 + (uint32_t)nd_slide;
+    uint32_t entry = 0x631c90u + (uint32_t)nd_slide;
     unsigned i;
     for (i = 0; i < ND_VLINE1_LEN; i++)
         if (i == 0x04 || (i >= 0x07 && i <= 0x0a)) continue;   /* the patched fields */
         else if (rd8( b + i ) != nd_vline1_code[i])
         { fprintf( stderr, "wasm_x86: vlineasm1 skeleton differs at %08x - left interpreted\n", b ); return; }
+    for (i = 0; i < 29; i++)
+        if (rd8( entry + i ) != (const uint8_t[]){
+                0x53,0x51,0x52,0x56,0x57,0x8b,0x44,0x24,0x18,
+                0x8b,0x5c,0x24,0x1c,0x8b,0x4c,0x24,0x20,
+                0x8b,0x54,0x24,0x24,0x8b,0x74,0x24,0x28,
+                0x8b,0x7c,0x24,0x2c,0x85}[i])
+            { fprintf( stderr, "wasm_x86: vlineasm1 entry skeleton differs at %08x - loop only\n", entry + i ); goto loop_only; }
+    if (rd8( entry + 29 ) != 0x85 || rd8( entry + 30 ) != 0xc9 ||
+        rd8( entry + 31 ) != 0x75 || rd8( entry + 32 ) != 0x3c ||
+        rd8( 0x631cedu + (uint32_t)nd_slide ) != 0x55 ||
+        rd8( 0x631ceeu + (uint32_t)nd_slide ) != 0x89 ||
+        rd8( 0x631cefu + (uint32_t)nd_slide ) != 0xdd)
+        { fprintf( stderr, "wasm_x86: vlineasm1 entry branch skeleton differs - loop only\n" ); goto loop_only; }
+    if (!getenv( "WASM_NO_VLINE1_ENTRY" ))
+        nat_register( entry, NAT_VLINE1, "vlineasm1 entry" );
+loop_only:
     nat_register( b, NAT_VLINE1, "vlineasm1" );
+}
+
+/* ---- mvlineasm1: the masked single-column mapper --------------------------
+ * Same fixed-point walk as vlineasm1, but transparent texels (0xff) leave the
+ * destination untouched.  The two immediates are patched by the engine, so the
+ * skeleton check deliberately wildcards only those fields. */
+#define ND_MVLINE1 0x631db0u
+#define ND_MVLINE1_LEN 0x2au
+static const uint8_t nd_mvline1_code[ND_MVLINE1_LEN] = {
+    0x89,0xd3, 0xc1,0xeb,0, 0x0f,0xb6,0x1c,0x1e, 0x80,0xfb,0xff,
+    0x74,0x06, 0x8a,0x5c,0x1d,0, 0x88,0x1f, 0x01,0xc2,
+    0x81,0xc7,0,0,0,0, 0x83,0xe9,0x01, 0x73,0xdf,
+    0x5d,0x89,0xd0, 0x5f,0x5e,0x5a,0x59,0x5b,0xc3
+};
+static uint64_t g_mv1_calls, g_mv1_iters;
+static int nat_mvlineasm1( struct x86cpu *c )
+{
+    uint32_t b=ND_MVLINE1+(uint32_t)nd_slide, sh=rd8(b+4)&31, bpl=rd32(b+0x18);
+    uint32_t eax=c->regs[EAX], ebx=c->regs[EBX], ecx=c->regs[ECX];
+    uint32_t edx=c->regs[EDX], esi=c->regs[ESI], edi=c->regs[EDI], ebp=c->regs[EBP];
+    uint64_t n, total;
+
+    /* The public entry is five pushes plus six argument loads before the
+     * verified loop address.  The profile shows those pushes are hot because
+     * the old hook started at beginmvline.  Recreate the exact frame when the
+     * hook is armed at the true entry, then run the same loop/epilogue below. */
+    if (c->eip == b - 0x20u)
+    {
+        uint32_t sp;
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ESI] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDI] );
+        sp = c->regs[ESP];
+        c->regs[EAX] = rd32( sp + 0x18 );
+        c->regs[EBX] = rd32( sp + 0x1c );
+        c->regs[ECX] = rd32( sp + 0x20 );
+        c->regs[EDX] = rd32( sp + 0x24 );
+        c->regs[ESI] = rd32( sp + 0x28 );
+        c->regs[EDI] = rd32( sp + 0x2c );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBP] );
+        c->regs[EBP] = c->regs[EBX];
+        eax=c->regs[EAX]; ebx=c->regs[EBX]; ecx=c->regs[ECX];
+        edx=c->regs[EDX]; esi=c->regs[ESI]; edi=c->regs[EDI]; ebp=c->regs[EBP];
+        n=(uint64_t)ecx+1; total=n; if(n>(1u<<24)) return 0;
+    }
+    else
+    {
+        n=(uint64_t)ecx+1; total=n; if(n>(1u<<24)) return 0;
+    }
+    while(n--){ ebx=rd8(esi+(edx>>sh)); if((uint8_t)ebx!=0xff){ ebx=rd8(ebp+ebx); wr8(edi,(uint8_t)ebx); } edx+=eax; edi+=bpl; ecx--; }
+    g_mv1_calls++; g_mv1_iters += total;
+    /* Complete the fixed epilogue here.  The loop's final `sub ecx,1` leaves
+     * lazy subtraction flags live, while the epilogue restores every callee-
+     * saved register and returns with EAX=EDX from the loop.  Doing this at
+     * the native boundary removes six interpreted pops plus the ret on every
+     * single-column call; the skeleton still covers the original epilogue so
+     * a patched build cannot silently move this contract. */
+    if (total) set_lazy(c,K_SUB,0,1,0xffffffffu,4);
+    { uint32_t sp=c->regs[ESP], result=edx;
+      c->regs[EBP]=rd32(sp); c->regs[EDI]=rd32(sp+4); c->regs[ESI]=rd32(sp+8);
+      c->regs[EDX]=rd32(sp+12); c->regs[ECX]=rd32(sp+16); c->regs[EBX]=rd32(sp+20);
+      c->regs[ESP]=sp+24; c->regs[EAX]=result; c->eip=rd32(sp+24); }
+    return 1;
+}
+static void nat_arm_mvline1( void )
+{
+    uint32_t b=ND_MVLINE1+(uint32_t)nd_slide; unsigned i;
+    for(i=0;i<ND_MVLINE1_LEN;i++)
+        if(i==4 || (i>=22 && i<=25)) continue;
+        else if(rd8(b+i)!=nd_mvline1_code[i]){ fprintf(stderr,"wasm_x86: mvlineasm1 skeleton differs at %08x - left interpreted\n",b+i); return; }
+    if (!getenv( "WASM_NO_MVLINE1_ENTRY" ))
+        nat_register(b - 0x20u,NAT_MVLINE1,"mvlineasm1");
+}
+
+/* ---- non-power-of-two single-column mappers (opt-in) ----------------------
+ *
+ * These two SMC loops are structurally similar to vlineasm1, but their
+ * texture coordinate is the high half of an unsigned MUL.  The replacement
+ * must carry the complete architectural result of MUL and of the final
+ * texel/palette load: EAX and EDX are live at the epilogue, not just the
+ * pointer registers.  Keep this behind an explicit experiment flag until a
+ * longer differential run has covered all callers.
+ */
+#define ND_VLINE1NP2  0x631d59u
+#define ND_MVLINE1NP2 0x631e12u
+static uint64_t g_v1n_calls, g_v1n_iters, g_mv1n_calls, g_mv1n_iters;
+static int g_np2_trace_done;
+static int nat_line1np2( struct x86cpu *c, int masked )
+{
+    uint32_t b = (masked ? ND_MVLINE1NP2 : ND_VLINE1NP2) + (uint32_t)nd_slide;
+    if (c->eip == b - (masked ? 0x32u : 0x39u))
+    {
+        uint32_t sp;
+        /* Both NP2 entry points have the same cdecl six-argument prologue.
+         * Recreate its five saved registers and EBP frame, then load the
+         * arguments exactly as the guest does before entering the SMC loop. */
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ECX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[ESI] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EDI] );
+        sp = c->regs[ESP];
+        c->regs[EAX] = rd32( sp + 0x18 );
+        c->regs[EBX] = rd32( sp + 0x1c );
+        c->regs[ECX] = rd32( sp + 0x20 ) + 1u;
+        c->regs[EDX] = rd32( sp + 0x24 );
+        c->regs[ESI] = rd32( sp + 0x28 );
+        c->regs[EDI] = rd32( sp + 0x2c );
+        wr32( b + (masked ? 0x15u : 0x1au), c->regs[EBX] );
+        c->regs[ESP] -= 4; wr32( c->regs[ESP], c->regs[EBP] );
+        c->regs[EBP] = c->regs[EDX];
+    }
+    uint32_t step = c->regs[EBX], tex = c->regs[ESI], dst = c->regs[EDI];
+    uint32_t pos = c->regs[EBP], count = c->regs[ECX];
+    uint32_t mul = rd32(b + 1), stride = rd32(b + (masked ? 0x1f : 0x09));
+    uint32_t pal = rd32(b + (masked ? 0x15 : 0x1a));
+    uint64_t n = (uint64_t)count + 1, total = n;
+    if (getenv("WASM_NP2_TRACE")) {
+        if (!g_np2_trace_done) {
+            fprintf(stderr, "NP2TRACE eip=%08x ecx=%08x ebp=%08x ebx=%08x esi=%08x edi=%08x mul=%08x stride=%08x pal=%08x\n",
+                    b, count, pos, step, tex, dst, mul, stride, pal);
+            g_np2_trace_done = 1;
+        }
+        return 0;
+    }
+    if (!count || n > (1u << 24)) return 0;
+    while (n--) {
+        uint64_t product = (uint64_t)mul * pos;
+        uint32_t low = (uint32_t)product, high = (uint32_t)(product >> 32);
+        uint32_t write_dst = masked ? dst : dst + stride;
+        if ((uint64_t)tex + high > 0xffffffffu ||
+            (!masked && write_dst < dst) ||
+            (uint64_t)pal + 0xffu > 0xffffffffu ||
+            (uint64_t)write_dst > 0xffffffffu)
+            return 0;
+        uint8_t v;
+        c->regs[EAX] = low & 0xffu;
+        c->regs[EDX] = high;
+        v = rd8(tex + high);
+        c->regs[EAX] = v;
+        if (masked) {
+            if (v != 0xff) { v = rd8(pal + v); c->regs[EAX] = v; wr8(dst, v); }
+            pos += step; dst += stride;
+            c->regs[EBP] = pos; c->regs[EDI] = dst;
+            { uint32_t old = count; count--; set_lazy(c, K_SUB, old, 1, count, 4); }
+        } else {
+            dst = write_dst;
+            v = rd8(pal + v); c->regs[EAX] = v; wr8(dst, v);
+            pos += step;
+            c->regs[EBP] = pos; c->regs[EDI] = dst;
+            { uint32_t old = count; count--; set_lazy(c, K_DEC, old, 1, count, 4); }
+        }
+    }
+    c->regs[EBX] = step; c->regs[ECX] = count; c->regs[ESI] = tex;
+    c->regs[EBP] = pos; c->regs[EDI] = dst;
+    c->eip = b + (masked ? 0x28 : 0x22);
+    if (masked) { g_mv1n_calls++; g_mv1n_iters += total; }
+    else { g_v1n_calls++; g_v1n_iters += total; }
+    return 1;
+}
+static int nat_vlineasm1np2( struct x86cpu *c ) { return nat_line1np2(c, 0); }
+static int nat_mvlineasm1np2( struct x86cpu *c ) { return nat_line1np2(c, 1); }
+static void nat_arm_line1np2( void )
+{
+    uint32_t v = ND_VLINE1NP2 + (uint32_t)nd_slide, m = ND_MVLINE1NP2 + (uint32_t)nd_slide;
+    int vok = rd8(v) == 0xb8 && rd8(v+7) == 0x81 && rd8(v+0x18) == 0x8a;
+    int mok = rd8(m) == 0xb8 && rd8(m+0x1d) == 0x81 && rd8(m+0x13) == 0x8a;
+    /* Check the fixed prologue opcodes at the true entry; the two absolute
+     * SMC immediates are deliberately checked only by their instruction
+     * opcodes, since their values are rewritten by each call. */
+    if (vok && (rd8(v-0x39u+0x1d)!=0x89 || rd8(v-0x39u+0x1e)!=0x1d ||
+                rd8(v-0x39u+0x23)!=0x55 || rd8(v-0x39u+0x24)!=0x89 ||
+                rd8(v-0x39u+0x25)!=0xd5 || rd8(v-0x39u+0x28)!=0xa1 ||
+                rd8(v-0x39u+0x2d)!=0xa3)) vok = 0;
+    if (mok && (rd8(m-0x32u+0x1d)!=0x89 || rd8(m-0x32u+0x1e)!=0x1d ||
+                rd8(m-0x32u+0x23)!=0x55 || rd8(m-0x32u+0x24)!=0x89 ||
+                rd8(m-0x32u+0x25)!=0xd5 || rd8(m-0x32u+0x28)!=0xa1 ||
+                rd8(m-0x32u+0x2d)!=0xa3)) mok = 0;
+    if (vok) nat_register(v-0x39u, NAT_VLINE1NP2, "vlineasm1nonpow2");
+    if (mok) nat_register(m-0x32u, NAT_MVLINE1NP2, "mvlineasm1nonpow2");
 }
 
 /* ---- Bcrc32: the engine's CRC32, native ---------------------------------
@@ -2296,15 +4186,225 @@ static int nat_glthunk( struct x86cpu *c )
     unsigned nargs = g_gl_nargs[slot];
     uint32_t esp   = c->regs[ESP];
     uint32_t buf[20];
-    unsigned i;
-    typedef unsigned int (*ogl_fn_t)( void * );
+    unsigned i, j;
+    if (g_glcount < 0) g_glcount = getenv( "WASM_GLCOUNT" ) ? 1 : 0;
+    if (g_glcount) g_gl_calls[slot]++;
     buf[0] = c->fs_base;                                  /* TEB *teb */
     for (i = 0; i < nargs; i++) buf[1 + i] = rd32( esp + 4 + i * 4 );
-    ((ogl_fn_t *)g_ogl_handle)[code]( buf );
+    ((unsigned int (**)(void *))g_ogl_handle)[code]( buf );
     c->regs[EAX] = 0;
     c->eip = rd32( esp );
     c->regs[ESP] = esp + 4 + nargs * 4;
     return 1;
+}
+
+/* wglSwapBuffers is the one hot wrapper in this family with a return value.
+ * Its unix params are { TEB *, HDC, BOOL ret }, so keep the output slot and
+ * return it to the guest instead of using nat_glthunk's void convention. */
+static int nat_glthunk_ret_code( struct x86cpu *c, unsigned code )
+{
+    uint32_t esp = c->regs[ESP], buf[3];
+    buf[0] = c->fs_base;
+    buf[1] = rd32( esp + 4 );
+    buf[2] = 0;
+    ((unsigned int (**)(void *))g_ogl_handle)[code]( buf );
+    c->regs[EAX] = buf[2];
+    c->eip = rd32( esp );
+    c->regs[ESP] = esp + 8;
+    return 1;
+}
+static int nat_glthunk_ret( struct x86cpu *c )
+{ return nat_glthunk_ret_code( c, g_gl_code[NAT_SLOT( c->eip )] ); }
+static int nat_wglswap( struct x86cpu *c )
+{ return nat_glthunk_ret_code( c, 8 ); }
+
+/* WIN_GL_SwapWindow is a small cdecl wrapper around the already-native
+ * wglSwapBuffers thunk.  Its dynamic call is a persistent AOT boundary, so
+ * avoid reinterpreting the wrapper when the exact target is the validated
+ * wgl export.  A false host result resumes the wrapper after its call, which
+ * preserves SDL's existing error path. */
+#define ND_WIN_GL_SWAP 0x7a9fd0u
+static int nat_win_gl_swapwindow( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], window = rd32( sp + 8u );
+    uint32_t driver, hdc, target, callsp;
+    int result;
+
+    if (!g_ogl_handle || !g_wgl_swap_addr || !window ||
+        window >= NAT_GUEST_END - 0xa8u) return 0;
+    driver = rd32( window + 0xa4u );
+    if (!driver || driver >= NAT_GUEST_END - 0x10u) return 0;
+    hdc = rd32( driver + 0x0cu );
+    target = rd32( 0x1acfb64u + (uint32_t)nd_slide );
+    if (!hdc || target != g_wgl_swap_addr) return 0;
+
+    /* At entry the wrapper stack is [ret,arg0,arg1].  The target call needs
+     * [ret-continuation, hdc], and stdcall returns with ESP back at `sp`. */
+    callsp = sp - 8u;
+    if (callsp < 0x20000u) return 0;
+    wr32( callsp, ND_WIN_GL_SWAP + 0x19u + (uint32_t)nd_slide );
+    wr32( callsp + 4u, hdc );
+    c->regs[ESP] = callsp;
+    c->eip = target;
+    if (!nat_glthunk_ret_code( c, 8 )) { c->regs[ESP] = sp; c->eip = ND_WIN_GL_SWAP + (uint32_t)nd_slide; return 0; }
+    result = c->regs[EAX] != 0;
+    if (result)
+    {
+        c->regs[EAX] = 0;
+        c->eip = rd32( sp );
+        c->regs[ESP] = sp + 4u;
+        return 1;
+    }
+    c->eip = ND_WIN_GL_SWAP + 0x19u + (uint32_t)nd_slide;
+    c->regs[ESP] = sp;
+    return 1;
+}
+
+static void nat_arm_win_gl_swapwindow( void )
+{
+    static const uint8_t code[] = {
+        0x83,0xec,0x04, 0x8b,0x44,0x24,0x0c, 0x8b,0x80,0xa4,0x00,0x00,0x00,
+        0x8b,0x40,0x0c, 0x89,0x04,0x24, 0xff,0x15,0,0,0,0,
+        0x83,0xec,0x04, 0x85,0xc0,0x74,0x10, 0x31,0xc0,0x83,0xc4,0x04,0xc3
+    };
+    uint32_t b = ND_WIN_GL_SWAP + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(code); i++)
+        if (i < 21 || i > 24)
+            if (rd8( b + i ) != code[i])
+            { fprintf( stderr, "wasm_x86: WIN_GL_SwapWindow skeleton differs at %08x+%u - left interpreted\n", b, i ); return; }
+    if (!getenv( "WASM_NO_WIN_GL_SWAP" ))
+        nat_register( b, NAT_WIN_GL_SWAP, "WIN_GL_SwapWindow fast path" );
+}
+
+/* BoxedWine's pthread spin unlock is deliberately tiny and non-blocking:
+ * store -1 to the guest word and return zero (cdecl).  Keep spin_lock itself
+ * interpreted because its contention loop is synchronization-sensitive. */
+#define ND_PTHREAD_SPIN_UNLOCK 0x809330u
+static int nat_pthread_spin_unlock( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4u );
+    if (!p || p >= NAT_GUEST_END - 4u) return 0;
+    wr32( p, 0xffffffffu );
+    return nat_ret_eax( c, sp, 0 );
+}
+
+static void nat_arm_pthread_spin_unlock( void )
+{
+    static const uint8_t code[] = {
+        0x8b,0x44,0x24,0x04, 0xc7,0x00,0xff,0xff,0xff,0xff,
+        0x31,0xc0,0xc3
+    };
+    uint32_t b = ND_PTHREAD_SPIN_UNLOCK + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(code); i++)
+        if (rd8( b + i ) != code[i])
+        { fprintf( stderr, "wasm_x86: pthread_spin_unlock skeleton differs at %08x+%u - left interpreted\n", b, i ); return; }
+    if (!getenv( "WASM_NO_PTHREAD_SPIN_UNLOCK" ))
+        nat_register( b, NAT_PTHREAD_SPIN_UNLOCK, "pthread_spin_unlock" );
+}
+
+/* The matching spin-lock entry performs an unconditional xchg and then waits
+ * only when the old word is zero.  A CAS gives the identical uncontended
+ * transition without touching a held lock; races and contention fall back to
+ * the guest's pause/retry loop. */
+#define ND_PTHREAD_SPIN_LOCK 0x8092e0u
+static int nat_pthread_spin_lock( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], p = rd32( sp + 4u ), old, expected;
+    if (!p || p >= NAT_GUEST_END - 4u) return 0;
+    old = __atomic_load_n( (uint32_t *)(uintptr_t)p, __ATOMIC_SEQ_CST );
+    if (!old) return 0;
+    expected = old;
+    if (!__atomic_compare_exchange_n( (uint32_t *)(uintptr_t)p, &expected, 0,
+                                      0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) return 0;
+    return nat_ret_eax( c, sp, 0 );
+}
+
+static void nat_arm_pthread_spin_lock( void )
+{
+    static const uint8_t code[] = {
+        0x8b,0x44,0x24,0x04, 0x31,0xc9, 0x89,0xca, 0x87,0x10,
+        0x85,0xd2, 0x74,0x0a, 0x31,0xc0,0xc3, 0x8d,0xb4,0x26,
+        0x00,0x00,0x00,0x00, 0xf3,0x90, 0x8b,0x10, 0x85,0xd2,
+        0x74,0xf8, 0xeb,0xe4
+    };
+    uint32_t b = ND_PTHREAD_SPIN_LOCK + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(code); i++)
+        if (rd8( b + i ) != code[i])
+        { fprintf( stderr, "wasm_x86: pthread_spin_lock skeleton differs at %08x+%u - left interpreted\n", b, i ); return; }
+    if (!getenv( "WASM_NO_PTHREAD_SPIN_LOCK" ))
+        nat_register( b, NAT_PTHREAD_SPIN_LOCK, "pthread_spin_lock uncontended path" );
+}
+
+/* Initialized pthread_getspecific is a read of the current thread's key
+ * array, bracketed by a spin lock and a cancellation no-op check.  Keep all
+ * setup/cancellation/contended cases in the guest and shortcut only the fully
+ * initialized, unlocked case. */
+#define ND_PTHREAD_GETSPECIFIC 0x80a800u
+#define ND_PTHREAD_ONCE_STATE  0x1acd0f4u
+#define ND_PTHREAD_TLS_KEY     0x83373cu
+#define ND_PTHREAD_CANCEL_FLAG 0x1acd0fcu
+static int nat_pthread_getspecific( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], teb = c->fs_base;
+    uint32_t tlskey, obj = 0, key, count, flags, values, value = 0;
+    uint32_t lock;
+
+    if (!teb || teb >= NAT_GUEST_END - 0xf98u ||
+        rd32( ND_PTHREAD_ONCE_STATE + (uint32_t)nd_slide ) != 1u) return 0;
+    tlskey = rd32( ND_PTHREAD_TLS_KEY + (uint32_t)nd_slide );
+    if (tlskey < 64u)
+        obj = rd32( teb + 0xe10u + tlskey * 4u );
+    else if (tlskey < 320u)
+    {
+        uint32_t slots = rd32( teb + 0xf94u );
+        if (slots && slots < NAT_GUEST_END - 256u)
+            obj = rd32( slots + (tlskey - 64u) * 4u );
+    }
+    if (!obj || obj >= NAT_GUEST_END - 0x3cu) return 0;
+    lock = __atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST );
+    if (lock != 0xffffffffu) return 0;
+
+    key = rd32( sp + 4u );
+    count = rd32( obj + 0x28u );
+    if (key < count)
+    {
+        flags = rd32( obj + 0x30u );
+        values = rd32( obj + 0x2cu );
+        if (flags && values && key < NAT_GUEST_END - flags &&
+            values < NAT_GUEST_END - 4u && key <= (NAT_GUEST_END - values) / 4u &&
+            rd8( flags + key ) != 0)
+            value = rd32( values + key * 4u );
+    }
+    if (__atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST ) != lock)
+        return 0;
+
+    /* pthread_getspecific calls pthread_testcancel after unlocking.  Its
+     * entry returns immediately when cancellation is disabled or no request
+     * is pending; require exactly that observable condition before eliding it. */
+    if (!(rd8( obj + 0x20u ) & 0x0cu) &&
+        rd32( ND_PTHREAD_CANCEL_FLAG + (uint32_t)nd_slide )) return 0;
+    return nat_ret_eax( c, sp, value );
+}
+
+static void nat_arm_pthread_getspecific( void )
+{
+    static const uint8_t head[] = { 0x55,0x57,0x56,0x53,0x83,0xec,0x1c };
+    uint32_t b = ND_PTHREAD_GETSPECIFIC + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(head); i++)
+        if (rd8( b + i ) != head[i])
+        { fprintf( stderr, "wasm_x86: pthread_getspecific skeleton differs at %08x+%u - left interpreted\n", b, i ); return; }
+    if (rd8( b + 0x0du ) != 0x89 || rd8( b + 0x0eu ) != 0xc6 || rd8( b + 0x14u ) != 0xa1)
+    { fprintf( stderr, "wasm_x86: pthread_getspecific body differs at %08x - left interpreted\n", b ); return; }
+    /* Keep this experimental shortcut opt-in.  It can alter the guest's
+     * cancellation/ TLS ordering, so a normal browser run must stay on the
+     * interpreter until it has been proven against the complete startup and
+     * render path. */
+    if (getenv( "WASM_PTHREAD_GETSPECIFIC" ) && !getenv( "WASM_NO_PTHREAD_GETSPECIFIC" ))
+        nat_register( b, NAT_PTHREAD_GETSPECIFIC, "pthread_getspecific cached path" );
 }
 
 /* Core opengl32 entry points worth bypassing (exported, 4-byte args).  Sized by
@@ -2315,7 +4415,7 @@ static const struct { const char *name; uint16_t code; uint8_t nargs; } nd_glthu
     { "glLoadMatrixf", 168, 1 }, { "glMultMatrixf",185, 1 }, { "glLoadIdentity",166, 0 },
     { "glEnable",       81, 1 }, { "glDisable",     72, 1 }, { "glBlendFunc",    16, 2 },
     { "glColor4f",      46, 4 }, { "glDrawArrays",  74, 3 }, { "glBindTexture",  14, 2 },
-    { "glDepthFunc",    69, 1 },
+    { "glDepthFunc",    69, 1 }, { "glTexSubImage2D", 316, 9 },
 };
 
 static void nat_arm_glthunks( struct x86cpu *c )
@@ -2338,9 +4438,20 @@ static void nat_arm_glthunks( struct x86cpu *c )
         if (!a) { fprintf( stderr, "wasm_x86: GL %s not exported - skipped\n", nd_glthunks[k].name ); continue; }
         nat_register( a, NAT_GLTHUNK, nd_glthunks[k].name );
         if (g_nat_addr[NAT_SLOT(a)] == a)                /* registered (not a slot clash) */
-        { g_gl_code[NAT_SLOT(a)] = nd_glthunks[k].code; g_gl_nargs[NAT_SLOT(a)] = nd_glthunks[k].nargs; }
+        { unsigned s = NAT_SLOT(a); g_gl_code[s] = nd_glthunks[k].code; g_gl_nargs[s] = nd_glthunks[k].nargs; }
+    }
+    {
+        uint32_t a = pe_export( g_ogl_base, "wglSwapBuffers" );
+        if (a)
+        {   /* This address collides in the compact native table on the current
+             * opengl32 image.  Keep it as a separate exact-address hook so
+             * registering it cannot replace another native function. */
+            g_wgl_swap_addr = a;
+            fprintf( stderr, "wasm_x86: native wglSwapBuffers @ %08x (exact)\n", a );
+        }
     }
     g_gl_armed = 1;
+    nat_arm_win_gl_swapwindow();
     fprintf( stderr, "wasm_x86: GL-thunk bypass armed (opengl32=%08x handle=%08x)\n",
              g_ogl_base, (uint32_t)g_ogl_handle );
 }
@@ -2387,12 +4498,93 @@ static void nat_arm_glext( struct x86cpu *c )
         { fprintf( stderr, "wasm_x86: GL ext %s slot clash @%08x - not bypassed\n", nd_glext[k].name, a ); continue; }
         nat_register( a, NAT_GLTHUNK, nd_glext[k].name );
         if (g_nat_addr[NAT_SLOT(a)] == a)
-        { g_gl_code[NAT_SLOT(a)] = nd_glext[k].code; g_gl_nargs[NAT_SLOT(a)] = nd_glext[k].nargs; }
+        { unsigned s = NAT_SLOT(a); g_gl_code[s] = nd_glext[k].code; g_gl_nargs[s] = nd_glext[k].nargs; }
     }
     if (g_glext_done == (1u << n) - 1u || ++g_glext_tries > 200000)
     {
         g_glext_armed = 1;
         fprintf( stderr, "wasm_x86: GL-thunk ext bypass armed (done=%03x)\n", g_glext_done );
+    }
+}
+
+static int nat_floor( struct x86cpu *c );
+static int nat_pow( struct x86cpu *c );
+static void nat_arm_pow( void );
+
+#define ND_SETUP_VLINE  0x631ba0u
+#define ND_SETUP_PVLINE 0x631c00u
+#define ND_SETUP_MVLINE 0x631c60u
+#define ND_SETUP_TVLINE 0x631c80u
+
+/* The four Build mapper setup routines are tiny self-modifying writers.  The
+ * frame profile's 0x631bfe representative is the return path of this family,
+ * not the expensive mapper body.  Reproduce the writes directly, preserving
+ * the cdecl return and the observable EAX/flags result of setupvlineasm. */
+static int nat_setup_mapper( struct x86cpu *c, int kind )
+{
+    uint32_t sp = c->regs[ESP], a = rd32( sp + 4 ), b = (uint32_t)nd_slide;
+    uint8_t al = (uint8_t)a;
+
+    if (kind == NAT_SETUP_VLINE)
+    {
+        uint8_t neg = (uint8_t)-al, ah = (uint8_t)(al - 0x10);
+        uint32_t mask = (1u << (neg & 31)) - 1u;
+        wr8( 0x631cb5u+b, al ); wr8( 0x631cfbu+b, al );
+        wr8( 0x6321f5u+b, al ); wr8( 0x63221cu+b, al );
+        wr8( 0x632278u+b, al ); wr8( 0x63227du+b, al );
+        wr8( 0x63228bu+b, ah ); wr8( 0x632286u+b, neg );
+        wr8( 0x632150u+b, neg ); wr8( 0x632153u+b, neg );
+        wr8( 0x6321bbu+b, neg ); wr8( 0x6321beu+b, neg );
+        wr32( 0x6321fau+b, mask ); wr32( 0x632230u+b, mask );
+        c->regs[EAX] = mask;
+        set_lazy( c, K_DEC, 1u << (neg & 31), 1, mask, 4 );
+    }
+    else if (kind == NAT_SETUP_MVLINE)
+    {
+        wr8( 0x631db4u+b, al ); wr8( 0x632604u+b, al );
+        wr8( 0x6325e5u+b, al ); wr8( 0x6325b1u+b, al );
+        wr8( 0x6325aeu+b, al ); c->regs[EAX] = a;
+    }
+    else if (kind == NAT_SETUP_TVLINE)
+    {
+        wr8( 0x632004u+b, al ); c->regs[EAX] = a;
+    }
+    else if (kind == NAT_SETUP_PVLINE) /* prosetupvlineasm */
+    {
+        uint8_t neg = (uint8_t)-al, ah = (uint8_t)(al - 0x10);
+        uint32_t mask = (1u << (neg & 31)) - 1u;
+        wr8( 0x631cb5u+b, al ); wr8( 0x631cfbu+b, al );
+        wr8( 0x632405u+b, al ); wr8( 0x632438u+b, al );
+        wr8( 0x63249bu+b, al ); wr8( 0x6324a0u+b, al );
+        wr8( 0x6324aeu+b, ah ); wr8( 0x6324a9u+b, neg );
+        wr8( 0x632365u+b, neg ); wr8( 0x632368u+b, neg );
+        wr8( 0x6323cdu+b, neg ); wr8( 0x6323d0u+b, neg );
+        wr32( 0x63240au+b, mask ); wr32( 0x632449u+b, mask );
+        c->regs[EAX] = mask;
+        set_lazy( c, K_DEC, 1u << (neg & 31), 1, mask, 4 );
+    }
+    else return 0;
+    c->regs[ESP] = sp + 4; c->eip = rd32( sp );
+    return 1;
+}
+
+static void nat_arm_setup_mappers( void )
+{
+    static const struct { uint32_t a, ret; int kind; const char *name; } t[] = {
+        { ND_SETUP_VLINE,  0x5e, NAT_SETUP_VLINE,     "setupvlineasm" },
+        { ND_SETUP_PVLINE, 0x5e, NAT_SETUP_PVLINE,  "prosetupvlineasm" },
+        { ND_SETUP_MVLINE, 0x1d, NAT_SETUP_MVLINE,     "setupmvlineasm" },
+        { ND_SETUP_TVLINE, 0x0d, NAT_SETUP_TVLINE,     "setuptvlineasm" },
+    };
+    if (!getenv( "WASM_SETUP_MAPPERS" )) return;
+    for (unsigned i = 0; i < sizeof(t)/sizeof(t[0]); i++)
+    {
+        uint32_t a = t[i].a + (uint32_t)nd_slide;
+        if (rd8(a) != 0x8b || rd8(a+1) != 0x44 || rd8(a+2) != 0x24 ||
+            rd8(a+3) != 0x04 || rd8(a+4) != 0xa2 ||
+            rd8(a+t[i].ret) != 0xc3)
+            continue;
+        nat_register( a, t[i].kind, t[i].name );
     }
 }
 
@@ -2402,19 +4594,63 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_MIXSTEREO) return nat_mixstereo( c );
     if (kind == NAT_MIDEBUG)  return nat_noop_ret( c );
     if (kind == NAT_GLTHUNK)  return nat_glthunk( c );
+    if (kind == NAT_GLTHUNK_RET) return nat_glthunk_ret( c );
     if (kind == NAT_PALMATCH) return nat_pal_closest( c );
     if (kind == NAT_AGELOOP) return nat_ageloop( c );
     if (kind == NAT_AGEBLOCKS) return nat_ageblocks( c );
+    if (kind == NAT_SETUPQRHLINE) return nat_setupqrhline( c );
     if (kind == NAT_QRHLINE) return nat_qrhline( c );
+    if (kind == NAT_VLINE_DISPATCH) return nat_vline_dispatch( c );
+    if (kind == NAT_MVLINE_DISPATCH) return nat_mvline_dispatch( c );
     if (kind == NAT_VLINE)   return nat_vlineasm4( c );
     if (kind == NAT_MVLINE)  return nat_mvlineasm4( c );
     if (kind == NAT_MHLINE)  return nat_mhlineskip( c );
     if (kind == NAT_VLINE1)  return nat_vlineasm1( c );
+    if (kind == NAT_MVLINE1) return nat_mvlineasm1( c );
+    if (kind == NAT_VLINE1NP2) return nat_vlineasm1np2( c );
+    if (kind == NAT_MVLINE1NP2) return nat_mvlineasm1np2( c );
     if (kind == NAT_GLSTATE) return nat_inthash_find( c );
     if (kind == NAT_GLSAMPLER) return nat_glsampler( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
+    if (kind == NAT_MEMCMP) return nat_memcmp( c );
+    if (kind == NAT_STRCMP) return nat_strcmp( c );
+    if (kind == NAT_STRLEN) return nat_strlen( c );
+    if (kind == NAT_MEMCHR) return nat_memchr( c );
+    if (kind == NAT_STRncmp) return nat_strncmp( c );
+    if (kind == NAT_STRCHR) return nat_strchr( c );
+    if (kind == NAT_STRCPY) return nat_strcpy( c );
+    if (kind == NAT_STRNCPY) return nat_strncpy( c );
+    if (kind == NAT_WCSLEN) return nat_wcslen( c );
+    if (kind == NAT_WCSCHR) return nat_wcschr( c );
+    if (kind == NAT_MEMSET_LOOP) return nat_memset_loop( c );
+    if (kind == NAT_QPF) return nat_qpf( c );
+    if (kind == NAT_QPC) return nat_qpc( c );
+    if (kind == NAT_GETTID) return nat_gettid( c );
+    if (kind == NAT_TLSGETVALUE) return nat_tlsgetvalue( c );
+    if (kind == NAT_SDL_TLSGET) return nat_sdl_tlsget( c );
+    if (kind == NAT_TOASCII) return nat_toascii( c );
+    if (kind == NAT_UDIVMODDI4) return nat_udivmoddi4( c );
+    if (kind == NAT_TOLOWER) return nat_casefold( c, 0 );
+    if (kind == NAT_TOUPPER) return nat_casefold( c, 1 );
+    if (kind == NAT_SDL_ATOMIC_GET || kind == NAT_SDL_ATOMIC_GETPTR)
+        return nat_sdl_atomic_get( c );
+    if (kind == NAT_SDL_ATOMIC_XADD) return nat_sdl_atomic_xadd( c );
+    if (kind == NAT_NTDLL_SRW_EXCL) return nat_ntdll_srw_excl( c );
+    if (kind == NAT_NTDLL_SRW_SHARED) return nat_ntdll_srw_shared( c );
+    if (kind == NAT_NTDLL_SRW_EXCL_REL) return nat_ntdll_srw_excl_rel( c );
+    if (kind == NAT_NTDLL_WAKE_ALL_EMPTY) return nat_ntdll_wake_all_empty( c );
+    if (kind == NAT_FLOOR) return nat_floor( c );
+    if (kind == NAT_POW) return nat_pow( c );
+    if (kind == NAT_WIN_GL_SWAP) return nat_win_gl_swapwindow( c );
+    if (kind == NAT_PTHREAD_SPIN_UNLOCK) return nat_pthread_spin_unlock( c );
+    if (kind == NAT_PTHREAD_SPIN_LOCK) return nat_pthread_spin_lock( c );
+    if (kind == NAT_PTHREAD_GETSPECIFIC) return nat_pthread_getspecific( c );
+    if (kind == NAT_GDI_RELAY) return nat_gdi_relay( c );
+    if (kind == NAT_GDI_CLIENT) return nat_gdi_client_ptr( c );
+    if (kind >= NAT_SETUP_VLINE && kind <= NAT_SETUP_TVLINE)
+        return nat_setup_mapper( c, kind );
     switch (kind)
     {
     case NAT_SDL_OPEN:     return sdl_open_audio( c, 0 );
@@ -2699,7 +4935,7 @@ static int lf_of( struct x86cpu *c )
     }
 }
 
-static int cond( struct x86cpu *c, int cc )
+static inline __attribute__((always_inline)) int cond( struct x86cpu *c, int cc )
 {
     int res;
     switch (cc >> 1)
@@ -2838,6 +5074,45 @@ static void wr80( uint32_t a, double v )
 }
 static double rdf32( uint32_t a ) { uint32_t u = rd32(a); float f; memcpy(&f,&u,4); return (double)f; }
 static double rdf64( uint32_t a ) { uint64_t u = rd32(a) | ((uint64_t)rd32(a+4)<<32); double d; memcpy(&d,&u,8); return d; }
+/* ntdll's floor is a cdecl double -> ST(0) helper.  Keep this opt-in until
+ * the guest/host exceptional-value matrix is checked; the stack transition is
+ * explicit so it cannot be mistaken for an integer-returning CRT hook. */
+static int nat_floor( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP];
+    if (esp > NAT_GUEST_END - 12) return 0;
+    fp_push( c, floor( rdf64( esp + 4 ) ) );
+    c->regs[ESP] = esp + 4;
+    c->eip = rd32( esp );
+    return 1;
+}
+/* The executable's _pow is a large libmingw32 x87 routine.  The emulator's
+ * x87 representation is double precision, so host pow() has the same visible
+ * precision; push the result as ST(0), exactly like the guest cdecl return. */
+static int nat_pow( struct x86cpu *c )
+{
+    uint32_t esp = c->regs[ESP];
+    if (esp > NAT_GUEST_END - 20) return 0;
+    fp_push( c, pow( rdf64( esp + 4 ), rdf64( esp + 12 ) ) );
+    c->regs[ESP] = esp + 4;         /* caller removes the two double args */
+    c->eip = rd32( esp );
+    return 1;
+}
+
+static void nat_arm_pow( void )
+{
+    /* _pow at 0x7b8360: push esi; push ebx; sub esp,0x44; fld qword args. */
+    static const uint8_t head[] = {
+        0x56,0x53,0x83,0xec,0x44,0xdd,0x44,0x24,0x50,
+        0xdd,0x44,0x24,0x58
+    };
+    uint32_t a = 0x7b8360u + (uint32_t)nd_slide;
+    unsigned i;
+    if (getenv( "WASM_NO_POW" )) return;
+    for (i = 0; i < sizeof(head); i++) if (rd8( a + i ) != head[i]) break;
+    if (i == sizeof(head)) nat_register( a, NAT_POW, "pow (x87 return)" );
+    else fprintf( stderr, "wasm_x86: pow skeleton differs at %08x+%x - left interpreted\n", a, i );
+}
 static void   wrf32( uint32_t a, double v ) { float f = (float)v; uint32_t u; memcpy(&u,&f,4); wr32(a,u); }
 static void   wrf64( uint32_t a, double v ) { uint64_t u; memcpy(&u,&v,8); wr32(a,(uint32_t)u); wr32(a+4,(uint32_t)(u>>32)); }
 /* set condition codes C3,C2,C0 in the status word from a compare of a vs b */
@@ -2857,6 +5132,30 @@ static void fp_compare_eflags( struct x86cpu *c, double a, double b )
     else if (a < b)           c->eflags |= CF;
     else if (a == b)          c->eflags |= ZF;
     c->lf_size = 0;
+}
+static void jit_x87_fxam( struct x86cpu *c )
+{
+    double v=fp_get(c,0); int cls=fpclassify(v), cc=0;
+    /* FXAM: C3,C2,C0 classify ST0; C1 reports its sign.  The interpreter
+     * stores the x87 stack as doubles, so the IEEE-754 classes are the
+     * available representation of normal, denormal, zero, infinity, NaN. */
+    if(cls==FP_NAN) cc=0x0100;             /* NaN: 001 */
+    else if(cls==FP_INFINITE) cc=0x0500;   /* infinity: 011 */
+    else if(cls==FP_ZERO) cc=0x4000;       /* zero: 100 */
+    else if(cls==FP_SUBNORMAL) cc=0x4200;  /* denormal: 110 */
+    else cc=0x0400;                        /* normal: 010 */
+    c->fpsw=(c->fpsw&~0x4700)|cc|(signbit(v)?0x0200:0);
+}
+static void jit_x87_math( struct x86cpu *c, int op )
+{
+    double x=fp_get(c,0);
+    switch(op){
+    case 0: fp_set(c,0,exp2(x)-1.0); break;       /* f2xm1 */
+    case 1: fp_set(c,0,ldexp(x,(int)fp_get(c,1))); break; /* fscale */
+    case 2: fp_set(c,0,fmod(x,fp_get(c,1))); break; /* fprem/fprem1 */
+    case 3: fp_set(c,0,sin(x)); break;
+    case 4: fp_set(c,0,cos(x)); break;
+    }
 }
 
 /* forward: the native seam that runs when the guest calls a dispatcher */
@@ -3701,16 +6000,574 @@ static void do_muldiv( struct x86cpu *c, int regf, uint32_t a, int sz )
     case 7: if(sz==4){ int64_t dd=((int64_t)c->regs[EDX]<<32)|c->regs[EAX]; if(a){c->regs[EAX]=(uint32_t)(dd/(int32_t)a); c->regs[EDX]=(uint32_t)(dd%(int32_t)a);} } break;
     }
 }
+static int      g_jit_on, g_jit_verify, g_jit_filling, g_verify_budget;
+/* Small XMM primitives used by the AOT translator.  Memory writes go through
+ * wr8 so differential verification can undo them just like interpreter writes. */
+static void jit_xmm_load( struct x86cpu *c, int dst, uint32_t a, int n, int zero )
+{
+    int i;
+    if (zero) for (i=0;i<16;i++) c->xmm[dst][i]=0;
+    for (i=0;i<n;i++) c->xmm[dst][i]=rd8(a+(uint32_t)i);
+}
+static void jit_xmm_store( struct x86cpu *c, int src, uint32_t a, int n )
+{
+    int i; for (i=0;i<n;i++) wr8(a+(uint32_t)i,c->xmm[src][i]);
+}
+static void jit_xmm_copy( struct x86cpu *c, int dst, int src, int n )
+{
+    uint8_t t[16]; memcpy(t,c->xmm[src],n); memcpy(c->xmm[dst],t,n);
+}
+static void jit_xmm_xor( struct x86cpu *c, int dst, int src )
+{
+    int i; for (i=0;i<16;i++) c->xmm[dst][i]^=c->xmm[src][i];
+}
+static void jit_xmm_unpcklo( struct x86cpu *c, int dst, int src )
+{
+    uint8_t d[16],s[16]; memcpy(d,c->xmm[dst],16); memcpy(s,c->xmm[src],16);
+    memcpy(c->xmm[dst],d,4); memcpy(c->xmm[dst]+4,s,4);
+    memcpy(c->xmm[dst]+8,d+4,4); memcpy(c->xmm[dst]+12,s+4,4);
+}
+static void jit_xmm_movehalf( struct x86cpu *c, int dst, int src, int high )
+{
+    uint8_t t[8]; int so=high?0:8,doff=high?8:0;
+    memcpy(t,c->xmm[src]+so,8); memcpy(c->xmm[dst]+doff,t,8);
+}
+static void jit_xmm_binss( struct x86cpu *c, int dst, int src, uint32_t a,
+                           int ismem, int op )
+{
+    float x,y,r; memcpy(&x,c->xmm[dst],4);
+    if (ismem) { uint32_t v=rd32(a); memcpy(&y,&v,4); }
+    else memcpy(&y,c->xmm[src],4);
+    if (op==0) r=x+y; else if (op==1) r=x-y; else if (op==2) r=x*y; else r=x/y;
+    memcpy(c->xmm[dst],&r,4);
+}
+static void jit_xmm_rsqrtss( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    float x; uint32_t v; if(ismem){v=rd32(a);memcpy(&x,&v,4);}else memcpy(&x,c->xmm[src],4);
+    x=1.0f/sqrtf(x); memcpy(c->xmm[dst],&x,4);
+}
+static void jit_xmm_loadhalf( struct x86cpu *c, int dst, uint32_t a, int high )
+{
+    int i,off=high?8:0; for(i=0;i<8;i++) c->xmm[dst][off+i]=rd8(a+(uint32_t)i);
+}
+static void jit_xmm_storehalf( struct x86cpu *c, int src, uint32_t a, int high )
+{
+    int i,off=high?8:0; for(i=0;i<8;i++) wr8(a+(uint32_t)i,c->xmm[src][off+i]);
+}
+static void jit_xmm_store16( struct x86cpu *c, int src, uint32_t a )
+{ int i; for(i=0;i<16;i++) wr8(a+(uint32_t)i,c->xmm[src][i]); }
+static void jit_xmm_cvtsi2ss( struct x86cpu *c, int dst, uint32_t v )
+{
+    float f=(float)(int32_t)v; memcpy(c->xmm[dst],&f,4);
+}
+static void jit_xmm_compare_ss( struct x86cpu *c, int dst, int src,
+                                uint32_t a, int ismem )
+{
+    float x,y; uint32_t v;
+    memcpy(&x,c->xmm[dst],4);
+    if (ismem) { v=rd32(a); memcpy(&y,&v,4); } else memcpy(&y,c->xmm[src],4);
+    c->eflags &= ~(ZF|PF|CF|OF|SF|AF); c->lf_size=0;
+    if (isnan(x)||isnan(y)) c->eflags|=ZF|PF|CF;
+    else if (x<y) c->eflags|=CF; else if (x==y) c->eflags|=ZF;
+}
+static void jit_xmm_cmpps( struct x86cpu *c, int dst, int src, uint32_t a,
+                           int ismem, int pred, int scalar )
+{
+    uint8_t s[16],d[16],o[16];int i,n=scalar?1:4;memcpy(d,c->xmm[dst],16);for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];memcpy(o,d,16);
+    for(i=0;i<n;i++){float x,y;int un,r;memcpy(&x,d+i*4,4);memcpy(&y,s+i*4,4);un=isnan(x)||isnan(y);switch(pred){case 0:r=x==y;break;case 1:r=x<y;break;case 2:r=x<=y;break;case 3:r=un;break;case 4:r=!(x==y);break;case 5:r=!(x<y);break;case 6:r=!(x<=y);break;default:r=!un;}uint32_t z=r?0xffffffffu:0;memcpy(o+i*4,&z,4);}memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_logic( struct x86cpu *c, int dst, int src, uint32_t a,
+                           int ismem, int op )
+{
+    int i; for(i=0;i<16;i++){ uint8_t s=ismem?rd8(a+(uint32_t)i):c->xmm[src][i]; if(op==0)c->xmm[dst][i]&=s; else if(op==1)c->xmm[dst][i]|=s; else if(op==2)c->xmm[dst][i]=(uint8_t)(~c->xmm[dst][i])&s; else c->xmm[dst][i]^=s; }
+}
+static int32_t jit_xmm_cvtss2si( struct x86cpu *c, int src, uint32_t a,
+                                 int ismem, int truncv )
+{
+    float f; uint32_t v; if(ismem){v=rd32(a);memcpy(&f,&v,4);}else memcpy(&f,c->xmm[src],4);
+    return truncv?(int32_t)f:(int32_t)lrintf(f);
+}
+static void jit_xmm_minmaxss( struct x86cpu *c, int dst, int src, uint32_t a,
+                              int ismem, int ismax )
+{
+    float x,y,r; uint32_t v; memcpy(&x,c->xmm[dst],4);
+    if(ismem){v=rd32(a);memcpy(&y,&v,4);}else memcpy(&y,c->xmm[src],4);
+    r=ismax?((x>y)?x:y):((x<y)?x:y); memcpy(c->xmm[dst],&r,4);
+}
+static void jit_xmm_binps( struct x86cpu *c, int dst, int src, uint32_t a,
+                           int ismem, int op )
+{
+    float x,y,r; uint8_t s[16]; int i; for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<4;i++){memcpy(&x,c->xmm[dst]+i*4,4);memcpy(&y,s+i*4,4);if(op==0)r=x+y;else if(op==1)r=x-y;else if(op==2)r=x*y;else r=x/y;memcpy(c->xmm[dst]+i*4,&r,4);}
+}
+static void jit_xmm_binps3( struct x86cpu *c, int dst, int src1, int src2,
+                            uint32_t a, int ismem, int op )
+{
+    float x,y,r; uint8_t s[16]; int i; memcpy(s,c->xmm[src1],16);
+    if(ismem) for(i=0;i<16;i++) s[ i ]=rd8(a+(uint32_t)i);
+    for(i=0;i<4;i++){memcpy(&x,c->xmm[src1]+i*4,4);memcpy(&y,ismem?s+i*4:c->xmm[src2]+i*4,4);if(op==0)r=x+y;else if(op==1)r=x-y;else if(op==2)r=x*y;else r=x/y;memcpy(c->xmm[dst]+i*4,&r,4);}
+}
+static void jit_xmm_sqrt( struct x86cpu *c, int dst, int src )
+{
+    uint8_t s[16]; int i; memcpy(s,c->xmm[src],16); for(i=0;i<4;i++){float x,r;memcpy(&x,s+i*4,4);r=sqrtf(x);memcpy(c->xmm[dst]+i*4,&r,4);}
+}
+static void jit_xmm_movd_load( struct x86cpu *c, int dst, uint32_t v )
+{
+    int i; for(i=0;i<16;i++) c->xmm[dst][i]=0; memcpy(c->xmm[dst],&v,4);
+}
+static void jit_xmm_movd_store( struct x86cpu *c, int src, uint32_t a )
+{
+    uint32_t v; memcpy(&v,c->xmm[src],4); wr32(a,v);
+}
+static uint32_t jit_xmm_movd_value( struct x86cpu *c, int src )
+{
+    uint32_t v; memcpy(&v,c->xmm[src],4); return v;
+}
+static void jit_xmm_movq_load( struct x86cpu *c, int dst, const uint8_t *src )
+{
+    int i; for(i=0;i<16;i++) c->xmm[dst][i]=0; memcpy(c->xmm[dst],src,8);
+}
+static void jit_xmm_movq_store( struct x86cpu *c, int src, uint32_t a )
+{
+    int i; for(i=0;i<8;i++) wr8(a+(uint32_t)i,c->xmm[src][i]);
+}
+static void jit_mmx_movq_load( struct x86cpu *c, int dst, const uint8_t *src )
+{
+    int i; for(i=0;i<16;i++)c->xmm[dst][i]=0; memcpy(c->xmm[dst],src,8);
+}
+static void jit_mmx_movq_store( struct x86cpu *c, int src, uint32_t a )
+{
+    int i;for(i=0;i<8;i++)wr8(a+(uint32_t)i,c->xmm[src][i]);
+}
+static void jit_xmm_pinsrw( struct x86cpu *c, int dst, uint32_t v, uint32_t imm )
+{ uint32_t i=imm&7; c->xmm[dst][i*2]=(uint8_t)v; c->xmm[dst][i*2+1]=(uint8_t)(v>>8); }
+static void jit_xmm_psadbw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[16],d[16],o[16]; int i,j; uint64_t sum;
+    memcpy(d,c->xmm[dst],16); for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i]; memset(o,0,16);
+    for(j=0;j<2;j++){sum=0;for(i=0;i<8;i++)sum+=(d[j*8+i]>s[j*8+i])?d[j*8+i]-s[j*8+i]:s[j*8+i]-d[j*8+i];memcpy(o+j*8,&sum,8);} memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_pmuludq( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[16],d[16],o[16]; uint32_t x,y; uint64_t z; int i; memcpy(d,c->xmm[dst],16);
+    for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i]; memset(o,0,16);
+    for(i=0;i<2;i++){memcpy(&x,d+i*8,4);memcpy(&y,s+i*8,4);z=(uint64_t)x*y;memcpy(o+i*8,&z,8);} memcpy(c->xmm[dst],o,16);
+}
+static void jit_mmx_logic( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int op )
+{
+    int i;for(i=0;i<8;i++){uint8_t s=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];if(op==0)c->xmm[dst][i]&=s;else if(op==1)c->xmm[dst][i]|=s;else if(op==2)c->xmm[dst][i]=(uint8_t)(~c->xmm[dst][i]&s);else c->xmm[dst][i]^=s;}
+}
+static void jit_mmx_pmullw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[8];int i;for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<4;i++){int16_t x=(int16_t)((uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8)),y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8));uint16_t z=(uint16_t)(x*y);c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}
+}
+static void jit_mmx_addsub( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width, int sub )
+{
+    uint8_t s[8];int i;for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    if(width==1)for(i=0;i<8;i++)c->xmm[dst][i]=(uint8_t)(sub?c->xmm[dst][i]-s[i]:c->xmm[dst][i]+s[i]);
+    else if(width==2)for(i=0;i<4;i++){uint16_t x=(uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8),y=(uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8),z=(uint16_t)(sub?x-y:x+y);c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}
+    else{uint32_t x,y,z;for(i=0;i<2;i++){memcpy(&x,c->xmm[dst]+4*i,4);memcpy(&y,s+4*i,4);z=sub?x-y:x+y;memcpy(c->xmm[dst]+4*i,&z,4);}}
+}
+static void jit_mmx_pmulhw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[8];int i;for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<4;i++){int16_t x=(int16_t)((uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8)),y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8));int16_t z=(int16_t)(((int32_t)x*y)>>16);c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}
+}
+static void jit_mmx_satw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int sub )
+{ uint8_t s[8];int i;for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<4;i++){int x=(int16_t)((uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8)),y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8)),z=sub?x-y:x+y;z=z<-32768?-32768:z>32767?32767:z;c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}}
+static void jit_xmm_pmulhw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{ uint8_t s[16];int i;for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<8;i++){int16_t x=(int16_t)((uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8)),y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8)),z=(int16_t)(((int32_t)x*y)>>16);c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}}
+static void jit_mmx_unpck( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width, int high )
+{uint8_t d[8],s[8],o[8];int i,off=high?4:0,n=4/width;memcpy(d,c->xmm[dst],8);for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<n;i++){memcpy(o+i*2*width,d+off+i*width,width);memcpy(o+(i*2+1)*width,s+off+i*width,width);}memcpy(c->xmm[dst],o,8);}
+static uint32_t jit_mmx_count( struct x86cpu *c, int src )
+{ uint32_t v;memcpy(&v,c->xmm[src],4);return v; }
+static void jit_mmx_shift( struct x86cpu *c, int dst, uint32_t count, int width, int arith, int left )
+{
+    int i,n=8/width,bits=width*8;if(count>=(uint32_t)bits){for(i=0;i<n;i++){int neg=arith&&!left&&(c->xmm[dst][i*width+width-1]&0x80);memset(c->xmm[dst]+i*width,neg?0xff:0,width);}return;}
+    for(i=0;i<n;i++){uint64_t v=0;memcpy(&v,c->xmm[dst]+i*width,width);if(left)v<<=count;else if(arith){int64_t s=(int64_t)(v<<(64-bits));s>>=(64-bits);v=(uint64_t)(s>>count);}else v>>=count;memcpy(c->xmm[dst]+i*width,&v,width);}
+}
+static void jit_mmx_cmp( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width, int gt )
+{
+    uint8_t s[8],d[8];int i;memcpy(d,c->xmm[dst],8);for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];for(i=0;i<8;i+=width){int64_t x=width==1?(int8_t)d[i]:(int16_t)((uint16_t)d[i]|((uint16_t)d[i+1]<<8)),y=width==1?(int8_t)s[i]:(int16_t)((uint16_t)s[i]|((uint16_t)s[i+1]<<8));if(width==4){x=(int32_t)((uint32_t)d[i]|((uint32_t)d[i+1]<<8)|((uint32_t)d[i+2]<<16)|((uint32_t)d[i+3]<<24));y=(int32_t)((uint32_t)s[i]|((uint32_t)s[i+1]<<8)|((uint32_t)s[i+2]<<16)|((uint32_t)s[i+3]<<24));}memset(c->xmm[dst]+i,(gt?(x>y):(x==y))?0xff:0,width);}
+}
+static void jit_mmx_pack( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int word, int uns )
+{
+    uint8_t s[8],d[8],o[8];int i;memcpy(d,c->xmm[dst],8);for(i=0;i<8;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    if(word)for(i=0;i<2;i++){int32_t x=(int32_t)((uint32_t)d[4*i]|((uint32_t)d[4*i+1]<<8)|((uint32_t)d[4*i+2]<<16)|((uint32_t)d[4*i+3]<<24)),y=(int32_t)((uint32_t)s[4*i]|((uint32_t)s[4*i+1]<<8)|((uint32_t)s[4*i+2]<<16)|((uint32_t)s[4*i+3]<<24));int z=x<-32768?-32768:x>32767?32767:x;uint16_t u=(uint16_t)z;o[2*i]=(uint8_t)u;o[2*i+1]=(uint8_t)(u>>8);z=y<-32768?-32768:y>32767?32767:y;u=(uint16_t)z;o[4+2*i]=(uint8_t)u;o[4+2*i+1]=(uint8_t)(u>>8);}
+    else for(i=0;i<4;i++){int16_t x=(int16_t)((uint16_t)d[2*i]|((uint16_t)d[2*i+1]<<8)),y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8));int z=uns?(x<0?0:x>255?255:x):(x<-128?-128:x>127?127:x);int q=uns?(y<0?0:y>255?255:y):(y<-128?-128:y>127?127:y);o[i]=(uint8_t)z;o[4+i]=(uint8_t)q;}
+    memcpy(c->xmm[dst],o,8);
+}
+static void jit_xmm_packed_addsub( struct x86cpu *c, int dst, int src,
+                                   uint32_t a, int ismem, int width, int sub )
+{
+    uint8_t s[16]; int i;
+    for (i=0;i<16;i++) s[i]=ismem ? rd8(a+(uint32_t)i) : c->xmm[src][i];
+    if (width==1) for(i=0;i<16;i++) c->xmm[dst][i]=(uint8_t)(sub ? c->xmm[dst][i]-s[i] : c->xmm[dst][i]+s[i]);
+    else if (width==2) for(i=0;i<8;i++){ uint16_t x=(uint16_t)c->xmm[dst][i*2]|((uint16_t)c->xmm[dst][i*2+1]<<8), y=(uint16_t)s[i*2]|((uint16_t)s[i*2+1]<<8), z=(uint16_t)(sub?x-y:x+y); c->xmm[dst][i*2]=(uint8_t)z; c->xmm[dst][i*2+1]=(uint8_t)(z>>8); }
+    else for(i=0;i<4;i++){ uint32_t x=(uint32_t)c->xmm[dst][i*4]|((uint32_t)c->xmm[dst][i*4+1]<<8)|((uint32_t)c->xmm[dst][i*4+2]<<16)|((uint32_t)c->xmm[dst][i*4+3]<<24), y=(uint32_t)s[i*4]|((uint32_t)s[i*4+1]<<8)|((uint32_t)s[i*4+2]<<16)|((uint32_t)s[i*4+3]<<24), z=sub?x-y:x+y; c->xmm[dst][i*4]=(uint8_t)z; c->xmm[dst][i*4+1]=(uint8_t)(z>>8); c->xmm[dst][i*4+2]=(uint8_t)(z>>16); c->xmm[dst][i*4+3]=(uint8_t)(z>>24); }
+}
+static void jit_xmm_sat_addsub( struct x86cpu *c, int dst, int src, uint32_t a,
+                                int ismem, int width, int sub, int signedv )
+{
+    uint8_t s[16]; int i; for(i=0;i<16;i++) s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    int n=16/width, max=signedv?(1<<(width*8-1))-1:(1<<(width*8))-1, min=signedv?-(1<<(width*8-1)):0;
+    for(i=0;i<n;i++){ uint32_t xo=0,yo=0; memcpy(&xo,c->xmm[dst]+i*width,width); memcpy(&yo,s+i*width,width); int64_t x=signedv?(width==1?(int8_t)xo:(int16_t)xo):(int64_t)xo, y=signedv?(width==1?(int8_t)yo:(int16_t)yo):(int64_t)yo, z=sub?x-y:x+y; if(z<min)z=min; if(z>max)z=max; uint64_t u=(uint64_t)z; memcpy(c->xmm[dst]+i*width,&u,width); }
+}
+static void jit_xmm_shuffle( struct x86cpu *c, int dst, int src, uint32_t a,
+                             int ismem, uint32_t imm, int mode )
+{
+    uint8_t s[16],d[16],o[16]; int i;
+    memcpy(d,c->xmm[dst],16); for(i=0;i<16;i++) s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    if(mode==0) for(i=0;i<4;i++) memcpy(o+i*4,s+((imm>>(2*i))&3)*4,4);
+    else { memcpy(o,d,16); if(mode==1) for(i=0;i<4;i++) memcpy(o+i*2,s+((imm>>(2*i))&3)*2,2); else if(mode==2) for(i=0;i<4;i++) memcpy(o+(8+i*2),s+(8+((imm>>(2*i))&3)*2),2); else { for(i=0;i<2;i++) memcpy(o+i*4,d+((imm>>(2*i))&3)*4,4); for(i=0;i<2;i++) memcpy(o+(8+i*4),s+((imm>>(4+2*i))&3)*4,4); } }
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_shufps3( struct x86cpu *c, int dst, int src1, int src2,
+                             uint32_t a, int ismem, uint32_t imm )
+{
+    uint8_t x[16],y[16],o[16]; int i; memcpy(x,c->xmm[src1],16);
+    if(ismem) for(i=0;i<16;i++) y[i]=rd8(a+(uint32_t)i); else memcpy(y,c->xmm[src2],16);
+    for(i=0;i<2;i++) memcpy(o+i*4,x+((imm>>(2*i))&3)*4,4);
+    for(i=0;i<2;i++) memcpy(o+(i+2)*4,y+((imm>>(4+2*i))&3)*4,4);
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_ymm_load( struct x86cpu *c, int dst, uint32_t a )
+{ int i; for(i=0;i<32;i++) c->ymm[dst][i]=rd8(a+(uint32_t)i); memcpy(c->xmm[dst],c->ymm[dst],16); }
+static void jit_ymm_store( struct x86cpu *c, int src, uint32_t a )
+{ int i; for(i=0;i<32;i++) wr8(a+(uint32_t)i,c->ymm[src][i]); }
+static void jit_ymm_sync_lower( struct x86cpu *c, int dst )
+{ memcpy(c->xmm[dst],c->ymm[dst],16); }
+static void jit_ymm_binps3( struct x86cpu *c, int dst, int src1, int src2,
+                            uint32_t a, int ismem, int op )
+{
+    float x,y,r; uint8_t s[32]; int i; if(ismem)for(i=0;i<32;i++)s[i]=rd8(a+(uint32_t)i);
+    for(i=0;i<8;i++){memcpy(&x,c->ymm[src1]+i*4,4);memcpy(&y,ismem?s+i*4:c->ymm[src2]+i*4,4);if(op==0)r=x+y;else if(op==1)r=x-y;else if(op==2)r=x*y;else r=x/y;memcpy(c->ymm[dst]+i*4,&r,4);}
+    jit_ymm_sync_lower(c,dst);
+}
+static void jit_ymm_shufps3( struct x86cpu *c, int dst, int src1, int src2,
+                             uint32_t a, int ismem, uint32_t imm )
+{
+    uint8_t x[32],y[32],o[32]; int i; memcpy(x,c->ymm[src1],32); if(ismem)for(i=0;i<32;i++)y[i]=rd8(a+(uint32_t)i);else memcpy(y,c->ymm[src2],32);
+    for(i=0;i<2;i++){memcpy(o+i*4,x+((imm>>(2*i))&3)*4,4);memcpy(o+16+i*4,x+16+((imm>>(2*i))&3)*4,4);}
+    for(i=0;i<2;i++){memcpy(o+(i+2)*4,y+((imm>>(4+2*i))&3)*4,4);memcpy(o+16+(i+2)*4,y+16+((imm>>(4+2*i))&3)*4,4);}
+    memcpy(c->ymm[dst],o,32);
+    jit_ymm_sync_lower(c,dst);
+}
+static void jit_vec_blendps( struct x86cpu *c, int width, int dst, int src1,
+                             int src2, uint32_t a, int ismem, uint32_t imm )
+{
+    uint8_t y[32]; int i,n=width/4; memcpy(width==32?c->ymm[dst]:c->xmm[dst],width==32?c->ymm[src1]:c->xmm[src1],width);
+    if(ismem)for(i=0;i<width;i++)y[i]=rd8(a+(uint32_t)i);else memcpy(y,width==32?c->ymm[src2]:c->xmm[src2],width);
+    for(i=0;i<n;i++) if(imm&(1u<<i)) memcpy(width==32?c->ymm[dst]+i*4:c->xmm[dst]+i*4,y+i*4,4);
+    if(width==32)jit_ymm_sync_lower(c,dst);
+}
+static void jit_ymm_perm2f128( struct x86cpu *c, int dst, int src1, int src2,
+                               uint32_t a, int ismem, uint32_t imm )
+{
+    uint8_t x[32],b[32],o[32]; int i,sel; memcpy(x,c->ymm[src1],32);
+    if(ismem)for(i=0;i<32;i++)b[i]=rd8(a+(uint32_t)i);else memcpy(b,c->ymm[src2],32);
+    for(i=0;i<2;i++){
+        sel=(imm>>(i*4))&7;
+        if(sel&4) memset(o+i*16,0,16);
+        else memcpy(o+i*16,(sel&2)?(b+((sel&1)*16)):(x+((sel&1)*16)),16);
+    }
+    memcpy(c->ymm[dst],o,32); jit_ymm_sync_lower(c,dst);
+}
+static void jit_xmm_unpcklo_int( struct x86cpu *c, int dst, int src, int width )
+{
+    uint8_t d[16],s[16],o[16]; int i,n=16/width;
+    memcpy(d,c->xmm[dst],16); memcpy(s,c->xmm[src],16);
+    for(i=0;i<n/2;i++){ memcpy(o+i*2*width,d+i*width,width); memcpy(o+(i*2+1)*width,s+i*width,width); }
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_unpck_int( struct x86cpu *c, int dst, int src, int width, int high )
+{
+    uint8_t d[16],s[16],o[16]; int i,off=high?8:0, n=8/width;
+    memcpy(d,c->xmm[dst],16); memcpy(s,c->xmm[src],16);
+    for(i=0;i<n;i++){ memcpy(o+i*2*width,d+off+i*width,width); memcpy(o+(i*2+1)*width,s+off+i*width,width); }
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_unpck_mem( struct x86cpu *c, int dst, uint32_t a, int width, int high )
+{
+    uint8_t d[16],s[16],o[16]; int i,off=high?8:0,n=8/width; memcpy(d,c->xmm[dst],16); for(i=0;i<16;i++)s[i]=rd8(a+(uint32_t)i);
+    for(i=0;i<n;i++){memcpy(o+i*2*width,d+off+i*width,width);memcpy(o+(i*2+1)*width,s+off+i*width,width);} memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_pmullw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[16]; int i; for(i=0;i<16;i++) s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<8;i++){ int16_t x=(int16_t)((uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8)), y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8)); uint16_t z=(uint16_t)(x*y); c->xmm[dst][2*i]=(uint8_t)z; c->xmm[dst][2*i+1]=(uint8_t)(z>>8); }
+}
+static void jit_xmm_pmaddwd( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[16],o[16]; int i; for(i=0;i<16;i++) s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<4;i++){ int16_t x0=(int16_t)((uint16_t)c->xmm[dst][4*i]|((uint16_t)c->xmm[dst][4*i+1]<<8)), x1=(int16_t)((uint16_t)c->xmm[dst][4*i+2]|((uint16_t)c->xmm[dst][4*i+3]<<8)); int16_t y0=(int16_t)((uint16_t)s[4*i]|((uint16_t)s[4*i+1]<<8)), y1=(int16_t)((uint16_t)s[4*i+2]|((uint16_t)s[4*i+3]<<8)); uint32_t z=(uint32_t)((int32_t)x0*y0+(int32_t)x1*y1); o[4*i]=(uint8_t)z; o[4*i+1]=(uint8_t)(z>>8); o[4*i+2]=(uint8_t)(z>>16); o[4*i+3]=(uint8_t)(z>>24); }
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_pack( struct x86cpu *c, int dst, int src, uint32_t a,
+                          int ismem, int to_word, int unsignedv )
+{
+    uint8_t s[16],d[16],o[16]; int i; memcpy(d,c->xmm[dst],16);
+    for(i=0;i<16;i++) s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    if (to_word) for(i=0;i<4;i++){ int32_t x=(int32_t)((uint32_t)d[4*i]|((uint32_t)d[4*i+1]<<8)|((uint32_t)d[4*i+2]<<16)|((uint32_t)d[4*i+3]<<24)); int32_t y=(int32_t)((uint32_t)s[4*i]|((uint32_t)s[4*i+1]<<8)|((uint32_t)s[4*i+2]<<16)|((uint32_t)s[4*i+3]<<24)); int32_t z=x<-32768?-32768:x>32767?32767:x; uint16_t u=(uint16_t)z; o[2*i]=(uint8_t)u;o[2*i+1]=(uint8_t)(u>>8); z=y<-32768?-32768:y>32767?32767:y;u=(uint16_t)z;o[8+2*i]=(uint8_t)u;o[8+2*i+1]=(uint8_t)(u>>8); }
+    else for(i=0;i<8;i++){ int32_t x=(int16_t)((uint16_t)d[2*i]|((uint16_t)d[2*i+1]<<8)), y=(int16_t)((uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8)); int32_t z=unsignedv?(x<0?0:x>255?255:x):(x<-128?-128:x>127?127:x); int32_t q=unsignedv?(y<0?0:y>255?255:y):(y<-128?-128:y>127?127:y); o[i]=(uint8_t)z;o[8+i]=(uint8_t)q; }
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_avg( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width )
+{
+    uint8_t s[16]; int i; for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    if(width==1)for(i=0;i<16;i++)c->xmm[dst][i]=(uint8_t)(((unsigned)c->xmm[dst][i]+s[i]+1)>>1);
+    else for(i=0;i<8;i++){uint16_t x=(uint16_t)c->xmm[dst][2*i]|((uint16_t)c->xmm[dst][2*i+1]<<8),y=(uint16_t)s[2*i]|((uint16_t)s[2*i+1]<<8),z=(uint16_t)((x+y+1)>>1);c->xmm[dst][2*i]=(uint8_t)z;c->xmm[dst][2*i+1]=(uint8_t)(z>>8);}
+}
+static void jit_xmm_cmpgt( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width )
+{
+    uint8_t s[16],d[16],o[16]; int i; memcpy(d,c->xmm[dst],16);for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<16;i+=width){int64_t x=width==1?(int8_t)d[i]:(int16_t)((uint16_t)d[i]|((uint16_t)d[i+1]<<8));int64_t y=width==1?(int8_t)s[i]:(int16_t)((uint16_t)s[i]|((uint16_t)s[i+1]<<8));if(width==4){x=(int32_t)((uint32_t)d[i]|((uint32_t)d[i+1]<<8)|((uint32_t)d[i+2]<<16)|((uint32_t)d[i+3]<<24));y=(int32_t)((uint32_t)s[i]|((uint32_t)s[i+1]<<8)|((uint32_t)s[i+2]<<16)|((uint32_t)s[i+3]<<24));}memset(o+i,x>y?0xff:0,width);}
+    memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_cmpeq( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int width )
+{
+    uint8_t s[16],d[16],o[16];int i;memcpy(d,c->xmm[dst],16);for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<16;i+=width){int eq=1;for(int k=0;k<width;k++)if(d[i+k]!=s[i+k])eq=0;memset(o+i,eq?0xff:0,width);}memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_minmaxub( struct x86cpu *c, int dst, int src, uint32_t a, int ismem, int ismax )
+{
+    int i; for(i=0;i<16;i++){uint8_t s=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];if(ismax){if(s>c->xmm[dst][i])c->xmm[dst][i]=s;}else if(s<c->xmm[dst][i])c->xmm[dst][i]=s;}
+}
+static void jit_xmm_pmaddubsw( struct x86cpu *c, int dst, int src, uint32_t a, int ismem )
+{
+    uint8_t s[16],o[16];int i;for(i=0;i<16;i++)s[i]=ismem?rd8(a+(uint32_t)i):c->xmm[src][i];
+    for(i=0;i<8;i++){int z=(int)c->xmm[dst][2*i]*(int8_t)s[2*i]+(int)c->xmm[dst][2*i+1]*(int8_t)s[2*i+1];if(z>32767)z=32767;if(z<-32768)z=-32768;o[2*i]=(uint8_t)z;o[2*i+1]=(uint8_t)(z>>8);}memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_shift_bytes( struct x86cpu *c, int dst, uint32_t count, int left )
+{
+    uint8_t o[16]; int i,n=count>16?16:(int)count; memset(o,0,16); if(n<16)for(i=0;i<16-n;i++)o[left?i+n:i]=c->xmm[dst][left?i: i+n]; memcpy(c->xmm[dst],o,16);
+}
+static void jit_xmm_shift( struct x86cpu *c, int dst, uint32_t count, int width, int arith, int left )
+{
+    int i,n=16/width,bits=width*8; if(count>= (uint32_t)bits){ for(i=0;i<n;i++){ int neg=arith&&!left&&(c->xmm[dst][i*width+width-1]&0x80); memset(c->xmm[dst]+i*width,neg?0xff:0,width); } return; }
+    for(i=0;i<n;i++){ uint64_t v=0; memcpy(&v,c->xmm[dst]+i*width,width); if(left) v<<=count; else if(arith){ int64_t s=(int64_t)(v<<(64-bits)); s>>=(64-bits); v=(uint64_t)(s>>count); } else v>>=count; memcpy(c->xmm[dst]+i*width,&v,width); }
+}
+static uint32_t jit_xmm_count( struct x86cpu *c, int src )
+{
+    uint32_t v; memcpy(&v,c->xmm[src],4); return v;
+}
+static void jit_rep_stos( struct x86cpu *c, int size )
+{
+    uint32_t p=c->regs[EDI],n=c->regs[ECX],v=c->regs[EAX]; int32_t step=(c->eflags&DF)?-size:size;
+    while(n--){if(size==1)wr8(p,(uint8_t)v);else if(size==2)wr16(p,(uint16_t)v);else wr32(p,v);p+=(uint32_t)step;} c->regs[EDI]=p;c->regs[ECX]=0;
+}
+static void jit_rep_movs( struct x86cpu *c, int size )
+{
+    uint32_t s=c->regs[ESI],d=c->regs[EDI],n=c->regs[ECX]; int32_t step=(c->eflags&DF)?-size:size;
+    while(n--){uint32_t v=size==1?rd8(s):size==2?rd16(s):rd32(s);if(size==1)wr8(d,(uint8_t)v);else if(size==2)wr16(d,(uint16_t)v);else wr32(d,v);s+=(uint32_t)step;d+=(uint32_t)step;} c->regs[ESI]=s;c->regs[EDI]=d;c->regs[ECX]=0;
+}
+static void jit_string_one( struct x86cpu *c, int size, int store )
+{
+    uint32_t s=c->regs[ESI],d=c->regs[EDI],v=c->regs[EAX]; int32_t step=(c->eflags&DF)?-size:size;
+    if(store){if(size==1)wr8(d,(uint8_t)v);else if(size==2)wr16(d,(uint16_t)v);else wr32(d,v);}
+    else {v=size==1?rd8(s):size==2?rd16(s):rd32(s);if(size==1)c->regs[EAX]=(c->regs[EAX]&0xffffff00u)|v;else if(size==2)c->regs[EAX]=(c->regs[EAX]&0xffff0000u)|v;else c->regs[EAX]=v;s+=(uint32_t)step;}
+    if(store)c->regs[EDI]+=step;else {c->regs[ESI]=s;c->regs[EDI]+=step;}
+}
+static void jit_cmpxchg8b( struct x86cpu *c, uint32_t a )
+{
+    uint64_t mem=(uint64_t)rd32(a)|((uint64_t)rd32(a+4)<<32),cmp=(uint64_t)c->regs[EAX]|((uint64_t)c->regs[EDX]<<32);
+    c->eflags=get_flags(c); if(mem==cmp){wr32(a,c->regs[EBX]);wr32(a+4,c->regs[ECX]);c->eflags|=ZF;}
+    else{c->regs[EAX]=(uint32_t)mem;c->regs[EDX]=(uint32_t)(mem>>32);c->eflags&=~ZF;} c->lf_size=0;
+}
+static void jit_x87_bin( struct x86cpu *c, int op, int dst, double src,
+                         int pop, int reverse )
+{
+    double a=fp_get(c,dst), r;
+    if (op==0) r=a+src; else if (op==1) r=a*src;
+    else if (op==2) r=reverse ? src-a : a-src;
+    else r=reverse ? src/a : a/src;
+    fp_set(c,dst,r); if (pop) fp_pop(c);
+}
+/* Single-step exactly one guest instruction through the interpreter, for an
+ * opcode the translator does not implement (x87/SSE and other rarities).
+ *
+ * This is what keeps a block WHOLE: an unhandled instruction used to end the
+ * block (or kill it outright), so the surrounding integer code fell back to the
+ * interpreter and the chain broke.  Now the block calls in for that one
+ * instruction and carries straight on.
+ *
+ * Re-entrancy: g_jit_filling suppresses JIT dispatch inside the nested run(),
+ * and g_verify_budget=1 makes it retire exactly one instruction; both are
+ * saved/restored so the verify path can use this too.  Writes still go through
+ * wr8/16/32, so the verify undo log stays complete.
+ *
+ * Returns 0 if the instruction did NOT simply fall through to `next` (it
+ * branched, trapped, or stopped the CPU) - the caller then leaves the block and
+ * lets the main loop resume from the real eip.  That check is what makes this
+ * safe for ANY opcode, including ones that transfer control. */
+static int jit_step1( struct x86cpu *c, uint32_t at, uint32_t next )
+{
+    int sf = g_jit_filling, sb = g_verify_budget;
+    g_jit_filling = 1; g_verify_budget = 1;
+    c->eip = at;
+    c->running = 1;
+    run( c );
+    g_jit_filling = sf; g_verify_budget = sb;
+    /* run() counted this instruction too; the block's ninsn already includes
+     * it, so drop the duplicate to keep the mips figure honest. */
+    g_total_insns--;
+    return c->eip == next && c->running;
+}
+
 #include "gen_blocks.c"
+#ifdef WEBWINE_GENBLOCKS
+#include "gdi32_gen_blocks.c"
+#endif
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_FP_HOT)
+#include "fp_hot_gen_blocks.c"
+#endif
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
+#ifdef WEBWINE_MSVCRT_FOCUSED_AOT
+#include "msvcrt_focused_gen_blocks.c"
+#else
+#include "msvcrt_gen_blocks.c"
+#endif
+#endif
+#ifdef WEBWINE_GENBLOCKS
+#define GDI32_GEN_HASHN (1u << 15)
+static uint32_t gdi32_gen_va[GDI32_GEN_HASHN];
+static uint32_t gdi32_gen_end[GDI32_GEN_HASHN];
+static uint16_t gdi32_gen_ninsn[GDI32_GEN_HASHN];
+static int (*gdi32_gen_fn[GDI32_GEN_HASHN])(struct x86cpu *);
+static int32_t gdi32_gen_idx[GDI32_GEN_HASHN];
+static uint32_t gdi32_gen_nblk;
+static void gdi32_gen_build_hash( void )
+{
+    for (int i = 0; gdi32_g_genblk[i].fn; i++)
+    {
+        uint32_t va = gdi32_g_genblk[i].va;
+        unsigned h = (unsigned)((va * 2654435761u) >> (32 - 10));
+        while (gdi32_gen_va[h]) h = (h + 1) & (GDI32_GEN_HASHN - 1);
+        gdi32_gen_va[h] = va; gdi32_gen_end[h] = gdi32_g_genblk[i].end;
+        gdi32_gen_ninsn[h] = gdi32_g_genblk[i].ninsn;
+        gdi32_gen_fn[h] = gdi32_g_genblk[i].fn; gdi32_gen_idx[h] = i;
+        gdi32_gen_nblk++;
+    }
+    fprintf( stderr, "wasm_x86: gdi32 JIT %u translated blocks loaded\\n", gdi32_gen_nblk );
+}
+static int gdi32_gen_lookup( uint32_t va )
+{
+    unsigned h = (unsigned)((va * 2654435761u) >> (32 - 10));
+    while (gdi32_gen_va[h])
+    { if (gdi32_gen_va[h] == va) return (int)h; h = (h + 1) & (GDI32_GEN_HASHN - 1); }
+    return -1;
+}
+#endif
 #define GEN_HASHN (1u << 19)
 static uint32_t g_gen_va[GEN_HASHN];
 static uint32_t g_gen_end[GEN_HASHN];
 static uint16_t g_gen_ninsn[GEN_HASHN];
 static int    (*g_gen_fn[GEN_HASHN])( struct x86cpu * );
 static int32_t  g_gen_idx[GEN_HASHN];   /* g_genblk[] index for this hash slot */
-static int      g_jit_on, g_jit_verify, g_jit_filling, g_verify_budget;
 static uint64_t g_jit_insns, g_jit_blocks, g_jit_last_insns, g_jit_last_blocks;
 static uint32_t g_gen_nblk;
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
+#define MSVCRT_GEN_HASHN (1u << 16)
+static uint32_t msvcrt_gen_va[MSVCRT_GEN_HASHN];
+static uint32_t msvcrt_gen_end[MSVCRT_GEN_HASHN];
+static uint16_t msvcrt_gen_ninsn[MSVCRT_GEN_HASHN];
+static int (*msvcrt_gen_fn[MSVCRT_GEN_HASHN])(struct x86cpu *);
+static int32_t msvcrt_gen_idx[MSVCRT_GEN_HASHN];
+static uint32_t msvcrt_gen_nblk;
+static void msvcrt_gen_build_hash( void )
+{
+    for (int i = 0; msvcrt_g_genblk[i].fn; i++)
+    {
+        uint32_t va = msvcrt_g_genblk[i].va;
+        unsigned h = (unsigned)((va * 2654435761u) >> (32 - 16));
+        while (msvcrt_gen_va[h]) h = (h + 1) & (MSVCRT_GEN_HASHN - 1);
+        msvcrt_gen_va[h] = va; msvcrt_gen_end[h] = msvcrt_g_genblk[i].end;
+        msvcrt_gen_ninsn[h] = msvcrt_g_genblk[i].ninsn;
+        msvcrt_gen_fn[h] = msvcrt_g_genblk[i].fn; msvcrt_gen_idx[h] = i;
+        msvcrt_gen_nblk++;
+    }
+    fprintf( stderr, "wasm_x86: msvcrt JIT %u translated blocks loaded\n", msvcrt_gen_nblk );
+}
+static int msvcrt_gen_lookup( uint32_t va )
+{
+    unsigned h = (unsigned)((va * 2654435761u) >> (32 - 16));
+    while (msvcrt_gen_va[h])
+    { if (msvcrt_gen_va[h] == va) return (int)h; h = (h + 1) & (MSVCRT_GEN_HASHN - 1); }
+    return -1;
+}
+#endif
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_FP_HOT)
+#define FPHOT_GEN_HASHN (1u << 15)
+static uint32_t fp_hot_gen_va[FPHOT_GEN_HASHN];
+static uint32_t fp_hot_gen_end[FPHOT_GEN_HASHN];
+static uint16_t fp_hot_gen_ninsn[FPHOT_GEN_HASHN];
+static int (*fp_hot_gen_fn[FPHOT_GEN_HASHN])(struct x86cpu *);
+static int32_t fp_hot_gen_idx[FPHOT_GEN_HASHN];
+static uint32_t fp_hot_gen_nblk;
+static int fp_hot_jit, fp_hot_verify;
+static void fp_hot_gen_build_hash( void )
+{
+    for (int i = 0; fp_g_genblk[i].fn; i++)
+    {
+        uint32_t va = fp_g_genblk[i].va;
+        unsigned h = (unsigned)((va * 2654435761u) >> (32 - 15));
+        while (fp_hot_gen_va[h]) h = (h + 1) & (FPHOT_GEN_HASHN - 1);
+        fp_hot_gen_va[h] = va; fp_hot_gen_end[h] = fp_g_genblk[i].end;
+        fp_hot_gen_ninsn[h] = fp_g_genblk[i].ninsn;
+        fp_hot_gen_fn[h] = fp_g_genblk[i].fn; fp_hot_gen_idx[h] = i;
+        fp_hot_gen_nblk++;
+    }
+    fprintf( stderr, "wasm_x86: floating-point hot JIT %u translated blocks loaded\n", fp_hot_gen_nblk );
+}
+static int fp_hot_gen_lookup( uint32_t va )
+{
+    unsigned h = (unsigned)((va * 2654435761u) >> (32 - 15));
+    while (fp_hot_gen_va[h])
+    { if (fp_hot_gen_va[h] == va) return (int)h; h = (h + 1) & (FPHOT_GEN_HASHN - 1); }
+    return -1;
+}
+static int fp_hot_verify_block( struct x86cpu *c, int slot, uint32_t start )
+{
+    struct x86cpu saved = *c, jit;
+    int sf = g_jit_filling, sb = g_verify_budget, bad = 0;
+    g_wlog_n = 0; g_wlog_of = 0; g_jit_recording = 1;
+    fp_hot_gen_fn[slot]( c );
+    g_jit_recording = 0; jit = *c;
+    if (!g_wlog_of)
+    {
+        for (int i = g_wlog_n - 1; i >= 0; i--)
+        { uint32_t a = g_wlog[i].addr;
+          if (g_wlog[i].size == 1) *(uint8_t *)(uintptr_t)a = (uint8_t)g_wlog[i].old;
+          else if (g_wlog[i].size == 2) *(uint16_t *)(uintptr_t)a = (uint16_t)g_wlog[i].old;
+          else *(uint32_t *)(uintptr_t)a = g_wlog[i].old; }
+        *c = saved; g_verify_budget = fp_hot_gen_ninsn[slot]; g_jit_filling = 1;
+        c->running = 1; run( c ); g_jit_filling = sf; g_verify_budget = sb;
+        for (int r = 0; r < 8; r++) if (c->regs[r] != jit.regs[r]) bad = 1;
+        if (!bad && c->eflags != jit.eflags) bad = 1;
+        if (!bad && c->eip != jit.eip) bad = 1;
+        if (!bad && c->lf_kind != jit.lf_kind) bad = 1;
+        if (!bad && c->lf_size != jit.lf_size) bad = 1;
+        if (!bad && c->lf_op1 != jit.lf_op1) bad = 1;
+        if (!bad && c->lf_op2 != jit.lf_op2) bad = 1;
+        if (!bad && c->lf_res != jit.lf_res) bad = 1;
+        if (!bad && c->lf_cin != jit.lf_cin) bad = 1;
+        if (!bad && c->fptop != jit.fptop) bad = 1;
+        if (!bad && c->fpcw != jit.fpcw) bad = 1;
+        if (!bad && c->fpsw != jit.fpsw) bad = 1;
+        if (!bad && memcmp( c->fpr, jit.fpr, sizeof(c->fpr) )) bad = 1;
+        if (!bad) for (int r = 0; r < 8; r++) for (int k = 0; k < 16; k++)
+            if (c->xmm[r][k] != jit.xmm[r][k]) { bad = 1; break; }
+        if (!bad) for (int r = 0; r < 8; r++) for (int k = 0; k < 32; k++)
+            if (c->ymm[r][k] != jit.ymm[r][k]) { bad = 1; break; }
+        if (bad)
+            fprintf( stderr, "JITBAD FP blk=%08x jit_eip=%08x int_eip=%08x\n",
+                     start - (uint32_t)nd_slide, jit.eip - (uint32_t)nd_slide,
+                     c->eip - (uint32_t)nd_slide );
+        else *c = jit;
+    }
+    else { *c = jit; g_jit_filling = sf; g_verify_budget = sb; }
+    return !bad;
+}
+#endif
 static void gen_build_hash( void )
 {
     for (int i = 0; g_genblk[i].fn; i++)
@@ -3730,10 +6587,49 @@ static int gen_lookup( uint32_t va )   /* slot index, or -1 */
     while (g_gen_va[h]) { if (g_gen_va[h] == va) return (int)h; h = (h + 1) & (GEN_HASHN - 1); }
     return -1;
 }
+#define GEN_LOOKUP_CACHE_N 1024
+/* Dynamic-code misses tend to revisit a small loop body, but not necessarily
+ * the same EIP twice in a row.  Keep the negative results too: unlike the
+ * generated-block table this cache is only a dispatch hint and can be
+ * invalidated without touching translated code. */
+static uint32_t g_gen_cache_va[GEN_LOOKUP_CACHE_N];
+static int32_t g_gen_cache_slot[GEN_LOOKUP_CACHE_N];
+static int g_gen_cache_on = -1;
+static int gen_lookup_cached( uint32_t va )
+{
+    unsigned i = (unsigned)((va * 2654435761u) >> (32 - 10));
+    uint32_t key = va + 1u;
+    int slot;
+    if (g_gen_cache_on == -1) g_gen_cache_on = getenv( "WASM_NO_GENCACHE" ) ? 0 : 1;
+    if (!g_gen_cache_on) return gen_lookup( va );
+    if (g_gen_cache_va[i] == key) return g_gen_cache_slot[i];
+    slot = gen_lookup( va );
+    g_gen_cache_va[i] = key;
+    g_gen_cache_slot[i] = slot;
+    return slot;
+}
 #endif
 
-static uint32_t g_ipage[1024]; static int g_ipage_on;   /* interpreted-block-entry tally per 64KB guest page (WASM_IPAGE) */
-static uint32_t g_ipage_eip[1024];                       /* a representative eip seen in each page */
+#define IPAGE_COUNT 65536
+static uint32_t g_ipage[IPAGE_COUNT]; static int g_ipage_on; /* full 64KB guest-page tally */
+static uint32_t g_ipage_eip[IPAGE_COUNT];                 /* representative eip per page */
+static int ipage_count_cmp( const void *a, const void *b )
+{
+    unsigned x = *(const unsigned *)a, y = *(const unsigned *)b;
+    if (g_ipage[x] < g_ipage[y]) return 1;
+    if (g_ipage[x] > g_ipage[y]) return -1;
+    return (x > y) - (x < y);
+}
+#define IMISS_COUNT (1u << 18)
+static uint32_t g_imiss_va[IMISS_COUNT];
+static uint32_t g_imiss_n[IMISS_COUNT];
+static int g_ipage_frame_mode, g_ipage_frame_started;
+static int g_msvcrt_miss_trace = -1;
+static unsigned g_msvcrt_miss_trace_n;
+static int g_msvcrt_hot_trace = -1;
+static unsigned g_msvcrt_hot_trace_n;
+static int g_vline1_entry_trace = -1;
+static unsigned g_vline1_entry_trace_n;
 static void run( struct x86cpu *c )
 {
     uint32_t last_eip = c->eip;
@@ -3784,9 +6680,18 @@ static void run( struct x86cpu *c )
                           g_jit_on = getenv( "WASM_NO_JIT" ) ? 0 : 1;   /* AOT on by default; escape hatch */
                           g_jit_verify = getenv( "WASM_JIT_VERIFY" ) ? 1 : 0;
                           if (g_jit_on) gen_build_hash();
+#if defined(WEBWINE_FP_HOT)
+                          fp_hot_jit = getenv( "WASM_FP_HOT" ) ? 1 : 0;
+                          fp_hot_verify = getenv( "WASM_FP_HOT_VERIFY" ) ? 1 : 0;
+                          if (fp_hot_jit) fp_hot_gen_build_hash();
+#endif
 #endif
                           g_flip_addr = ND_VIDEONEXTPAGE + (uint32_t)nd_slide;
                           nat_register( g_flip_addr, NAT_FLIP, "frame flip" );
+                          nat_arm_pow();
+                          nat_arm_pthread_spin_unlock();
+                          nat_arm_pthread_spin_lock();
+                          nat_arm_pthread_getspecific();
                           {   /* WASM_COUNT_ADDR=<hex> counts executions of any guest
                                * address - the sampler over-attributes tight loops, so
                                * confirm hot-loop claims with this before acting. */
@@ -3800,12 +6705,29 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_AGELOOP" ) && !getenv( "WASM_COUNT_LOOP" ))
                               nat_arm_ageloop();
                           if (!getenv( "WASM_NO_AGEBLOCKS" )) nat_arm_ageblocks();
-                          if (!getenv( "WASM_NO_QRHLINE" )) nat_arm_qrhline();
+                          /* The setup prologue and body are now both native;
+                           * the setup hook keeps every SMC-patched immediate
+                           * synchronized before qrhline reads it. */
+                          /* qrhline's interpreter fallback can occupy the
+                           * render thread for seconds in the attract loop.
+                           * The setup hook synchronizes its SMC immediates;
+                           * keep this verified fast path enabled by default. */
+                          if (!getenv( "WASM_NO_QRHLINE" )) {
+                              nat_arm_setupqrhline();
+                              nat_arm_qrhline();
+                          }
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
+                          if (!getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
                           if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
+                          if (!getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
                           if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
+                          if (!getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
+                          nat_arm_setup_mappers();
+                          if (!getenv( "WASM_NO_SDL_TLSGET" )) nat_arm_sdl_tlsget();
+                          if (!getenv( "WASM_NO_SDL_ATOMIC_GET" )) nat_arm_sdl_atomics();
+                          if (getenv( "WASM_EXPERIMENT_NP2" )) nat_arm_line1np2();
                           if (!getenv( "WASM_NO_CRC32" )) nat_arm_crc32();
                           if (!getenv( "WASM_NO_MIXSTEREO" )) nat_arm_mixstereo();
                           if (!getenv( "WASM_NO_MIDEBUG" )) nat_arm_midebug();
@@ -3818,6 +6740,23 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
+            }
+            { static int dumped;
+              const char *da = getenv( "WASM_DUMP_ADDR" );
+              if (!dumped && da && *da)
+              {
+                  uint32_t a = (uint32_t)strtoul( da, NULL, 0 ) + (uint32_t)nd_slide;
+                  int nonzero = 0;
+                  for (unsigned di = 0; di < 256; di++) if (rd8( a + di )) { nonzero = 1; break; }
+                  /* Runtime-generated code may not exist at the first tick. */
+                  if (nonzero)
+                  {
+                      dumped = 1;
+                      fprintf( stderr, "wasm_x86: bytes @%08x:", a - (uint32_t)nd_slide );
+                      for (unsigned di = 0; di < 256; di++) fprintf( stderr, " %02x", rd8( a + di ) );
+                      fprintf( stderr, "\n" );
+                  }
+              }
             }
             /* Look for msvcrt every ~256 ticks until found: walking the loader
              * list on every tick measurably slowed boot. */
@@ -3877,10 +6816,21 @@ static void run( struct x86cpu *c )
                 }
             }
             { static uint32_t nat_tries;
-              if (!g_nat_ready && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
+              /* msvcrt and the graphics/user DLLs do not necessarily arrive
+               * in the loader list together.  Keep probing for the latter
+               * after the CRT hooks have armed; otherwise a late-loaded
+               * relocatable relay cluster is silently missed forever. */
+              int need_dll_hooks = !g_nat_ready;
+#ifdef WEBWINE_GENBLOCKS
+              need_dll_hooks = need_dll_hooks || !gdi32_gen_loaded;
+#endif
+              if (need_dll_hooks && g_slide_ok && (nat_tries++ & 0xff) == 0 && nat_tries < 400000) nat_init( c ); }
             { static int md = -1;
               if (md == -1) md = getenv( "WASM_MODULES" ) ? 0 : 1;
-              if (!md && g_slide_ok && dump_modules( c ) > 0) md = 1; }
+              /* The first housekeeping tick happens while only the exe is in
+               * the loader list.  Wait for the normal DLL closure so the
+               * diagnostic can map interpreted pages to their real owner. */
+              if (!md && g_slide_ok && dump_modules( c ) >= 5) md = 1; }
             { static int gl_on = -1;
               if (gl_on == -1) gl_on = getenv( "WASM_NO_GLTHUNK" ) ? 0 : 1;
               if (gl_on && g_slide_ok && !g_gl_armed) nat_arm_glthunks( c );
@@ -3895,9 +6845,10 @@ static void run( struct x86cpu *c )
             }
             static int tp_on = -1;
             static double tp_start = 0, tp_last = 0;
-            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0, tp_last_mhc = 0, tp_last_mhi = 0;
+            static uint64_t tp_last_insns = 0, tp_last_flip = 0, tp_last_hits = 0, tp_last_audio = 0, tp_last_calls = 0, tp_last_vlc = 0, tp_last_vli = 0, tp_last_sbc = 0, tp_last_sbi = 0, tp_last_mvc = 0, tp_last_mvi = 0, tp_last_mhc = 0, tp_last_mhi = 0, tp_last_v1c = 0, tp_last_v1i = 0, tp_last_mv1c = 0, tp_last_mv1i = 0, tp_last_v1nc = 0, tp_last_v1ni = 0, tp_last_mv1nc = 0, tp_last_mv1ni = 0;
             if (tp_on == -1) { tp_on = getenv( "WASM_TPUT" ) ? 1 : 0; g_histo_on = getenv( "WASM_HISTO" ) ? 1 : 0;
-                               g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; g_ipage_on = getenv( "WASM_IPAGE" ) ? 1 : 0; }
+                               g_prof_on = getenv( "WASM_PROF" ) ? 1 : 0; g_ipage_on = getenv( "WASM_IPAGE" ) ? 1 : 0;
+                               g_ipage_frame_mode = getenv( "WASM_IPAGE_FRAME" ) ? 1 : 0; }
             if (tp_on)
             {
                 double now = emscripten_get_now();
@@ -3915,7 +6866,7 @@ static void run( struct x86cpu *c )
                             td ? 100.0*(double)jd/(double)td : 0.0, (double)td/1e6/dt );
                         g_jit_last_insns = g_jit_insns; g_jit_last_blocks = g_jit_blocks; }
 #endif
-                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f mh=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
+                    fprintf( stderr, "FPSSAMPLE t=%.1f flips=%llu fps=%.1f mips=%.1f loop/frame=%.0f audio=%.1fM/s calls=%llu vl=%.0f/%.0f mv=%.0f/%.0f mh=%.0f/%.0f v1=%.0f/%.0f mv1=%.0f/%.0f np2v=%.0f/%.0f np2m=%.0f/%.0f sb=%.0f/%.0f ld=%llu/%llu ldchk=%llu/%llu kinsn/frame=%.0f\n",
                              (now - tp_start) / 1000.0, (unsigned long long)g_flip_count, fps, mips,
                              fps > 0 ? (double)(g_count_hits - tp_last_hits) / fps : 0.0,
                              (double)(g_aud.cb_insns - tp_last_audio) / dt / 1e6,
@@ -3926,14 +6877,46 @@ static void run( struct x86cpu *c )
                              fps > 0 ? (double)(g_mv_iters - tp_last_mvi) / fps : 0.0,
                              fps > 0 ? (double)(g_mh_calls - tp_last_mhc) / fps : 0.0,
                              fps > 0 ? (double)(g_mh_iters - tp_last_mhi) / fps : 0.0,
+                             fps > 0 ? (double)(g_v1_calls - tp_last_v1c) / fps : 0.0,
+                             fps > 0 ? (double)(g_v1_iters - tp_last_v1i) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv1_calls - tp_last_mv1c) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv1_iters - tp_last_mv1i) / fps : 0.0,
+                             fps > 0 ? (double)(g_v1n_calls - tp_last_v1nc) / fps : 0.0,
+                             fps > 0 ? (double)(g_v1n_iters - tp_last_v1ni) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv1n_calls - tp_last_mv1nc) / fps : 0.0,
+                             fps > 0 ? (double)(g_mv1n_iters - tp_last_mv1ni) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_calls - tp_last_sbc) / fps : 0.0,
                              fps > 0 ? (double)(g_sb_iters - tp_last_sbi) / fps : 0.0,
                              (unsigned long long)g_ld_hits, (unsigned long long)g_ld_calls,
                              (unsigned long long)g_ld_ok, (unsigned long long)g_ld_bad,
                              fps > 0 ? (double)(g_total_insns - tp_last_insns) / fps / 1000.0 : 0.0 );
+                    if (g_trace_3b)
+                    { fprintf( stderr, "TRACE3B entries=%llu last=%08x\n",
+                               (unsigned long long)g_trace_3b_hits, g_trace_3b_last );
+                      g_trace_3b_hits = 0; }
+                    if (g_glcount)
+                    {
+                        unsigned rank[8], nr = 0, s;
+                        for (s = 0; s < NAT_SLOTS; s++) if (g_gl_calls[s])
+                        {
+                            unsigned p = nr < 8 ? nr++ : 8;
+                            while (p && g_gl_calls[s] > g_gl_calls[rank[p-1]])
+                            { if (p < 8) rank[p] = rank[p-1]; p--; }
+                            if (p < 8) rank[p] = s;
+                        }
+                        fprintf( stderr, "GLCOUNT");
+                        for (s = 0; s < nr; s++)
+                            fprintf( stderr, " slot%u/code%u=%llu", rank[s], g_gl_code[rank[s]],
+                                     (unsigned long long)g_gl_calls[rank[s]]);
+                        fputc('\n', stderr);
+                    }
                     tp_last_sbc = g_sb_calls; tp_last_sbi = g_sb_iters;
                     tp_last_mvc = g_mv_calls; tp_last_mvi = g_mv_iters;
                     tp_last_mhc = g_mh_calls; tp_last_mhi = g_mh_iters;
+                    tp_last_v1c = g_v1_calls; tp_last_v1i = g_v1_iters;
+                    tp_last_mv1c = g_mv1_calls; tp_last_mv1i = g_mv1_iters;
+                    tp_last_v1nc = g_v1n_calls; tp_last_v1ni = g_v1n_iters;
+                    tp_last_mv1nc = g_mv1n_calls; tp_last_mv1ni = g_mv1n_iters;
                     tp_last_vlc = g_vl_calls; tp_last_vli = g_vl_iters;
                     tp_last_hits = g_count_hits;
                     tp_last_audio = g_aud.cb_insns; tp_last_calls = g_aud.cb_calls;
@@ -3952,18 +6935,59 @@ static void run( struct x86cpu *c )
                     if (g_ipage_on)
                     {   /* top interpreted-entry pages: which 64KB of guest VA still
                          * runs in the interpreter (JIT missed there). */
-                        int pi[1024]; for (int i=0;i<1024;i++) pi[i]=i;
-                        for (int i=0;i<12;i++) for (int j=i+1;j<1024;j++)
-                            if (g_ipage[pi[j]] > g_ipage[pi[i]]) { int t=pi[i]; pi[i]=pi[j]; pi[j]=t; }
-                        uint64_t tot=0; for (int i=0;i<1024;i++) tot+=g_ipage[i];
+                        unsigned pi[IPAGE_COUNT]; for (unsigned i=0;i<IPAGE_COUNT;i++) pi[i]=i;
+                        qsort( pi, IPAGE_COUNT, sizeof(*pi), ipage_count_cmp );
+                        uint64_t tot=0; for (int i=0;i<IPAGE_COUNT;i++) tot+=g_ipage[i];
                         fprintf( stderr, "IPAGE top (of %lluK entries):", (unsigned long long)(tot/1000) );
                         for (int i=0;i<12;i++) { int p=pi[i]; if (!g_ipage[p]) break;
                             fprintf( stderr, " %08x=%.1f%%", (unsigned)p<<16, 100.0*g_ipage[p]/(double)(tot?tot:1) ); }
                         fprintf( stderr, "\n" );
-                        for (int i=0;i<4;i++) { int p=pi[i]; if (!g_ipage[p]) break;
+                        for (int i=0;i<12;i++) { int p=pi[i]; if (!g_ipage[p]) break;
                             uint32_t e = g_ipage_eip[p]; fprintf( stderr, "IPAGE bytes @%08x:", e-(uint32_t)nd_slide );
-                            for (int k=0;k<48;k++) fprintf( stderr, "%02x", rd8( e+k ) );
+                            for (int k=0;k<160;k++) fprintf( stderr, "%02x", rd8( e+k ) );
                             fprintf( stderr, "\n" ); }
+                        {   /* Exact miss entries turn a page hotspot into
+                             * safe translator seeds for the next build. */
+                            unsigned mi[20], nm = 0;
+                            for (unsigned h=0; h<IMISS_COUNT; h++) if (g_imiss_n[h])
+                            {
+                                unsigned p = nm < 20 ? nm++ : 20;
+                                while (p && g_imiss_n[h] > g_imiss_n[mi[p-1]])
+                                { if (p < 20) mi[p] = mi[p-1]; p--; }
+                                if (p < 20) mi[p] = h;
+                            }
+                            fprintf( stderr, "IMISS top:" );
+                            for (unsigned i=0; i<nm; i++)
+                                fprintf( stderr, " %08x=%.1fM", g_imiss_va[mi[i]],
+                                         (double)g_imiss_n[mi[i]] / 1e6 );
+                            fprintf( stderr, "\n" );
+                            /* The M suffix hides the useful shape of runtime
+                             * generated code: dozens of small blocks can each
+                             * round to 0.0M while their aggregate page is hot.
+                             * Keep the normal report compact, but expose exact
+                             * counts on demand so a native/dynamic fast path
+                             * can be selected from evidence. */
+                            if (getenv( "WASM_IPAGE_DETAIL" ))
+                            {
+                                fprintf( stderr, "IMISS detail:" );
+                                for (unsigned i=0; i<nm; i++)
+                                    fprintf( stderr, " %08x=%llu", g_imiss_va[mi[i]],
+                                             (unsigned long long)g_imiss_n[mi[i]] );
+                                fprintf( stderr, "\n" );
+                            }
+                            /* The count alone cannot distinguish a tiny thunk
+                             * from a real hot block.  Emit a short byte window
+                             * for the leading entries so runtime-generated
+                             * code can be classified without guessing from its
+                             * allocation address.  This is diagnostic-only. */
+                            for (unsigned i=0; i<nm && i<12; i++)
+                            {
+                                uint32_t e = g_imiss_va[mi[i]] + (uint32_t)nd_slide;
+                                fprintf( stderr, "IMISS bytes @%08x:", g_imiss_va[mi[i]] );
+                                for (unsigned k=0; k<32; k++) fprintf( stderr, "%02x", rd8( e+k ) );
+                                fprintf( stderr, "\n" );
+                            }
+                        }
                     }
                 }
             }
@@ -4006,7 +7030,34 @@ static void run( struct x86cpu *c )
             continue;
         }
         uint32_t start = c->eip;
+        if (g_trace_3b < 0) g_trace_3b = getenv( "WASM_TRACE_3B" ) ? 1 : 0;
+        if (g_trace_3b && start >= 0x3b821d50u && start < 0x3b821e10u)
+        { g_trace_3b_hits++; g_trace_3b_last = start;
+          if (g_trace_3b_detail < 0)
+          { g_trace_3b_detail = getenv( "WASM_TRACE_3B_DETAIL" ) ? 1 : 0;
+            g_trace_3b_detail_left = 12; }
+          if (g_trace_3b_detail && g_trace_3b_detail_left)
+          { uint32_t sp = c->regs[ESP];
+            fprintf( stderr, "TRACE3B detail eip=%08x esp=%08x ret=%08x a0=%08x a1=%08x a2=%08x a3=%08x a4=%08x a5=%08x\n",
+                     start, sp, rd32( sp ), rd32( sp + 4 ), rd32( sp + 8 ),
+                     rd32( sp + 12 ), rd32( sp + 16 ), rd32( sp + 20 ), rd32( sp + 24 ) );
+            g_trace_3b_detail_left--; }
+        }
+        {
+            static int badip_on = -1;
+            static unsigned badip_count;
+            static uint32_t badip_last;
+            uint32_t previous = last_eip;
+            if (badip_on == -1) badip_on = getenv("WASM_BADIP") ? 1 : 0;
+            if (badip_on && start < 0x400000u && previous >= 0x400000u &&
+                badip_last != start && badip_count++ < 32) {
+                badip_last = start;
+                fprintf(stderr, "BADIP transition prev=%08x eip=%08x esp=%08x ebp=%08x eax=%08x ecx=%08x edx=%08x ret=%08x\n",
+                        previous, start, c->regs[ESP], c->regs[EBP], c->regs[EAX],
+                        c->regs[ECX], c->regs[EDX], rd32(c->regs[ESP]));
+            }
         last_eip = start;
+        }
 #ifdef WEBWINE_GENBLOCKS
         if (g_jit_filling && g_verify_budget-- <= 0)
         {   /* verify mode: ran the block's instruction count -> stop BEFORE the
@@ -4014,6 +7065,13 @@ static void run( struct x86cpu *c )
             g_total_insns += idelta; return;
         }
 #endif
+        if (nat_dynamic_jmp( c )) continue;
+        if (g_wgl_swap_addr && start == g_wgl_swap_addr && nat_wglswap( c )) continue;
+        /* Internal entries are the four instruction boundaries inside the
+         * verified loop.  Match the small contiguous range directly: their
+         * direct-dispatch slots can be occupied by unrelated runtime entries. */
+        if (g_msvcrt_memset_loop && start > g_msvcrt_memset_loop &&
+            start <= g_msvcrt_memset_loop + 12u && nat_memset_loop_tail( c )) continue;
         /* Frame boundary: _videoNextPage is the engine's page flip, entered once
          * per rendered frame with frameplace holding the COMPLETE frame.  Present
          * here (not on an insn-count timer) so the canvas shows whole, untorn
@@ -4027,6 +7085,16 @@ static void run( struct x86cpu *c )
                 if (nat_call( c, kind )) continue;   /* eip set by the native call */
             }
             else {
+            if (g_ipage_frame_mode && !g_ipage_frame_started)
+            {   /* Startup contains large CRT/loader bursts.  Clear the
+                 * diagnostic accumulators at the first real present so the
+                 * next report describes render-time interpreter residue. */
+                memset( g_ipage, 0, sizeof(g_ipage) );
+                memset( g_ipage_eip, 0, sizeof(g_ipage_eip) );
+                memset( g_imiss_va, 0, sizeof(g_imiss_va) );
+                memset( g_imiss_n, 0, sizeof(g_imiss_n) );
+                g_ipage_frame_started = 1;
+            }
             g_flip_count++;
             /* Refill audio here rather than on the arbitrary housekeeping tick:
              * this is a clean guest function entry, whereas an arbitrary
@@ -4056,7 +7124,34 @@ static void run( struct x86cpu *c )
 #ifdef WEBWINE_GENBLOCKS
         if (g_jit_on && !g_jit_filling)
         {   /* run a whole AOT-translated block, if we have one for this eip */
-            int slot = gen_lookup( start - (uint32_t)nd_slide );
+#if defined(WEBWINE_FP_HOT)
+            if (fp_hot_jit)
+            {
+                int fs = fp_hot_gen_lookup( start - (uint32_t)nd_slide );
+                if (fs >= 0)
+                {
+                    if (g_jit_verify || fp_hot_verify)
+                    { fp_hot_verify_block( c, fs, start ); continue; }
+                    int fi = fp_hot_gen_idx[fs];
+                    uint64_t fd = 0, fb = 0;
+                    for (;;)
+                    {
+                        const struct fp_genblk *b = &fp_g_genblk[fi];
+                        int nxt = b->fn( c );
+                        fd += b->ninsn; fb++;
+                        if (nxt < 0) break;
+                        uint32_t ne = c->eip;
+                        if (ne < 0x10000 || g_nat_addr[NAT_SLOT(ne)] == ne) break;
+                        nxt = fp_hot_gen_lookup( ne - (uint32_t)nd_slide );
+                        if (nxt < 0) break;
+                        fi = fp_hot_gen_idx[nxt];
+                    }
+                    g_total_insns += fd; g_jit_insns += fd; g_jit_blocks += fb;
+                    continue;
+                }
+            }
+#endif
+            int slot = gen_lookup_cached( start - (uint32_t)nd_slide );
             if (slot >= 0)
             {
                 if (g_jit_verify)
@@ -4084,6 +7179,12 @@ static void run( struct x86cpu *c )
                             fprintf( stderr, "JITBAD blk=%08x reg%d jit=%08x int=%08x eipj=%08x eipi=%08x\n",
                                      start-(uint32_t)nd_slide, r, jit.regs[r], c->regs[r],
                                      jit.eip-(uint32_t)nd_slide, c->eip-(uint32_t)nd_slide ); break; }
+                        if (!bad) for (int r=0; r<8; r++) for (int k=0; k<16; k++)
+                            if (c->xmm[r][k] != jit.xmm[r][k])
+                            { static int nx=0; bad=1; if (nx++<40)
+                                fprintf(stderr,"JITBAD blk=%08x xmm%d[%d] jit=%02x int=%02x eipj=%08x eipi=%08x\n",
+                                    start-(uint32_t)nd_slide,r,k,jit.xmm[r][k],c->xmm[r][k],
+                                    jit.eip-(uint32_t)nd_slide,c->eip-(uint32_t)nd_slide); break; }
                         if (!bad && c->eip != jit.eip) { static int nb=0; if (nb++<40)
                             fprintf( stderr, "JITBADEIP blk=%08x jit=%08x int=%08x\n",
                                      start-(uint32_t)nd_slide, jit.eip-(uint32_t)nd_slide, c->eip-(uint32_t)nd_slide ); }
@@ -4114,11 +7215,117 @@ static void run( struct x86cpu *c )
                 g_total_insns += jd; g_jit_insns += jd; g_jit_blocks += jb;
                 continue;
             }
+#if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
+            /* Builtin msvcrt is relocatable and has its own AOT table.  Keep
+             * this after the executable lookup and native-hook check: exported
+             * memmove/memset/etc. must retain their proven host fast paths. */
+            if (!g_jit_verify && g_msvcrt_jit && msvcrt_slide)
+            {
+                uint32_t mva = start - (uint32_t)msvcrt_slide;
+                /* The current prototype is not permitted to enter the
+                 * floating-point helper band that first exposed an x87/ABI
+                 * mismatch; those functions stay on the interpreter path. */
+                int ms = (mva < 0x1003e000u || mva >= 0x10041000u)
+                       ? msvcrt_gen_lookup(mva) : -1;
+                if (ms >= 0)
+                {
+                    int mi = msvcrt_gen_idx[ms];
+                    uint64_t md = 0, mb = 0;
+                    for (;;)
+                    {
+                        const struct msvcrt_genblk *b = &msvcrt_g_genblk[mi];
+                        int nxt = b->fn(c);
+                        md += b->ninsn; mb++;
+                        if (nxt < 0) break;
+                        uint32_t ne = c->eip;
+                        if (ne < 0x10000 || g_nat_addr[NAT_SLOT(ne)] == ne) break;
+                        mi = nxt;
+                    }
+                    g_total_insns += md; g_jit_insns += md; g_jit_blocks += mb;
+                    continue;
+                }
+            }
+#endif
+#ifdef WEBWINE_GENBLOCKS
+            /* GDI32's WidenPath is a measured frame hotspot.  Enter its tiny
+             * relocatable candidate only when explicitly requested; all
+             * dynamic calls and ungenerated blocks stay interpreter-owned. */
+            if (!g_jit_verify && gdi32_jit && gdi32_slide)
+            {
+                int gs = gdi32_gen_lookup( start - (uint32_t)gdi32_slide );
+                if (gs >= 0)
+                {
+                    int gi = gdi32_gen_idx[gs];
+                    uint64_t gd = 0, gb = 0;
+                    for (;;)
+                    {
+                        const struct gdi32_genblk *b = &gdi32_g_genblk[gi];
+                        int nxt = b->fn( c );
+                        gd += b->ninsn; gb++;
+                        if (nxt < 0) break;
+                        uint32_t ne = c->eip;
+                        if (ne < 0x10000 || gdi32_gen_lookup( ne - (uint32_t)gdi32_slide ) < 0) break;
+                        gi = gdi32_gen_idx[gdi32_gen_lookup( ne - (uint32_t)gdi32_slide )];
+                    }
+                    g_total_insns += gd; g_jit_insns += gd; g_jit_blocks += gb;
+                    continue;
+                }
+            }
+#endif
             /* JIT miss: this eip has no translated block.  Under WASM_IPAGE, tally
              * the interpreted block entry by 64KB guest page so we can see WHERE
              * the remaining interpreted load lives (which module/section). */
-            if (g_ipage_on) { unsigned pg = ((start - (uint32_t)nd_slide) >> 16) & 0x3ff;
-                              g_ipage[pg]++; g_ipage_eip[pg] = start; }
+            if (g_ipage_on) { uint32_t va = start - (uint32_t)nd_slide;
+                              unsigned pg = va >> 16;
+                              unsigned h = (unsigned)((va * 2654435761u) >> (32 - 18));
+                              g_ipage[pg]++; g_ipage_eip[pg] = start;
+                              while (g_imiss_va[h] && g_imiss_va[h] != va)
+                                  h = (h + 1) & (IMISS_COUNT - 1);
+                              g_imiss_va[h] = va; g_imiss_n[h]++; }
+            if (g_msvcrt_miss_trace == -1)
+                g_msvcrt_miss_trace = getenv( "WASM_TRACE_MSVCRT_MISS" ) ? 1 : 0;
+            if (g_msvcrt_miss_trace && start >= 0x3ee00000u && start < 0x3ee01000u &&
+                g_msvcrt_miss_trace_n < 64)
+            {
+            fprintf( stderr, "MSVCRT_MISS eip=%08x prev=%08x esp=%08x ret=%08x args=%08x,%08x,%08x,%08x,%08x bytes=",
+                     start, last_eip, c->regs[ESP], rd32(c->regs[ESP]),
+                     rd32(c->regs[ESP] + 4), rd32(c->regs[ESP] + 8),
+                     rd32(c->regs[ESP] + 12), rd32(c->regs[ESP] + 16),
+                     rd32(c->regs[ESP] + 20) );
+                for (unsigned ti = 0; ti < 16; ti++) fprintf( stderr, "%02x", rd8(start + ti) );
+                fprintf( stderr, "\n" );
+                g_msvcrt_miss_trace_n++;
+            }
+            if (g_msvcrt_hot_trace == -1)
+                g_msvcrt_hot_trace = getenv( "WASM_TRACE_MSVCRT_HOT" ) ? 1 : 0;
+            if (g_msvcrt_hot_trace &&
+                ((start >= 0x3ee39ae0u && start < 0x3ee39ba0u) ||
+                 (start >= 0x3ee4ff40u && start < 0x3ee4ffc0u)) &&
+                g_msvcrt_hot_trace_n < 64)
+            {
+                fprintf( stderr, "MSVCRT_HOT eip=%08x prev=%08x esp=%08x ret=%08x regs=%08x,%08x,%08x,%08x,%08x,%08x\n",
+                         start, last_eip, c->regs[ESP], rd32(c->regs[ESP]),
+                         c->regs[EAX], c->regs[EBX], c->regs[ECX], c->regs[EDX],
+                         c->regs[ESI], c->regs[EDI] );
+                g_msvcrt_hot_trace_n++;
+            }
+            if (g_vline1_entry_trace == -1)
+                g_vline1_entry_trace = getenv( "WASM_TRACE_VLINE1_ENTRY" ) ? 1 : 0;
+            if (g_vline1_entry_trace && start >= 0x00631c90u &&
+                start < 0x00631cf7u && g_vline1_entry_trace_n < 32)
+            {
+                fprintf( stderr,
+                         "VLINE1_ENTRY eip=%08x prev=%08x esp=%08x ret=%08x "
+                         "eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x "
+                         "ebp=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x\n",
+                         start, last_eip, c->regs[ESP], rd32(c->regs[ESP]),
+                         c->regs[EAX], c->regs[EBX], c->regs[ECX], c->regs[EDX],
+                         c->regs[ESI], c->regs[EDI], c->regs[EBP],
+                         rd32(c->regs[ESP] + 4), rd32(c->regs[ESP] + 8),
+                         rd32(c->regs[ESP] + 12), rd32(c->regs[ESP] + 16),
+                         rd32(c->regs[ESP] + 20), rd32(c->regs[ESP] + 24) );
+                g_vline1_entry_trace_n++;
+            }
         }
 #endif
         struct decode d = { 4, 4, 0, 0, c->eip };
@@ -4270,6 +7477,7 @@ static void run( struct x86cpu *c )
             a=c->regs[EAX]; c->regs[EAX]=c->regs[op&7]; c->regs[op&7]=a; break;
         case 0x90: break; /* nop / xchg eax,eax */
         case 0x9b: break; /* fwait/wait: no async x87 exceptions here -> no-op */
+        case 0xfa: case 0xfb: break; /* cli/sti: no guest interrupt controller */
         case 0x9e: /* sahf: AH -> SF ZF AF PF CF (AH mirrors the low EFLAGS byte) */
             { uint8_t ah = (c->regs[EAX] >> 8) & 0xff; c->eflags = get_flags(c);
               c->eflags = (c->eflags & ~(SF|ZF|AF|PF|CF)) | (ah & (SF|ZF|AF|PF|CF)); c->lf_size = 0; }
@@ -4502,7 +7710,7 @@ static int syscall_returns_void( uint32_t num )
         || num == 0x1564;  /* NtUserSetInternalWindowPos */
 }
 
-static uint32_t addr_syscall, addr_unixcall, addr_apc, addr_exc, addr_cb;
+static uint32_t addr_syscall, addr_apc, addr_exc, addr_cb;
 
 /* ---- user-mode callbacks (win32u -> user32 window procs etc.) ---- */
 static void *g_cb_ret_ptr;

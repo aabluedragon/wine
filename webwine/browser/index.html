@@ -11,6 +11,9 @@
   canvas { background: #000; image-rendering: pixelated; border: 1px solid #333; outline: none; display: block; }
   #side { width: 460px; }
   #status { color: #6f6; white-space: pre; margin-bottom: 8px; }
+  #boot { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+          color: #fc6; background: rgba(0,0,0,.85); border: 1px solid #765;
+          padding: 14px 18px; text-align: center; pointer-events: none; }
   #note { color: #888; margin-bottom: 8px; }
   #input { color: #fc6; margin-bottom: 8px; }
   #log { height: 600px; overflow: auto; background: #000; padding: 6px; border: 1px solid #333; white-space: pre-wrap; }
@@ -19,7 +22,10 @@
 <body>
 <div id="wrap">
   <div>
-    <canvas id="screen" width="640" height="400" style="width:1024px;height:640px" tabindex="0"></canvas>
+    <div style="position:relative">
+      <canvas id="screen" width="640" height="400" style="width:1024px;height:640px" tabindex="0"></canvas>
+      <div id="boot">Starting Wine…<br><small>Loading the game (first boot can take up to 40 seconds)</small></div>
+    </div>
   </div>
   <div id="side">
     <div id="status">booting…</div>
@@ -32,6 +38,7 @@
 const cv = document.getElementById('screen');
 const ctx = cv.getContext('2d');
 const statusEl = document.getElementById('status');
+const bootEl = document.getElementById('boot');
 const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
 const beacon = new URLSearchParams(location.search).has('beacon');
@@ -50,6 +57,18 @@ function fitCanvas(w, h) {
 }
 
 let frames = 0, lastFrames = 0, lastT = performance.now(), startT = lastT, firstFrameT = 0;
+let bootState = 'waiting for first frame (the initial load can take about 10s)';
+let visibleFrame = false;
+statusEl.textContent = bootState;
+function revealAfterVisibleFrame() {
+  if (visibleFrame) return;
+  /* A valid game frame may deliberately be black or very dark during an
+     intro/transition.  The frame event itself proves that Wine, WebGL, and
+     the worker are alive; a brightness threshold made the loading notice
+     obscure those frames and looked like a black-screen hang. */
+  visibleFrame = true;
+  bootEl.hidden = true;
+}
 function tick() {
   const now = performance.now();
   const dt = (now - lastT) / 1000;
@@ -58,7 +77,10 @@ function tick() {
     lastFrames = frames; lastT = now;
     const ttf = firstFrameT ? ((firstFrameT - startT) / 1000).toFixed(1) + 's' : '—';
     const res = lastW ? `${lastW}×${lastH} (${(lastW/lastH).toFixed(2)}:1)` : '—';
-    statusEl.textContent = `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`;
+    statusEl.textContent = frames
+      ? `fps: ${fps.toFixed(1)}   render: ${res}   frames: ${frames}   first-frame: ${ttf}`
+      : bootState;
+    if (frames && !visibleFrame) revealAfterVisibleFrame();
     /* ?beacon=1 reports the same line back through the server, whose access log
        is then the only way to read a phone's state - iOS Safari has no console
        you can reach without attaching the desktop Web Inspector by hand. */
@@ -148,6 +170,27 @@ const KEYMAP = {
   Insert:[0x2D,0x52,1], Delete:[0x2E,0x53,1],
 };
 
+// SDL scancodes are USB usages, not the PS/2 set-1 values used in WM_* lParam.
+// Pack the SDL value above the extended bit in the ring's fourth integer so the
+// native SDL_PollEvent hook can synthesize a complete SDL_KeyboardEvent.
+const SDL_SCAN = {
+  Escape:41, Backspace:42, Tab:43, Space:44, Minus:45, Equal:46,
+  BracketLeft:47, BracketRight:48, Backslash:49, Semicolon:51, Quote:52,
+  Backquote:53, Comma:54, Period:55, Slash:56, CapsLock:57,
+  Enter:40, ArrowRight:79, ArrowLeft:80, ArrowDown:81, ArrowUp:82,
+  Insert:73, Home:74, PageUp:75, Delete:76, End:77, PageDown:78,
+  NumpadDivide:84, NumpadMultiply:85, NumpadSubtract:86, NumpadAdd:87,
+  NumpadEnter:88, NumpadDecimal:99, NumLock:83, ScrollLock:71,
+  ShiftLeft:225, ShiftRight:229, ControlLeft:224, ControlRight:228,
+  AltLeft:226, AltRight:230,
+};
+for (let i = 0; i < 26; i++) SDL_SCAN['Key' + String.fromCharCode(65 + i)] = 4 + i;
+for (let i = 0; i < 10; i++) SDL_SCAN['Digit' + (i || 0)] = i ? 29 + i : 39;
+for (let i = 1; i <= 12; i++) SDL_SCAN['F' + i] = 57 + i;
+for (let i = 1; i <= 9; i++) SDL_SCAN['Numpad' + i] = 88 + i;
+SDL_SCAN.Numpad0 = 98;
+function packedScan(code) { return (SDL_SCAN[code] || 0) << 8; }
+
 let keysSent = 0, mouseSent = 0;
 let touchSeen = 0;
 /* Diagnostic only: a touch device delivers no keys at all, and Safari's emulated
@@ -163,13 +206,13 @@ noteInput();
 addEventListener('keydown', (e) => {
   const m = KEYMAP[e.code];
   if (!m) return;
-  if (!e.repeat) { push(1, m[0], m[1], m[2]); keysSent++; }   // the game does its own repeat
+  if (!e.repeat) { push(1, m[0], m[1], m[2] | packedScan(e.code)); keysSent++; }   // the game does its own repeat
   e.preventDefault();
 }, true);
 addEventListener('keyup', (e) => {
   const m = KEYMAP[e.code];
   if (!m) return;
-  push(2, m[0], m[1], m[2]); keysSent++;
+  push(2, m[0], m[1], m[2] | packedScan(e.code)); keysSent++;
   e.preventDefault();
 }, true);
 
@@ -237,13 +280,19 @@ function resumeAudio() {
 addEventListener('pointerdown', resumeAudio, true);
 addEventListener('keydown', resumeAudio, true);
 
-const worker = new Worker('worker.js');
+/* A tab can retain an older WorkerGlobalScope even after the page itself has
+   been refreshed.  Keep the worker bootstrap paired with this page's bundle;
+   otherwise an old worker can fail before it posts a useful diagnostic and
+   leave only the canvas's black background visible. */
+const worker = new Worker('worker.js?boot=' + Date.now());
 /* A wasm trap kills the worker with no output at all - the page just sits at
    'frames: 0' forever, which reads exactly like a slow boot.  Say so instead. */
 worker.onerror = e => {
   const msg = 'worker died: ' + (e.message || 'wasm trap') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : '');
   logEl.textContent += msg + '\n';
   statusEl.textContent = msg;
+  bootEl.hidden = false;
+  bootEl.innerHTML = 'Wine worker stopped.<br><small>Reload this page to retry.</small>';
   /* This is the one line that must not be lost: with ?beacon=1 a dead worker
      otherwise looks exactly like a slow one - fps 0 and no more log lines. */
   if (beacon) fetch('/__log?' + encodeURIComponent(msg)).catch(() => {});
@@ -252,6 +301,16 @@ worker.onerror = e => {
 // worker never services messages again.
 const wwEnv = {};
 for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*$/.test(k)) wwEnv[k] = v;
+/* The current WebGL swap path can create a valid context but still transfer
+   an all-zero default framebuffer on some browser/GPU combinations. Keep the
+   shipped page on the verified RGBA presentation path. The old
+   WASM_ENABLE_GLPRESENT switch was used in earlier diagnostic links, so do
+   not let a bookmarked URL re-enable that known-black path accidentally.
+   The deliberately experimental spelling is kept for focused debugging. */
+if (wwEnv.WASM_EXPERIMENTAL_GLPRESENT !== '1') {
+  wwEnv.WASM_NO_GLPRESENT = '1';
+  delete wwEnv.WASM_ENABLE_GLPRESENT;
+}
 worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP,
                      ctl: ctl ? ctl.buffer : null, env: wwEnv });
 
@@ -261,8 +320,17 @@ worker.onmessage = (e) => {
     if (!firstFrameT) firstFrameT = performance.now();
     if (cv.width !== m.w || cv.height !== m.h) { cv.width = m.w; cv.height = m.h; fitCanvas(m.w, m.h); }
     lastW = m.w; lastH = m.h;
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
+    const rgba = new Uint8ClampedArray(m.rgba);
+    ctx.putImageData(new ImageData(rgba, m.w, m.h), 0, 0);
+    if (!visibleFrame) {
+      /* putImageData has completed, so even an intentionally dark frame is
+         evidence that the game is rendering. */
+      visibleFrame = true;
+      bootEl.hidden = true;
+    }
+    if (ctl) Atomics.add(ctl, 2, 1);
     frames++;
+    bootState = 'running';
   } else if (m.type === 'glframe') {
     /* OpenGL (Polymost) path: the worker rendered into its own OffscreenCanvas
        and transferred the finished picture as an ImageBitmap, so there is no
@@ -273,8 +341,10 @@ worker.onmessage = (e) => {
     lastW = m.w; lastH = m.h;
     ctx.drawImage(m.bmp, 0, 0);
     m.bmp.close();
+    revealAfterVisibleFrame();
     if (ctl) Atomics.add(ctl, 2, 1);   /* let the worker post the next one */
     frames++;
+    bootState = 'running';
   } else if (m.type === 'audio') {
     startAudio(m.freq, m.channels);
   } else if (m.type === 'log') {
@@ -289,6 +359,14 @@ worker.onmessage = (e) => {
     if (atBottom) logEl.scrollTop = logEl.scrollHeight;
   }
 };
+/* A failed bootstrap can otherwise leave the page looking like a normal black
+ * game screen.  The worker reports its first line immediately; if it has not
+ * done so after 15 seconds, expose the actionable state in the page itself. */
+setTimeout(() => {
+  if (!frames && bootState !== 'running') {
+    bootEl.innerHTML = 'Still starting Wine…<br><small>Keep this tab open; if this remains for 30 seconds, reload.</small>';
+  }
+}, 15000);
 </script>
 </body>
 </html>

@@ -1,5 +1,15 @@
 # netduke32 in the browser — build & performance
 
+The current AOT generator discovers conservative callee-save function
+prologues as leaders, and also supports a small explicit list of
+profiler-proven indirect entries. The current candidate translates 170,676 of
+170,699 executable blocks; only the six `int3` and three `ud2` trap sites
+remain unhandled, and the `pextrw` SIMD form is translated as well. Keep the
+differential verifier enabled when changing this discovery rule because a
+false-positive leader changes the block boundary, not just coverage. The
+explicit entries are freshly decoded only at their named addresses; arbitrary
+raw-byte prologue scanning is intentionally not used.
+
 Runs the supplied `netduke32.exe` in a Web Worker via native-wasm Wine (Option
 B — Wine compiled to wasm, only the app's i386 code emulated by
 `../wasm_x86.c`).  MEMFS preload (no NODERAWFS), frames posted to a `<canvas>`.
@@ -8,7 +18,7 @@ B — Wine compiled to wasm, only the app's i386 code emulated by
 
 ```sh
 export WORK=/tmp/webwine-browser
-./build-node.sh            # OPT=-O1: ntdll.so + server objs + interpreter (node harness + shared objects)
+./build-node.sh            # OPT=-O3/XOPT=-O2: optimized support + verified interpreter
 ./assemble-assets.sh       # ~176MB MEMFS tree: 36-dll import closure + game data + NLS
 ./build-browser.sh         # -> $WORK/web/webwine-bw.{js,wasm,data} + worker.js + index.html
 (cd $WORK/web && python3 -m http.server 8799)   # open http://localhost:8799/
@@ -19,6 +29,11 @@ Fast measurement loop (no 176MB preload; reads game off the real FS):
 wall-second (fps = real `videoNextPage` rate; mips = interpreter throughput).
 `HISTO=1 TPUT=1 ./run-node.sh` adds an opcode histogram; `DUMP=1` emits base64
 frames on stderr.
+
+The experimental relocatable msvcrt AOT table is not part of the normal bundle.
+Build it explicitly with `MSVCRT_AOT=1` and enable its runtime dispatch with
+`WASM_MSVCRT_JIT=1`; it currently remains a research path because full-DLL
+dispatch has not passed the return-state differential gate.
 
 ## Performance notes (measured this session)
 

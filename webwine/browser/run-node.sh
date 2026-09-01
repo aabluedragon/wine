@@ -1,12 +1,12 @@
 #!/bin/bash
 # Run the node harness against netduke32 off the real filesystem.
-#   OPT=-O1 TPUT=1 ./run-node.sh          # WASM_TPUT -> FPSSAMPLE lines (fps/mips)
+#   OPT=-O3 TPUT=1 ./run-node.sh          # WASM_TPUT -> FPSSAMPLE lines (fps/mips)
 #   DUMP=1 ./run-node.sh                   # WASM_DUMP_FRAME -> base64 frames on stderr
 #   HISTO=1 TPUT=1 ./run-node.sh           # opcode histogram
 set -e
 WINE="${WINE:-$HOME/dev/wine}"; WINEMAC="${WINEMAC:-$WINE/wine-macos}"
 GAME="${GAME:-$HOME/games/netduke32_v1.2.1}"
-OPT="${OPT:--O1}"; WORK="${WORK:-/tmp/webwine-browser}"
+OPT="${OPT:--O3}"; WORK="${WORK:-/tmp/webwine-browser}"
 OUT="$WORK/nd_${OPT#-}"; ROOT="$WORK/fakeroot"; PREFIX="$WORK/prefix"; STAGE="$PREFIX/drive_c"
 source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
 
