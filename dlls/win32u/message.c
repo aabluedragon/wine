@@ -3625,7 +3625,7 @@ static HWND wasm_input_target(void)
     return cached;
 }
 
-static void wasm_drain_browser_input(void)
+void wasm_drain_browser_input(void)
 {
     int ev[4];
 

@@ -246,7 +246,7 @@ static const char *prof_module( uint32_t va )
 enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_SDL_OPEN, NAT_SDL_OPENDEV, NAT_SDL_PAUSE, NAT_SDL_PAUSEDEV,
        NAT_SDL_LOCK, NAT_SDL_UNLOCK, NAT_SDL_CLOSE, NAT_VLINE, NAT_VLINE_DISPATCH, NAT_MVLINE_DISPATCH, NAT_SURFBLIT,
-       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_MVLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS, NAT_QRHLINE,
+       NAT_SDL_POLL, NAT_SDL_RELMOUSE, NAT_SDL_KEYBOARDSTATE, NAT_MVLINE, NAT_SURFSPAN, NAT_LIBDIV, NAT_MHLINE, NAT_GLSTATE, NAT_GLSAMPLER, NAT_VLINE1, NAT_MVLINE1, NAT_CRC32, NAT_PALMATCH, NAT_MIXSTEREO, NAT_MIDEBUG, NAT_GLTHUNK, NAT_AGEBLOCKS, NAT_QRHLINE,
        NAT_MEMCMP, NAT_STRCMP, NAT_STRLEN, NAT_MEMCHR, NAT_STRncmp,
        NAT_STRCHR, NAT_STRCPY, NAT_STRNCPY, NAT_WCSLEN, NAT_WCSCHR, NAT_MEMSET_LOOP, NAT_TOASCII, NAT_TOLOWER, NAT_TOUPPER, NAT_FLOOR, NAT_QPF, NAT_QPC, NAT_GETTID, NAT_TLSGETVALUE,
        NAT_VLINE1NP2, NAT_MVLINE1NP2, NAT_UDIVMODDI4, NAT_SDL_TLSGET, NAT_SDL_ATOMIC_GET,
@@ -1943,6 +1943,7 @@ static void nat_arm_surfblit( void )
  * and SDL_MOUSEMOTION == 1024. */
 #define SDL_A_POLL      0x6a8420u
 #define SDL_A_RELMOUSE  0x6a8c80u
+#define SDL_A_KEYBOARDSTATE 0x6a8a80u
 #define SDL_EV_MOUSEMOTION 1024u
 
 /* Filled by the win32u ring drain (dlls/win32u/message.c) from page events. */
@@ -1950,6 +1951,7 @@ int g_mouse_dx, g_mouse_dy;      /* accumulated pointer-lock motion */
 int g_mouse_buttons;             /* live SDL button mask (win32u ring drain) */
 int g_mouse_x = 160, g_mouse_y = 100;
 int g_wasm_sdl_poll_fallback;    /* short window in which real SDL must drain input */
+extern void wasm_drain_browser_input(void);
 
 /* Browser input is drained by win32u while SDL is being polled.  The native
  * SDL_PollEvent hook cannot call back into the original Windows SDL thunk, so
@@ -1979,6 +1981,16 @@ void wasm_queue_mouse_input( int type, int a, int b, int c )
 }
 static int g_rel_mouse_on;       /* game asked for SDL relative (aiming) mode */
 static int g_mb_reported;        /* button mask the game has already been given */
+static uint8_t g_sdl_keyboard[512];
+
+static int sdl_keyboard_state( struct x86cpu *c )
+{
+    uint32_t n = garg( c, 0 );
+    if (n) wr32( n, 512 );
+    gret( c, (uint32_t)(uintptr_t)g_sdl_keyboard );
+    return 1;
+}
+static unsigned g_wasm_input_trace;
 
 /* SDL's keysym.sym is not a Windows VK.  Printable letters use lowercase
  * ASCII, while navigation/function keys use SDLK_SCANCODE_MASK|scancode. */
@@ -2028,6 +2040,14 @@ static int wasm_sdl_queued_event( struct x86cpu *c, uint32_t ev )
         wr32( ev + 20, wasm_sdl_keycode( in.vk, in.scancode ) );
         wr32( ev + 24, 0 );                /* modifier */
         wr32( ev + 28, 0 );
+        if (in.scancode < sizeof(g_sdl_keyboard)) g_sdl_keyboard[in.scancode] = !in.up;
+        if (g_wasm_input_trace < 16)
+        {
+            fprintf( stderr, "wasm_input: SDL key %s vk=%#x scan=%#x sym=%#x\\n",
+                     in.up ? "up" : "down", in.vk, in.scancode,
+                     wasm_sdl_keycode( in.vk, in.scancode ) );
+            g_wasm_input_trace++;
+        }
         gret( c, 1 );
         return 1;
     }
@@ -2066,6 +2086,10 @@ static int sdl_poll_event( struct x86cpu *c )
     int dx, dy;
 
     if (!ev) return 0;
+    /* SDL games often poll without entering the Win32 message pump.  Drain
+     * the browser ring here so input is available on the same poll that
+     * consumes it, rather than depending on an unrelated PeekMessage call. */
+    wasm_drain_browser_input();
     if (fast_empty < 0) fast_empty = getenv( "WASM_NO_FAST_EMPTY_POLL" ) ? 0 : 1;
 
     /* In the browser, win32u marks polls that may have a newly posted input
@@ -2150,6 +2174,7 @@ static void nat_arm_mouse( void )
     static const struct { uint32_t va, slot; int kind; const char *name; } t[] = {
         { SDL_A_POLL,     0x0082fe94u, NAT_SDL_POLL,     "SDL_PollEvent"           },
         { SDL_A_RELMOUSE, 0x00830090u, NAT_SDL_RELMOUSE, "SDL_SetRelativeMouseMode" },
+        { SDL_A_KEYBOARDSTATE, 0x00830010u, NAT_SDL_KEYBOARDSTATE, "SDL_GetKeyboardState" },
     };
     unsigned i;
     for (i = 0; i < sizeof(t)/sizeof(t[0]); i++)
@@ -4687,6 +4712,7 @@ static int nat_call( struct x86cpu *c, int kind )
     case NAT_SDL_UNLOCK:   if (g_aud.lock) g_aud.lock--; gret( c, 0 ); return 1;
     case NAT_SDL_CLOSE:    g_aud.open = 0; g_aud.paused = 1; gret( c, 0 ); return 1;
     case NAT_SDL_POLL:     return sdl_poll_event( c );
+    case NAT_SDL_KEYBOARDSTATE: return sdl_keyboard_state( c );
     /* Say yes to relative mode: the game then uses xrel/yrel, which we supply.
      * Record the requested state - in relative (aiming) mode SDL never gets the
      * WM_MOUSEMOVE that would give its window mouse focus, so it drops the posted
