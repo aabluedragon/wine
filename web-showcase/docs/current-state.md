@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-02 00:39 IDT: input/load stress run completed end to end
+
+Observation: the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_BADIP=1` serves JS
+`7100ac1d5eb17403526ec882b869de7bff7eb7a5547f4a9d75c19b424ec4d954`, WASM
+`964c44f915a343e41b4ebd78d213848311d0b28bac3637d45efe40f4b929a3a2`, and data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`. The
+source tree is dirty on `vibe` at `9789a1f0`; no sibling checkout was modified.
+
+Observation: a 40-second fresh Chrome stress run with mouse motion, a held W
+key, and Space reached a non-black 320x200 canvas, passed the temporary
+texture-precache interval, and ended at 1,835 frames / 64 FPS. The page
+reported `input: ready — keys 4, mouse 24`; guest logs showed W SDL key
+down/up, and there were no `FATAL`, `RuntimeError`, or `unreachable` failures.
+
+Decision: the screenshot's zero-FPS interval is finite asset loading. The
+canonical build now completes that transition under active input and continues
+rendering smoothly; no further runtime change is justified by the reproduced
+evidence.
+
 ## 2026-09-02 00:23 IDT: long-run check distinguishes texture-load pause from input failure
 
 Observation: the canonical URL
