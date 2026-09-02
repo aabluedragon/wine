@@ -195,6 +195,20 @@ static int browser_fast_masked_columns( void )
 #endif
 }
 
+/* The single-column loops are separate from the four-column mappers.  They
+ * are small, verified SMC hooks and are useful in the actual game, while the
+ * other browser_fast_render hooks include unrelated experimental paths. */
+static int browser_fast_single_columns( void )
+{
+#ifdef WEBWINE_BROWSER
+    static int fast = -1;
+    if (fast < 0) fast = !getenv( "WASM_NO_FAST_SINGLE_COLUMNS" );
+    return fast;
+#else
+    return 1;
+#endif
+}
+
 static int browser_fast_libdiv( void )
 {
 #ifdef WEBWINE_BROWSER
@@ -6875,8 +6889,8 @@ static void run( struct x86cpu *c )
                           if (browser_fast_masked_columns() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
                           if (browser_fast_masked_columns() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
                           if (browser_fast_render() && !getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
-                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
-                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
+                          if (browser_fast_single_columns() && !getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
+                          if (browser_fast_single_columns() && !getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
                           nat_arm_setup_mappers();
                           if (!getenv( "WASM_NO_SDL_TLSGET" )) nat_arm_sdl_tlsget();
                           if (!getenv( "WASM_NO_SDL_ATOMIC_GET" )) nat_arm_sdl_atomics();

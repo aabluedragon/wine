@@ -1,5 +1,33 @@
 # Current browser checkpoint
 
+## 2026-09-03 00:24 IDT: single-column v1/l1 default enabled and load-stage hang cleared
+
+Change: browser builds now arm the verified native `vlineasm1` and
+`mvlineasm1` hooks independently of the broader experimental render switch.
+This targets the remaining single-column mapper work without enabling the
+unrelated risky render hooks. `WASM_NO_FAST_SINGLE_COLUMNS=1` disables both
+hooks for regression comparison. The source tree remains dirty from
+preserved untracked build artifacts; no sibling checkout was modified.
+
+Verification: exact URL
+`http://localhost:8799/?WASM_TPUT=1&build=v1l1-default` served WASM SHA-256
+`ec9f319d8ddc49a93c73003f3ab79c68290f63280de54c1c651622d3ff56fd68`, JS
+`7e9db027632fdb92516f47aee768ff79d087cb53bace60fb4947fef0a4ccecd7`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The 115-second run reached a real non-black 320x200 canvas with
+`first-frame: 47.0s`, accepted both Enter events, and remained live through
+`FPSSAMPLE t=114.2` at approximately 24.9 FPS. Decisive lines included
+`native vlineasm1 entry`, `native mvlineasm1`, `v1=2/400`, and
+`mv1=98/1487`; no `UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or
+load-percentage hang occurred. The canvas result was live gameplay output.
+
+Observations: single-column hooks are reached during rendering and the
+browser no longer stalls at the reported 79% stage. Hypothesis: the remaining
+FPS ceiling is elsewhere in the interpreter/render path; this change does not
+enable the unsafe four-column masked mapper or full SSE/x87 translation.
+
 ## 2026-09-03 06:20 IDT: interpreter-safe column default verified past 94%
 
 Change: both native four-column mapper families are now opt-in in browser
