@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-02 23:10 IDT: libdivide rollback at 77% cache boundary
+
+Observation: the previously promoted URL
+`http://localhost:8799/?WASM_TPUT=1&build=columns-libdiv` accelerated the early
+load but hung at the 77% level-load boundary. The failure is isolated to the
+new browser-default libdivide shortcut; the four-column mapper hooks were not
+changed.
+
+Change: browser libdivide is now opt-in via `WASM_FAST_LIBDIV=1` and remains
+disablable with `WASM_NO_FAST_LIBDIV=1`. The default bundle is the stable
+columns-only configuration. The source tree remains dirty because preserved
+build artifacts are untracked; no sibling checkout was modified.
+
+Verification: the rebuilt bundle served at
+`http://localhost:8799/?WASM_TPUT=1&build=columns-stable` with WASM SHA-256
+`c6f013faa3354907f3a846688b6f28c80e101e73cc96db4cf90420d541a6be58`, JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The fresh 90-second run delivered both Enter events, reached a real 320x200
+non-black canvas, crossed `Cache size increased by 1024 to new max of 2048
+entries` at 86.4664s, and continued rendering at 56--58 FPS afterward with no
+`UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or hang.
+
 ## 2026-09-02 20:42 IDT: browser columns plus libdivide fast path
 
 Observation: the canonical URL

@@ -188,7 +188,7 @@ static int browser_fast_libdiv( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_NO_FAST_LIBDIV" ) ? 0 : 1;
+    if (fast < 0) fast = getenv( "WASM_FAST_LIBDIV" ) && !getenv( "WASM_NO_FAST_LIBDIV" );
     return fast;
 #else
     return 1;
