@@ -188,7 +188,7 @@ static int browser_fast_libdiv( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_FAST_LIBDIV" ) && !getenv( "WASM_NO_FAST_LIBDIV" );
+    if (fast < 0) fast = !getenv( "WASM_NO_FAST_LIBDIV" );
     return fast;
 #else
     return 1;
@@ -2415,10 +2415,16 @@ static int nat_libdivide( struct x86cpu *c )
 {
     uint32_t esp  = c->regs[ESP];
     uint32_t sret = c->regs[EAX];
+    uint32_t caller = rd32( esp );
     uint32_t bf, h;
     uint64_t key;
     int w;
 
+    /* Compiled CON lives in the 0x03xxxxxx arena and can relocate while a
+     * level is loading.  A cache miss there would use nested run(), which is
+     * unsafe across that relocation.  Let the original guest function handle
+     * dynamic-CON callers; ordinary executable callers still get the cache. */
+    if (caller >= 0x03000000u && caller < 0x04000000u) return 0;
     if (g_ld_filling) return 0;                  /* the nested run re-enters here */
     bf  = rd32( esp + 4 );                       /* branchfree: the one stack arg */
     key = ((((uint64_t)c->regs[ECX] << 32) | c->regs[EDX]) << 1) | (bf != 0);
