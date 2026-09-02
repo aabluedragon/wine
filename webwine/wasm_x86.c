@@ -5228,38 +5228,6 @@ static void unimplemented( struct x86cpu *c, uint32_t eip, uint8_t op )
 {
     fprintf( stderr, "wasm_x86: UNIMPLEMENTED opcode %02x at eip=%08x bytes=%02x %02x %02x %02x %02x\n",
              op, eip, rd8(eip), rd8(eip+1), rd8(eip+2), rd8(eip+3), rd8(eip+4) );
-    if (getenv( "WASM_BADOP_DETAIL" ))
-        fprintf( stderr, "wasm_x86: BADOP state esp=%08x ebp=%08x eip=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
-                 c->regs[ESP], c->regs[EBP], c->eip,
-                 rd32(c->regs[ESP]), rd32(c->regs[ESP]+4), rd32(c->regs[ESP]+8),
-                 rd32(c->regs[ESP]+12), rd32(c->regs[ESP]+16), rd32(c->regs[ESP]+20),
-                 rd32(c->regs[ESP]+24), rd32(c->regs[ESP]+28) );
-    /* BoxedWine's CON compiler relocates its generated-code arena while a
-     * level is being assembled.  A return address already on the guest stack
-     * can consequently point at the old arena, where the bytes are CON data
-     * rather than x86 (the observed signature is 06 07 08 09 0a).  Treat this
-     * as a stale generated-code frame and unwind it to its caller.  Keep the
-     * recovery deliberately narrow: normal untranslated x86, and any other
-     * arena byte pattern, must retain the fatal diagnostic above.
-     */
-    if (op == 0x06 && eip >= 0x03000000u && eip < 0x04000000u &&
-        rd8(eip + 1) == 0x07 && rd8(eip + 2) == 0x08 &&
-        rd8(eip + 3) == 0x09 && rd8(eip + 4) == 0x0a)
-    {
-        uint32_t ret = rd32( c->regs[ESP] );
-        /* The compiler's dispatcher stores a low arena-relative continuation
-         * (the observed value is 0x00069ff2), not a normal executable VA.
-         * Rebase it into the lower relocated CON arena before resuming. */
-        if (ret < 0x00100000u) ret += 0x03600000u;
-        if (ret >= 0x00400000u && ret < 0x70000000u)
-        {
-            fprintf( stderr, "wasm_x86: recovered stale CON return eip=%08x -> %08x\n", eip, ret );
-            c->eip = ret;
-            c->regs[ESP] += 4;
-            c->running = 1;
-            return;
-        }
-    }
     c->running = 0;
     c->exit_code = 0xE0000001;
 }
@@ -6807,7 +6775,16 @@ static void run( struct x86cpu *c )
                           }
                           if (!getenv( "WASM_NO_AGELOOP" ) && !getenv( "WASM_COUNT_LOOP" ))
                               nat_arm_ageloop();
+#ifdef WEBWINE_BROWSER
+                          /* ageBlocks mutates the live texture-cache allocator.
+                           * Keep the guest implementation in browser builds;
+                           * the native shortcut is available explicitly for
+                           * controlled throughput experiments. */
+                          if (getenv( "WASM_AGEBLOCKS" ) && !getenv( "WASM_NO_AGEBLOCKS" ))
+                              nat_arm_ageblocks();
+#else
                           if (!getenv( "WASM_NO_AGEBLOCKS" )) nat_arm_ageblocks();
+#endif
                           /* The setup prologue and body are now both native;
                            * the setup hook keeps every SMC-patched immediate
                            * synchronized before qrhline reads it. */

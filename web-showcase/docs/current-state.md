@@ -1,24 +1,27 @@
 # Current browser checkpoint
 
-## 2026-09-02 15:08 IDT: stale CON return recovery candidate served
+## 2026-09-02 15:20 IDT: browser cache allocator shortcut disabled
 
 Observation: after the late-menu reproduction reached the former 78%/cache
 boundary, the guest reported `UNIMPLEMENTED opcode 06 at eip=03882816` with
 bytes `06 07 08 09 0a`, followed by `initial thread run returned`. The address
 is in the relocatable compiled-CON arena rather than the executable image.
 
-Change: added a narrowly guarded recovery for that exact arena/byte signature;
-ordinary unsupported x86 opcodes remain fatal. The patched bundle is served at
-`http://localhost:8799/?WASM_TPUT=1&build=stale-con-recovery2` and port 8806.
+Change: removed the speculative stale-return recovery and kept the guest
+`cache1d::ageBlocks` implementation active in browser builds. The native cache
+allocator shortcut is now opt-in with `WASM_AGEBLOCKS=1`. The patched bundle is
+served at `http://localhost:8799/?WASM_TPUT=1&build=cache-guest-safe` and port
+8806.
 Current served hashes are JS
 `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
-`5b183fb33e3ba71a55992c4c99ff6a00a79aa553927ac63ca4391797db8ff89e`, data
+`c6cbbe8a85a4733f5ca3a1c4583021d99e0ec872045ff08c8b0919416e3f02b9`, data
 `d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
 `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
 index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
 The Wine source tree remains dirty due to preserved build artifacts; no sibling
-checkout was modified. A post-link boot sample reached the interpreter and
-was still compiling at 35 seconds; the late-level recovery result is pending.
+checkout was modified. The new late-level run is the decisive verification still
+in progress; observations must not be confused with the earlier speculative
+recovery candidate.
 
 ## 2026-09-02 01:40 IDT: browser JIT relocation crash removed
 
