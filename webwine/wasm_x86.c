@@ -184,6 +184,17 @@ static int browser_fast_columns( void )
 #endif
 }
 
+static int browser_fast_masked_columns( void )
+{
+#ifdef WEBWINE_BROWSER
+    static int fast = -1;
+    if (fast < 0) fast = getenv( "WASM_FAST_MVLINE" ) && !getenv( "WASM_NO_FAST_COLUMNS" );
+    return fast;
+#else
+    return 1;
+#endif
+}
+
 static int browser_fast_libdiv( void )
 {
 #ifdef WEBWINE_BROWSER
@@ -6861,8 +6872,8 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
                           if (browser_fast_columns() && !getenv( "WASM_NO_VLINE" )) nat_arm_vline();
                           if (browser_fast_columns() && !getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
-                          if (browser_fast_columns() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
-                          if (browser_fast_columns() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
+                          if (browser_fast_masked_columns() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
+                          if (browser_fast_masked_columns() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
                           if (browser_fast_render() && !getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (browser_fast_render() && !getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (browser_fast_render() && !getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();

@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-03 04:25 IDT: masked mapper removed from browser default
+
+Change: the browser no longer arms the native `mvlineasm4` masked mapper by
+default. It is available only with `WASM_FAST_MVLINE=1`; the verified unmasked
+`vlineasm4` mapper remains native, with its pathological-span preflight. This
+removes the last accelerated mapper implicated in the repeated 94% load stall
+while retaining the majority of the column-rendering speedup. The source tree
+remains dirty from preserved untracked build artifacts; no sibling checkout was
+modified.
+
+Verification: exact URL
+`http://localhost:8799/?WASM_TPUT=1&build=vline-public` served WASM SHA-256
+`1334f860a3cff05f8812244405f76f003952c48af2c60c52f7ec546c15a22b30`, JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The fresh 105-second run delivered both Enter events, reached a real non-black
+320x200 canvas, crossed `Cache size increased by 1024 to new max of 2048
+entries` at 85.4062s, and continued at 33.8--58.8 FPS afterward. No
+`UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or hang was observed.
+
 ## 2026-09-03 03:05 IDT: relocation guard for masked four-column mapper
 
 Change: `mvlineasm4` and its dispatcher now reject callers in the relocatable
