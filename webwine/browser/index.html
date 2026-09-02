@@ -301,6 +301,13 @@ worker.onerror = e => {
 // worker never services messages again.
 const wwEnv = {};
 for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*$/.test(k)) wwEnv[k] = v;
+/* The shipped browser path is the real 32-bpp OpenGL renderer with the AOT
+   translator enabled.  This is both the fast path and the path that avoids
+   the classic renderer's long software-column stalls.  Query parameters are
+   applied above/below these defaults, so diagnostic controls such as
+   ?WASM_NO_JIT=1 or ?WW_GL=0 remain available. */
+if (wwEnv.WASM_JIT === undefined) wwEnv.WASM_JIT = '1';
+if (wwEnv.WW_GL === undefined) wwEnv.WW_GL = '1';
 /* The current WebGL swap path can create a valid context but still transfer
    an all-zero default framebuffer on some browser/GPU combinations. Keep the
    shipped page on the verified RGBA presentation path. The old

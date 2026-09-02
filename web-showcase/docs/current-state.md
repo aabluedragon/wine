@@ -1,5 +1,34 @@
 # Current browser checkpoint
 
+## 2026-09-03 01:42 IDT: fast default promoted — OpenGL plus JIT exceeds 70 FPS
+
+Change: the browser page now defaults to the verified 32-bpp OpenGL renderer
+(`WW_GL=1`) and AOT x86-to-WASM translator (`WASM_JIT=1`). URL environment
+overrides remain available, including `WASM_NO_JIT=1` and `WW_GL=0`. The
+single-column `vlineasm1`/`mvlineasm1` hooks remain enabled; unsafe
+`mvlineasm4`, `surfspan`, and `qrhline` experiments remain opt-in. The source
+tree remains dirty from preserved untracked build artifacts; no sibling
+checkout was modified.
+
+Verification: exact plain default URL
+`http://localhost:8799/?WASM_TPUT=1&build=default-fast` served WASM SHA-256
+`ecb8e7207b616af553c6ad833a6fd011b1c8114434c7e138ac5a72bc02f8b5ce`, JS
+`eccd144dad0ffc11b1bc650fd2ee72b6a12fa329610a60d8f11beb33a6fc518e`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `10c22497509b4392bd1d52c27c2450510015e700ed648dfcd0a8e685bcd17f32`.
+The fresh 80-second run received both Enter events, logged
+`wasm_x86: JIT 170758 translated blocks loaded`, rendered a real non-black
+640x400 canvas, and reached `FPSSAMPLE t=79.5 ... fps=100.8` with nearby
+samples from 75.6 to 100.8 FPS. No `FATAL`, `RuntimeError`, `JITBAD`, or
+load-percentage hang occurred; the canvas remained live and input reported
+`keys 4, mouse 2`.
+
+Observations: the default path now reaches the game quickly and clears the
+requested 70 FPS threshold in the tested browser session. Hypothesis: the
+remaining variation is browser/host load and the emulator's dynamic CON work,
+not the former software mapper bottleneck.
+
 ## 2026-09-03 00:24 IDT: single-column v1/l1 default enabled and load-stage hang cleared
 
 Change: browser builds now arm the verified native `vlineasm1` and

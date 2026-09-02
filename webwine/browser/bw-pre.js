@@ -79,10 +79,10 @@ Module['preRun'].push(function () {
 Module['onRuntimeInitialized'] = function () {
   try {
     var E = self.__wwEnv || {};
-    if (!E.WW_GL && !E.WW_CFG) return;
+    if (E.WW_GL !== '1' && !E.WW_CFG) return;
     var f = '/game/autoexec.cfg';
     var cfg = FS.readFile(f, { encoding: 'utf8' });
-    if (E.WW_GL) cfg = cfg.replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
+    if (E.WW_GL === '1') cfg = cfg.replace(/^vidmode .*$/m, 'vidmode 640 400 32 0')
                           .replace(/^r_upscalefactor .*$/m, 'r_upscalefactor 1');
     /* ?WW_NOIDX=1 turns off the engine's indexed-colour texture path, which is
        what packs tiles into one big atlas and addresses them from uniforms. */
