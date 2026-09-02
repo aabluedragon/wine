@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-03 06:20 IDT: interpreter-safe column default verified past 94%
+
+Change: both native four-column mapper families are now opt-in in browser
+builds (`WASM_FAST_COLUMNS=1` and `WASM_FAST_MVLINE=1`). The default keeps the
+guest mapper implementations, eliminating the repeated load-stage deadlock;
+the other verified native hooks remain active. The source tree remains dirty
+from preserved untracked build artifacts; no sibling checkout was modified.
+
+Verification: exact URL
+`http://localhost:8799/?WASM_TPUT=1&build=interpreter-columns` served WASM
+SHA-256 `eaf19f0d4cd40e72d2b66eae95b05d33e309beac45b1de26ea98c34613ae88c0`, JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The fresh 105-second run delivered both Enter events and remained live through
+94.2s at 25.9 FPS, with `vl=0/0`, `mv=0/0`, and no `UNIMPLEMENTED opcode`,
+`FATAL`, `RuntimeError`, or hang. The canvas was a real non-black 320x200
+frame.
+
 ## 2026-09-03 04:25 IDT: masked mapper removed from browser default
 
 Change: the browser no longer arms the native `mvlineasm4` masked mapper by

@@ -177,7 +177,7 @@ static int browser_fast_columns( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_NO_FAST_COLUMNS" ) ? 0 : 1;
+    if (fast < 0) fast = getenv( "WASM_FAST_COLUMNS" ) && !getenv( "WASM_NO_FAST_COLUMNS" );
     return fast;
 #else
     return 1;
