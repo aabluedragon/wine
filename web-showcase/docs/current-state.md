@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-02 20:42 IDT: browser columns plus libdivide fast path
+
+Observation: the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&build=columns-libdiv` served JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
+`eead580e3a31591e5b028fd19c17b50f788d1c39babec6b29c542d4ced20d1e4`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The Wine source tree remains dirty because preserved build artifacts are
+untracked; no sibling checkout was modified.
+
+Observation: the fresh 90-second CDP run delivered both Enter key pairs and
+reached the active scene. Late samples were 73.8--75.9 FPS, compared with
+roughly 62 FPS for the columns-only candidate. The logs showed
+`Cache size increased by 1024 to new max of 2048 entries` at 85.3349s, but no
+`UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or black-frame report before
+the harness closed; the final `initial thread run returned (eip=000000e9)` was
+at harness shutdown. The canvas was rendering a non-black 320x200 frame before
+shutdown.
+
+Decision: enable the pure/cache-based libdivide native path by default in the
+browser, with `WASM_NO_FAST_LIBDIV=1` as its rollback switch. The verified
+four-column mapper hooks remain enabled by default; other self-modifying
+renderer shortcuts remain opt-in through `WASM_FAST_RENDER=1`.
+
 ## 2026-09-02 20:25 IDT: browser self-modifying renderer shortcuts disabled by default
 
 Observation: after the late-menu reproduction reached the former 78%/cache
@@ -15,7 +41,7 @@ bundle is served at `http://localhost:8799/?WASM_TPUT=1&build=smc-safe` and port
 8806.
 Current served hashes are JS
 `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
-`62a0c93d94e5fbfab06fd9868e24da4f8776813a3202bffe816f6c1117d8eae9`, data
+`eead580e3a31591e5b028fd19c17b50f788d1c39babec6b29c542d4ced20d1e4`, data
 `d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
 `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
 index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.

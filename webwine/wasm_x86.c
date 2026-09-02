@@ -184,6 +184,17 @@ static int browser_fast_columns( void )
 #endif
 }
 
+static int browser_fast_libdiv( void )
+{
+#ifdef WEBWINE_BROWSER
+    static int fast = -1;
+    if (fast < 0) fast = getenv( "WASM_NO_FAST_LIBDIV" ) ? 0 : 1;
+    return fast;
+#else
+    return 1;
+#endif
+}
+
 /* Guest eip sampling profiler (env WASM_PROF).  Samples are taken on the
  * existing ~64K-instruction housekeeping tick, so the hot path pays NOTHING and
  * the sample is uniform over instructions executed.  Addresses are dumped raw;
@@ -6845,7 +6856,7 @@ static void run( struct x86cpu *c )
                           if (getenv( "WASM_SURFSPAN" ) && !getenv( "WASM_NO_SURFSPAN" ))
                               nat_arm_surfspan();
                           g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
-                          if (browser_fast_render() && !getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
+                          if (browser_fast_libdiv() && !getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
