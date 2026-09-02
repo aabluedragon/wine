@@ -9,10 +9,10 @@ is in the relocatable compiled-CON arena rather than the executable image.
 
 Change: added a narrowly guarded recovery for that exact arena/byte signature;
 ordinary unsupported x86 opcodes remain fatal. The patched bundle is served at
-`http://localhost:8799/?WASM_TPUT=1&build=stale-con-recovery` and port 8806.
+`http://localhost:8799/?WASM_TPUT=1&build=stale-con-recovery2` and port 8806.
 Current served hashes are JS
 `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
-`bc890dbc21b96a0ab4da3a8bb8ba3f49a8246d8a3221e20231084060a5cb6ad7`, data
+`5b13644b9f422ad9960b07339be519664c5c99b4538988af5c89d2f39462df55`, data
 `d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
 `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
 index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.

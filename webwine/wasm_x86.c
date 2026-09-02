@@ -5247,7 +5247,10 @@ static void unimplemented( struct x86cpu *c, uint32_t eip, uint8_t op )
         rd8(eip + 3) == 0x09 && rd8(eip + 4) == 0x0a)
     {
         uint32_t ret = rd32( c->regs[ESP] );
-        if (ret >= 0x00400000u && ret < 0x70000000u)
+        /* The compiler's dispatcher can return through a low guest relay
+         * (the observed continuation is 0x00069ff2), so the executable-base
+         * check would reject the very frame this recovery is for. */
+        if (ret >= 0x00010000u && ret < 0x70000000u)
         {
             fprintf( stderr, "wasm_x86: recovered stale CON return eip=%08x -> %08x\n", eip, ret );
             c->eip = ret;
