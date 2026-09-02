@@ -195,6 +195,11 @@ static int browser_fast_libdiv( void )
 #endif
 }
 
+static int nd_dynamic_con_addr( uint32_t addr )
+{
+    return addr >= 0x03000000u && addr < 0x04000000u;
+}
+
 /* Guest eip sampling profiler (env WASM_PROF).  Samples are taken on the
  * existing ~64K-instruction housekeeping tick, so the hot path pays NOTHING and
  * the sample is uniform over instructions executed.  Addresses are dumped raw;
@@ -1740,6 +1745,7 @@ static int nd_mvline_skeleton_ok( uint32_t va, uint32_t *casebase )
 static int nat_mvlineasm4( struct x86cpu *c )
 {
     uint32_t b = ND_MVLINE + (uint32_t)nd_slide;
+    uint32_t caller = rd32( c->regs[ESP] + 24 );
     uint32_t s16 = rd8 ( b + 0x0e ), s15 = rd8 ( b + 0x11 );
     uint32_t s14 = rd8 ( b + 0x45 ), s13 = rd8 ( b + 0x64 );
     uint32_t a12 = rd32( b + 0x14 ), a9 = rd32( b + 0x1a );
@@ -1758,6 +1764,11 @@ static int nat_mvlineasm4( struct x86cpu *c )
     uint32_t edx = c->regs[EDX], esi = c->regs[ESI], edi = c->regs[EDI], ebp = c->regs[EBP];
     uint32_t cl = ecx & 0xff, dl = edx & 0xff, mem = rd8( cnt );
     unsigned iters = 0;
+
+    /* The masked mapper is also reached from relocatable compiled CON code.
+     * Its SMC setup can move while a level is loading; do not let that caller
+     * enter the native loop with a stale setup frame. */
+    if (nd_dynamic_con_addr( caller )) return 0;
 
     /* the two shared registers only work if the steps leave the low byte alone
      * and the shifts throw it away again */
@@ -1824,6 +1835,11 @@ static int nat_mvline_dispatch( struct x86cpu *c )
     uint32_t b = ND_MVLINE + (uint32_t)nd_slide;
     uint32_t entrysp, sp;
     uint32_t arg, edi, ebx, cl, mem;
+
+    if (c->eip == ND_MVLINE_DISPATCH + (uint32_t)nd_slide - 5u &&
+        nd_dynamic_con_addr( rd32( c->regs[ESP] ))) return 0;
+    if (c->eip == ND_MVLINE_DISPATCH + (uint32_t)nd_slide - 4u &&
+        nd_dynamic_con_addr( rd32( c->regs[ESP] + 4u ))) return 0;
 
     /* Calls enter at the true SMC preamble, which pushes five registers before
      * reaching the old hook at ND_MVLINE_DISPATCH.  When this hook is armed at
