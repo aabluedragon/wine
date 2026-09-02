@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-03 00:58 IDT: definitive stable browser default
+
+Change: the libdivide native shortcut is disabled by default again. It remains
+available only with `WASM_FAST_LIBDIV=1`; the default browser configuration
+uses the verified four-column mapper hooks and the original libdivide guest
+implementation. This removes the remaining native shortcut implicated in the
+reported 79% load hang.
+
+Verification: the exact URL
+`http://localhost:8799/?WASM_TPUT=1&build=columns-final-stable` served WASM
+SHA-256 `bb1a7dcd272a9a16681a91a8c9b21d56b7ea254334405e2876fd0a13ce218d84`,
+JS `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The source tree remains dirty from preserved untracked build artifacts; no
+sibling checkout was modified.
+
+Observation: a fresh 90-second run delivered both Enter events, reached a real
+non-black 320x200 canvas, crossed `Cache size increased by 1024 to new max of
+2048 entries` at 85.9247s, and continued rendering at 54.9 FPS after the
+transition. There was no `UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or
+hang; the final `initial thread run returned (eip=000000e9)` occurred during
+normal harness shutdown.
+
 ## 2026-09-03 00:18 IDT: guarded libdivide fast path crosses level load
 
 Change: retain the fast browser libdivide cache for ordinary executable
