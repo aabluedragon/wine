@@ -15,7 +15,7 @@ bundle is served at `http://localhost:8799/?WASM_TPUT=1&build=smc-safe` and port
 8806.
 Current served hashes are JS
 `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
-`052ff488424ab20471e45a192770719b56f8b6bff5dd0a0a7d807f8703a7120c`, data
+`62a0c93d94e5fbfab06fd9868e24da4f8776813a3202bffe816f6c1117d8eae9`, data
 `d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
 `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
 index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.

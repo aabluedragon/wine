@@ -173,6 +173,17 @@ static int browser_fast_render( void )
 #endif
 }
 
+static int browser_fast_columns( void )
+{
+#ifdef WEBWINE_BROWSER
+    static int fast = -1;
+    if (fast < 0) fast = getenv( "WASM_NO_FAST_COLUMNS" ) ? 0 : 1;
+    return fast;
+#else
+    return 1;
+#endif
+}
+
 /* Guest eip sampling profiler (env WASM_PROF).  Samples are taken on the
  * existing ~64K-instruction housekeeping tick, so the hot path pays NOTHING and
  * the sample is uniform over instructions executed.  Addresses are dumped raw;
@@ -6808,10 +6819,10 @@ static void run( struct x86cpu *c )
                               nat_arm_qrhline();
                           }
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
-                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE" )) nat_arm_vline();
-                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
-                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
-                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
+                          if (browser_fast_columns() && !getenv( "WASM_NO_VLINE" )) nat_arm_vline();
+                          if (browser_fast_columns() && !getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
+                          if (browser_fast_columns() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
+                          if (browser_fast_columns() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
                           if (browser_fast_render() && !getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
                           if (browser_fast_render() && !getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
                           if (browser_fast_render() && !getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
