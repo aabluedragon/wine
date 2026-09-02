@@ -1,6 +1,6 @@
 # Current browser checkpoint
 
-## 2026-09-02 15:20 IDT: browser cache allocator shortcut disabled
+## 2026-09-02 20:25 IDT: browser self-modifying renderer shortcuts disabled by default
 
 Observation: after the late-menu reproduction reached the former 78%/cache
 boundary, the guest reported `UNIMPLEMENTED opcode 06 at eip=03882816` with
@@ -8,13 +8,14 @@ bytes `06 07 08 09 0a`, followed by `initial thread run returned`. The address
 is in the relocatable compiled-CON arena rather than the executable image.
 
 Change: removed the speculative stale-return recovery and kept the guest
-`cache1d::ageBlocks` implementation active in browser builds. The native cache
-allocator shortcut is now opt-in with `WASM_AGEBLOCKS=1`. The patched bundle is
-served at `http://localhost:8799/?WASM_TPUT=1&build=cache-guest-safe` and port
+`cache1d::ageBlocks` implementation active. Browser-native mapper, surface-blit,
+libdivide, and qrhline shortcuts are now opt-in with `WASM_FAST_RENDER=1`; the
+default browser path keeps these self-modifying seams interpreted. The patched
+bundle is served at `http://localhost:8799/?WASM_TPUT=1&build=smc-safe` and port
 8806.
 Current served hashes are JS
 `cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
-`c6cbbe8a85a4733f5ca3a1c4583021d99e0ec872045ff08c8b0919416e3f02b9`, data
+`052ff488424ab20471e45a192770719b56f8b6bff5dd0a0a7d807f8703a7120c`, data
 `d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
 `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
 index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.

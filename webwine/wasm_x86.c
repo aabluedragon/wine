@@ -162,6 +162,17 @@ static int g_last_w = 0, g_last_h = 0;
 static uint64_t g_histo[512];       /* opcode histogram (env WASM_HISTO): [op], [256+op2] */
 static int g_histo_on = 0;
 
+static int browser_fast_render( void )
+{
+#ifdef WEBWINE_BROWSER
+    static int fast = -1;
+    if (fast < 0) fast = getenv( "WASM_FAST_RENDER" ) ? 1 : 0;
+    return fast;
+#else
+    return 1;
+#endif
+}
+
 /* Guest eip sampling profiler (env WASM_PROF).  Samples are taken on the
  * existing ~64K-instruction housekeeping tick, so the hot path pays NOTHING and
  * the sample is uniform over instructions executed.  Addresses are dumped raw;
@@ -6792,18 +6803,18 @@ static void run( struct x86cpu *c )
                            * render thread for seconds in the attract loop.
                            * The setup hook synchronizes its SMC immediates;
                            * keep this verified fast path enabled by default. */
-                          if (!getenv( "WASM_NO_QRHLINE" )) {
+                          if (browser_fast_render() && !getenv( "WASM_NO_QRHLINE" )) {
                               nat_arm_setupqrhline();
                               nat_arm_qrhline();
                           }
                           if (!getenv( "WASM_NO_AUDIO" )) nat_arm_audio();
-                          if (!getenv( "WASM_NO_VLINE" )) nat_arm_vline();
-                          if (!getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
-                          if (!getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
-                          if (!getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
-                          if (!getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
-                          if (!getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
-                          if (!getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
+                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE" )) nat_arm_vline();
+                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE_DISPATCH" )) nat_arm_vline_dispatch();
+                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE" )) nat_arm_mvline();
+                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE_DISPATCH" )) nat_arm_mvline_dispatch();
+                          if (browser_fast_render() && !getenv( "WASM_NO_MHLINE" )) nat_arm_mhline();
+                          if (browser_fast_render() && !getenv( "WASM_NO_VLINE1" )) nat_arm_vline1();
+                          if (browser_fast_render() && !getenv( "WASM_NO_MVLINE1" )) nat_arm_mvline1();
                           nat_arm_setup_mappers();
                           if (!getenv( "WASM_NO_SDL_TLSGET" )) nat_arm_sdl_tlsget();
                           if (!getenv( "WASM_NO_SDL_ATOMIC_GET" )) nat_arm_sdl_atomics();
@@ -6813,7 +6824,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MIDEBUG" )) nat_arm_midebug();
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
-                          if (!getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
+                          if (browser_fast_render() && !getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           /* The span mapper touches the engine's self-growing
                            * cache while a level is being assembled.  Keep the
@@ -6823,7 +6834,7 @@ static void run( struct x86cpu *c )
                           if (getenv( "WASM_SURFSPAN" ) && !getenv( "WASM_NO_SURFSPAN" ))
                               nat_arm_surfspan();
                           g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
-                          if (!getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
+                          if (browser_fast_render() && !getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }
