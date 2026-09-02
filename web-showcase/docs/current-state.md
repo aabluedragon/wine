@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-03 01:55 IDT: bounded four-column mapper fallback
+
+Change: `vlineasm4` now preflights its carry-terminated span length. If a
+relocated or partially patched call would require more than 65,536 iterations,
+the native hook declines before modifying guest memory and the original guest
+loop runs instead. Normal spans remain native; libdivide remains disabled by
+default. The source tree remains dirty from preserved untracked build
+artifacts; no sibling checkout was modified.
+
+Verification: exact URL
+`http://localhost:8799/?WASM_TPUT=1&build=columns-bounded` served WASM SHA-256
+`8494df7c4fa67f12dd7950e26d98b95c73f4d37ea5a965791557f6f03ae1a512`, JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The fresh 90-second run delivered both Enter events, reached a real non-black
+320x200 canvas, crossed the cache resize at 85.8812s, and continued at 54.9--61.9
+FPS afterward. No `UNIMPLEMENTED opcode`, `FATAL`, `RuntimeError`, or hang was
+observed.
+
 ## 2026-09-03 00:58 IDT: definitive stable browser default
 
 Change: the libdivide native shortcut is disabled by default again. It remains

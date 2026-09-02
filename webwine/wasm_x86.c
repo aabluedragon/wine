@@ -1542,6 +1542,13 @@ static int nat_vlineasm4( struct x86cpu *c )
     unsigned guard = 0;
 
     if (!fbstep) return 0;                 /* would never carry -> never terminate */
+    /* A relocated/partially patched call can leave a very small framebuffer
+     * step.  The original loop would then take millions of iterations before
+     * its carry exit, which presents as a load percentage hang.  Normal spans
+     * are a few hundred iterations; decline pathological calls before writing
+     * anything so the interpreter handles them exactly. */
+    if ((((uint64_t)0x100000000ULL - edi) + fbstep - 1) / fbstep > 65536)
+        return 0;
 
     do {
         ecx >>= sh1;
