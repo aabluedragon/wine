@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-02 15:08 IDT: stale CON return recovery candidate served
+
+Observation: after the late-menu reproduction reached the former 78%/cache
+boundary, the guest reported `UNIMPLEMENTED opcode 06 at eip=03882816` with
+bytes `06 07 08 09 0a`, followed by `initial thread run returned`. The address
+is in the relocatable compiled-CON arena rather than the executable image.
+
+Change: added a narrowly guarded recovery for that exact arena/byte signature;
+ordinary unsupported x86 opcodes remain fatal. The patched bundle is served at
+`http://localhost:8799/?WASM_TPUT=1&build=stale-con-recovery` and port 8806.
+Current served hashes are JS
+`cd92367247fdcfb9dc9e8644cdf32ca9e8bccfd5cebc80355c3ca13d8a6e5973`, WASM
+`bc890dbc21b96a0ab4da3a8bb8ba3f49a8246d8a3221e20231084060a5cb6ad7`, data
+`d88e01f461b152239b3e434a5582f4be813b248a5c882f0e41d383bf965131bb`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+index `623fafa969f1dfbb819d5ceb7eac013ae802d52ff394c0c4e464ddbb8da479e4`.
+The Wine source tree remains dirty due to preserved build artifacts; no sibling
+checkout was modified. A post-link boot sample reached the interpreter and
+was still compiling at 35 seconds; the late-level recovery result is pending.
+
 ## 2026-09-02 01:40 IDT: browser JIT relocation crash removed
 
 Observation: the canonical URL
