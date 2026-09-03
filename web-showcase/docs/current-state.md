@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-03 17:08 IDT: compiler and XMM fast-path candidates rejected
+
+Observation: two production browser candidates were built and exercised
+against the direct `/v1,/l1` path at port 8807. Whole-module `-O3 -flto`
+reached E1L1 and preserved the real 640x400 gameplay canvas, but did not beat
+the shipped baseline. A narrower XMM 4/8/16-byte load/store specialization
+also reached E1L1 with the same rendered scene, but its steady samples were
+materially below the baseline during the run. Neither candidate was promoted;
+the source was restored to the verified helper implementation. No
+`FATAL`, `RuntimeError`, or `JITBAD` was observed in the completed candidate
+runs.
+
+The canonical bundle was not changed. It remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source is clean at `9e3379f3` apart from preserved untracked generated/build
+artifacts; no sibling checkout was modified.
+
+The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
+
 ## 2026-09-03 16:51 IDT: NP2 mapper default rejected after clean reruns
 
 Observation: the existing skeleton-checked non-power-of-two single-column
