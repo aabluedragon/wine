@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-03 16:26 IDT: GDI AOT default rejected after paired browser gate
+
+Observation: the opt-in 8-block `gdi32.dll!WidenPath` AOT slice and its
+same-artifact `WASM_NO_GDI32_JIT=1` control both reached E1L1, rendered the
+identical screenshot (`a227e01c`), and remained free of `FATAL`/`RuntimeError`.
+The apparent 3–5 FPS advantage in the first pair did not survive the next
+canonical pair: default-on ended around 93–100 FPS and opt-out around 94–100
+FPS. The candidate is therefore neutral and is not enabled by default.
+
+The runtime now honors `WASM_NO_GDI32_JIT=1` when the GDI experiment is
+explicitly requested. The browser default remains the verified executable AOT
+plus OpenGL path. Source is on `vibe` with the tracked change uncommitted at
+this checkpoint; preserved untracked generated/build artifacts remain, and no
+sibling checkout was modified. The currently published artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Final canonical verification URL for this checkpoint:
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+The 16:25 run logged `E1L1: HOLLYWOOD HOLOCAUST`, `jit_frac` near 94%, and
+live 640×400 gameplay with the yellow crosshair, weapon, and HUD. This is an
+observation; no FPS improvement is claimed for the rejected GDI experiment.
+
 ## 2026-09-03 16:14 IDT: name-resolved profile narrows the next FPS target
 
 Observation: a profile-enabled normal AOT browser candidate was run at

@@ -575,7 +575,8 @@ static void nat_init( struct x86cpu *c )
         if (gbase)
         {
             gdi32_slide = (int32_t)(gbase - 0x10000000u);
-            gdi32_jit = getenv( "WASM_GDI32_JIT" ) ? 1 : 0;
+            gdi32_jit = (getenv( "WASM_GDI32_JIT" ) &&
+                         !getenv( "WASM_NO_GDI32_JIT" )) ? 1 : 0;
             gdi32_gen_loaded = 1;
             if (gdi32_jit) gdi32_gen_build_hash();
             nat_arm_gdi_relays( gbase );
