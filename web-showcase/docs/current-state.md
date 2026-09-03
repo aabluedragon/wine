@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-03 16:51 IDT: NP2 mapper default rejected after clean reruns
+
+Observation: the existing skeleton-checked non-power-of-two single-column
+mapper hooks were tested on the temporary candidate at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=np2-clean`.
+They reached `E1L1: HOLLYWOOD HOLOCAUST`, loaded both
+`vlineasm1nonpow2` and `mvlineasm1nonpow2`, and produced the same real
+640x400 gameplay image (`a227e01c`) without `FATAL`, `RuntimeError`, or
+`JITBAD`. The initial paired sample looked about 3% faster, but clean longer
+runs varied down to roughly 50--70 FPS on the same artifact, so the result is
+not reproducible evidence and the default change was rejected. The hook
+remains available only through `WASM_EXPERIMENT_NP2=1`.
+
+The canonical bundle was not changed. It remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source commit is `66d0e7ac`; tracked source is clean after the rejected
+experiment, while preserved untracked generated/build artifacts remain. No
+sibling checkout was modified.
+
+The stable test URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
+
 ## 2026-09-03 16:32 IDT: frame-scoped SSE entry batch rejected
 
 Observation: frame-scoped `WASM_IPAGE_DETAIL=1` identified repeated executable
