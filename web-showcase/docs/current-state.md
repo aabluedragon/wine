@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-03 16:14 IDT: name-resolved profile narrows the next FPS target
+
+Observation: a profile-enabled normal AOT browser candidate was run at
+`http://localhost:8807/?WASM_TPUT=1&WASM_PROF=1&WW_ARGS=%2Fv1,%2Fl1&build=profile-names`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, produced a non-black 640×400 gameplay
+canvas, and stayed live without `FATAL` or `RuntimeError`. The resolved samples
+showed diffuse `gdi32.dll!WidenPath`, ntdll heap/relocation/character helpers,
+and executable renderer sites around `0x0055xxxx` and `0x0061xxxx`; there was
+no single missing mapper dominating the frame. This rules out promoting the
+already-rejected narrow GDI or isolated entry-seed candidates as an FPS fix.
+
+The canonical published bundle was not changed. Its hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`ed0a9a819942dec48c424c6415cabc5f80f18b616957669ae5f199e97f29ae14`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source commit is `afd6c167`; tracked source is clean, preserved untracked
+generated/build artifacts remain, and no sibling checkout was modified.
+
+The next work hypothesis is a broader, verified optimization of the dynamic
+renderer/SSE path or a measured Wine support routine, with differential and
+real-canvas gates required before promotion. The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-safe-aot`.
+
 ## 2026-09-03 16:05 IDT: FPS probes rejected; canonical build preserved
 
 Observation: three isolated candidates were tested against the published
