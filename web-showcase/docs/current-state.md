@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-03 17:35 IDT: flag-liveness AOT candidate rejected by verifier
+
+Observation: a conservative generator experiment reduced emitted `set_lazy`
+operations from 181,819 to 112,729 with the same 170,757 translated blocks.
+The browser candidate did not pass the required differential gate: fresh
+`WASM_JIT_VERIFY=1` runs reported repeated `JITBAD` mismatches (including
+`0x007bbe80` and `0x0052f2d4`), and a non-verifier run later aborted during
+startup with guest memory exhaustion and an ImGui assertion. The candidate was
+discarded; the generator and generated table were restored to the verified
+implementation. It was never published.
+
+The canonical bundle was not changed. It remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source is clean at `fc7a2029` apart from preserved untracked generated/build
+artifacts; no sibling checkout was modified.
+
+The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
+
 ## 2026-09-03 17:08 IDT: compiler and XMM fast-path candidates rejected
 
 Observation: two production browser candidates were built and exercised
