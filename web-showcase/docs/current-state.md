@@ -1,5 +1,21 @@
 # Current browser checkpoint
 
+## 2026-09-03 14:27 IDT: audio underrun telemetry verified during active play
+
+The browser page now reports AudioWorklet underruns when they occur, rather
+than showing only that the context opened. This is diagnostic UI only; it does
+not alter the audio data path. The source tree remains dirty only from
+preserved untracked build artifacts; no sibling checkout was modified.
+
+Verification: after publishing the matching page to
+`/Users/alonamir/.webwine-work/web`, a fresh run at
+`http://localhost:8799/?WASM_TPUT=1&build=audio-check` reached a real 640×400
+frame at `10.4s`, reported `audio: on`, accepted Enter and W down/up, and
+reported no underrun count through 35 seconds of active rendering. Guest
+rendering remained live at about 140–162 FPS in the tested interval, with no
+`FATAL`, `RuntimeError`, or hang. The WASM and JS artifacts were unchanged from
+the preceding verified OpenGL-presentation fix.
+
 ## 2026-09-03 14:24 IDT: fixed OpenGL presentation leaving the page on “Still starting Wine”
 
 Root cause: the browser page enabled `WW_GL=1` but also forcibly set

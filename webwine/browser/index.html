@@ -43,7 +43,7 @@ const inputEl = document.getElementById('input');
 const logEl = document.getElementById('log');
 const beacon = new URLSearchParams(location.search).has('beacon');
 let lastW = 0, lastH = 0;
-let audioCtx = null, audioState = 'off';
+let audioCtx = null, audioState = 'off', audioUnderruns = 0;
 let locked = false;          // pointer lock (mouse capture) state
 
 // Scale the canvas to fit a box WITHOUT distorting it: one integer-ish factor
@@ -198,7 +198,7 @@ let touchSeen = 0;
 addEventListener('touchstart', () => { touchSeen++; }, {passive: true});
 function noteInput() {
   inputEl.textContent = ring
-    ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}   |   mouse: ${locked ? 'CAPTURED (Esc to release)' : 'click canvas to capture'}`
+    ? `input: ready — keys ${keysSent}, mouse ${mouseSent}   |   audio: ${audioState}${audioUnderruns ? ` (underruns ${audioUnderruns})` : ''}   |   mouse: ${locked ? 'CAPTURED (Esc to release)' : 'click canvas to capture'}`
     : 'input: DISABLED — no SharedArrayBuffer (serve with COOP/COEP headers, e.g. serve.py)';
 }
 noteInput();
@@ -268,6 +268,11 @@ async function startAudio(freq, channels) {
       outputChannelCount: [2],
       processorOptions: { sab: audioSab, cap: AUDIO_CAP, srcRate: freq },
     });
+    node.port.onmessage = (e) => {
+      if (!e.data || !e.data.underruns) return;
+      audioUnderruns = e.data.underruns;
+      noteInput();
+    };
     node.connect(audioCtx.destination);
     audioState = audioCtx.state === 'running'
       ? `on ${freq}Hz/${channels}ch` : 'click to enable';
