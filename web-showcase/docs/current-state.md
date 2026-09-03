@@ -1,5 +1,33 @@
 # Current browser checkpoint
 
+## 2026-09-03 14:24 IDT: fixed OpenGL presentation leaving the page on “Still starting Wine”
+
+Root cause: the browser page enabled `WW_GL=1` but also forcibly set
+`WASM_NO_GLPRESENT=1`. Wine therefore rendered and processed input, while
+`webwine_gl_present()` returned before posting the `glframe` message that
+updates the visible page canvas. The contradictory override was removed from
+`webwine/browser/index.html`; explicit `?WASM_NO_GLPRESENT=1` remains available
+for diagnostics. The source tree remains dirty only from preserved untracked
+build artifacts; no sibling checkout was modified.
+
+Published artifact: `/Users/alonamir/.webwine-work/web/index.html` now matches
+the source at SHA-256
+`5c8ad0fca95f24233443eb0545f759dafea6676b58c3b396885add707974cac7`.
+WASM remains
+`ecb8e7207b616af553c6ad833a6fd011b1c8114434c7e138ac5a72bc02f8b5ce` and JS
+remains `eccd144dad0ffc11b1bc650fd2ee72b6a12fa329610a60d8f11beb33a6fc518e`.
+
+Verification URL:
+`http://localhost:8799/?WASM_TPUT=1&build=final-gl-present`. A fresh Chrome
+run reached `first-frame: 10.6s`, produced a screenshot-backed non-black
+640×400 canvas (`shotBytes=6613`, hash `9239273`), reported
+`input: ready`, `audio: on`, and delivered `wasm_input` SDL Enter plus W key
+down/up events. Guest `FPSSAMPLE` remained about 130–156 FPS during movement;
+there was no `FATAL`, `RuntimeError`, or load-stage hang. The canonical server
+returned 200 with COOP/COEP headers. This is the first checkpoint where the
+visible page frame, keyboard path, and running Wine state are all verified
+together.
+
 ## 2026-09-03 12:56 IDT: canonical server restarted after connection refusal
 
 Observation: the reported `Still starting Wine` page was caused by the

@@ -308,16 +308,12 @@ for (const [k, v] of new URLSearchParams(location.search)) if (/^[A-Z][A-Z0-9_]*
    ?WASM_NO_JIT=1 or ?WW_GL=0 remain available. */
 if (wwEnv.WASM_JIT === undefined) wwEnv.WASM_JIT = '1';
 if (wwEnv.WW_GL === undefined) wwEnv.WW_GL = '1';
-/* The current WebGL swap path can create a valid context but still transfer
-   an all-zero default framebuffer on some browser/GPU combinations. Keep the
-   shipped page on the verified RGBA presentation path. The old
-   WASM_ENABLE_GLPRESENT switch was used in earlier diagnostic links, so do
-   not let a bookmarked URL re-enable that known-black path accidentally.
-   The deliberately experimental spelling is kept for focused debugging. */
-if (wwEnv.WASM_EXPERIMENTAL_GLPRESENT !== '1') {
-  wwEnv.WASM_NO_GLPRESENT = '1';
-  delete wwEnv.WASM_ENABLE_GLPRESENT;
-}
+/* OpenGL presents through webwine_gl_present(), which transfers an
+   ImageBitmap from the worker-owned OffscreenCanvas to the page. Do not set
+   WASM_NO_GLPRESENT here: with the shipped WW_GL=1 default that switch would
+   leave Wine rendering and accepting input while the page stayed forever on
+   "Still starting Wine" because no glframe message could arrive. It remains
+   available as an explicit diagnostic override in the URL. */
 worker.postMessage({ type: 'input', ring: ring, audio: audioSab, audioCap: AUDIO_CAP,
                      ctl: ctl ? ctl.buffer : null, env: wwEnv });
 
