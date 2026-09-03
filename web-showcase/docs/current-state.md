@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-03 12:56 IDT: canonical server restarted after connection refusal
+
+Observation: the reported `Still starting Wine` page was caused by the
+canonical port 8799 process being down; a fresh check returned
+`net::ERR_CONNECTION_REFUSED`. The COOP/COEP server was restarted from the
+published artifact directory, and `http://localhost:8799/` now returns 200
+with `Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Embedder-Policy: require-corp`, and `Cache-Control: no-store`.
+The source tree remains dirty from preserved untracked build artifacts; no
+sibling checkout was modified.
+
+Verification: served WASM SHA-256 is
+`ecb8e7207b616af553c6ad833a6fd011b1c8114434c7e138ac5a72bc02f8b5ce`, matching
+the promoted fast build. A fresh 18-second browser run at
+`http://localhost:8799/?build=server-live-check` loaded the worker, logged
+`JIT 170758 translated blocks loaded`, initialized OpenGL 3.3 and audio, and
+logged the logo slowdown warning without a worker/bootstrap/runtime error. It
+did not produce a frame in that short no-key window because the game was still
+waiting at its title sequence; the normal test requires pressing Enter after
+the title sequence. The browser auto-Enter experiment was removed because
+SAB events cannot wake that blocked wait reliably.
+
 ## 2026-09-03 01:42 IDT: fast default promoted — OpenGL plus JIT exceeds 70 FPS
 
 Change: the browser page now defaults to the verified 32-bpp OpenGL renderer
