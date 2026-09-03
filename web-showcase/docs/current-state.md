@@ -1,5 +1,36 @@
 # Current browser checkpoint
 
+## 2026-09-03 16:05 IDT: FPS probes rejected; canonical build preserved
+
+Observation: three isolated candidates were tested against the published
+browser path. `XOPT=-O3` rendered E1L1 but ended around 97 FPS, below the
+shipped run's roughly 103 FPS. Explicit seeds for renderer misses
+`0x00555790` and `0x00609640` compiled 170,759 blocks (one additional block)
+and rendered correctly, but did not materially lower steady `kinsn/frame`
+(`~760` versus `~763`) or improve FPS. A focused msvcrt AOT slice loaded 143
+blocks and rendered E1L1 without a fault, but also did not improve the matched
+late-frame interval. The full msvcrt AOT path remains rejected because its
+earlier control run faulted before the first frame with an out-of-bounds
+memory access.
+
+The canonical bundle was not changed. It remains built with the verified
+`GENBLK=1`, browser `XOPT=-O2` configuration at source commit `bceabc64`;
+tracked source is clean, preserved untracked generated/build artifacts remain,
+and no sibling checkout was modified. Published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`ed0a9a819942dec48c424c6415cabc5f80f18b616957669ae5f199e97f29ae14`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+The exact canonical verification URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-safe-aot`.
+The profile run reached `E1L1: HOLLYWOOD HOLOCAUST`, a real non-black 640×400
+canvas, and live flips; no `FATAL` or `RuntimeError` occurred. The new profile
+evidence identifies the next work as the executable renderer/SSE miss regions,
+not the rejected compiler, mapper-seed, or broad CRT switches. This last
+sentence is a work hypothesis; the measured results above are observations.
+
 ## 2026-09-03 15:48 IDT: published stable JIT/WASM FPS build
 
 Observation: the browser build was rebuilt with `GENBLK=1` and the generated
