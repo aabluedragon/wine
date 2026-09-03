@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-03 16:32 IDT: frame-scoped SSE entry batch rejected
+
+Observation: frame-scoped `WASM_IPAGE_DETAIL=1` identified repeated executable
+misses at `0x0055b6f0`, `0x00555610`, and `0x005599c0`, so a candidate seeded
+those entries together with the earlier renderer entries. It compiled 170,767
+blocks, reached `E1L1: HOLLYWOOD HOLOCAUST`, and produced the same real
+640×400 gameplay screenshot (`a227e01c`), but its late samples fell to roughly
+82–93 FPS. It was not promoted. The frame-scoped miss detail confirms a broad
+SSE/render family rather than one safe missing entry; isolated entry seeding is
+not the next lever.
+
+The canonical bundle was not changed and remains the known-good default. Its
+hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source commit is `80abd5e1`; tracked source is clean, preserved untracked
+generated/build artifacts remain, and no sibling checkout was modified. The
+stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
 ## 2026-09-03 16:26 IDT: GDI AOT default rejected after paired browser gate
 
 Observation: the opt-in 8-block `gdi32.dll!WidenPath` AOT slice and its
