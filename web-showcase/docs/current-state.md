@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-03 15:19 IDT: restored tinted OpenGL crosshair and fast-test arguments
+
+Root cause: the browser bundle linked stale `opengl32` unix-thunk objects from
+before `f86f2b7b`, the existing BGRA-to-RGBA fix for tinted ART tiles. The
+native GL shortcut also bypassed `glTexSubImage2D`, so the fix was unreachable.
+The texture-upload shortcut was removed; hot draw/state shortcuts remain native.
+The browser pre-js now installs `WW_ARGS` before Emscripten snapshots argv, so
+`/v1,/l1` starts directly in E1L1. The source tree remains dirty from
+preserved untracked build artifacts; no sibling checkout was modified.
+
+Published artifacts in `/Users/alonamir/.webwine-work/web`: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`2a1a3d8622bd75bc32dcabc39d44051e1f849864e13ca11e8dbfdba1eceaa279`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Verification URL:
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=bgra-published`.
+The run logged `Application parameters: /v1 /l1` and `E1L1: HOLLYWOOD
+HOLOCAUST`, reached a real non-black 640×400 gameplay canvas, and the
+screenshot showed the actual yellow crosshair at screen center. Rendering was
+live at roughly 55–67 FPS during the 23-second direct-game test, with no
+`FATAL`, `RuntimeError`, or load hang.
+
 ## 2026-09-03 14:27 IDT: audio underrun telemetry verified during active play
 
 The browser page now reports AudioWorklet underruns when they occur, rather

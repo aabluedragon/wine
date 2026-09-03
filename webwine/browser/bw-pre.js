@@ -1,6 +1,14 @@
 // --pre-js for the browser (worker) bundle: env, FS symlinks, argv, log relay.
 // Runs inside the emscripten module scope before the runtime starts.
 Module['arguments'] = ['c:\\netduke32.exe'];
+/* Emscripten snapshots Module.arguments into its private arguments_ array
+ * before preRun callbacks execute. Build the optional browser arguments here,
+ * while the worker has already supplied __wwEnv but before the generated
+ * runtime starts, so ?WW_ARGS=-v1,-l1 really reaches the PE. */
+try {
+  var earlyEnv = self.__wwEnv || {};
+  if (earlyEnv.WW_ARGS) Module['arguments'] = Module['arguments'].concat(earlyEnv.WW_ARGS.split(','));
+} catch (e) {}
 
 /* The EGL/WebGL backend needs a canvas to make a context from, and a worker has
    no DOM.  An OffscreenCanvas made HERE (not one transferred from the page) is
@@ -51,11 +59,6 @@ Module['preRun'].push(function () {
      without a rebuild, which is the only way to compare fairly on a machine
      whose background load drifts between builds. */
   try { var X = self.__wwEnv || {}; for (var k in X) E[k] = X[k]; } catch (e) {}
-
-  /* ?WW_ARGS=a,b,c appends command line arguments for the game, so a session can
-     start where you want it (-map E1L1.MAP) instead of being driven through the
-     menus - booting takes long enough that it matters when iterating. */
-  if (E.WW_ARGS) Module['arguments'] = Module['arguments'].concat(E.WW_ARGS.split(','));
 
   function mkdirp(p) { try { FS.mkdirTree ? FS.mkdirTree(p) : FS.mkdir(p); } catch (e) {} }
   function sym(t, l) { try { FS.symlink(t, l); } catch (e) {} }

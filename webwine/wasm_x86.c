@@ -4561,7 +4561,7 @@ static const struct { const char *name; uint16_t code; uint8_t nargs; } nd_glthu
     { "glLoadMatrixf", 168, 1 }, { "glMultMatrixf",185, 1 }, { "glLoadIdentity",166, 0 },
     { "glEnable",       81, 1 }, { "glDisable",     72, 1 }, { "glBlendFunc",    16, 2 },
     { "glColor4f",      46, 4 }, { "glDrawArrays",  74, 3 }, { "glBindTexture",  14, 2 },
-    { "glDepthFunc",    69, 1 }, { "glTexSubImage2D", 316, 9 },
+    { "glDepthFunc",    69, 1 },
 };
 
 static void nat_arm_glthunks( struct x86cpu *c )
