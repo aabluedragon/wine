@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-03 17:56 IDT: larger JIT lookup cache rejected
+
+Observation: a browser candidate increasing the direct-mapped JIT hint cache
+from 1,024 to 4,096 slots reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered the
+real 640x400 32-bpp WebGL frame (`a227e01c`), and reported `input: ready`.
+The candidate's late samples were 65--79 FPS in the paired runs, while the
+baseline measured 53--77 FPS; the overlap and run-to-run variation provide
+no reproducible gain. No `JITBAD`, `FATAL`, `RuntimeError`, or assertion was
+observed. The cache-size change was discarded.
+
+The canonical bundle was not changed. Canonical hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source is clean at `7da65114` apart from preserved untracked build/cache
+artifacts; no sibling checkout was modified.
+
+The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
 ## 2026-09-03 17:50 IDT: renderer SSE entry expansion rejected
 
 Observation: a candidate adding seven exact executable renderer/SSE entry
