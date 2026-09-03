@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-03 17:50 IDT: renderer SSE entry expansion rejected
+
+Observation: a candidate adding seven exact executable renderer/SSE entry
+roots (`0x0052a862`, `0x00555796`, `0x0055b360`, `0x00555610`,
+`0x005599c0`, `0x005f3af8`, and `0x00616711`) generated 170,760 blocks and
+reached `E1L1: HOLLYWOOD HOLOCAUST` with a real 640x400 32-bpp WebGL canvas
+(`a227e01c`). Its late samples were about 52--72 FPS, below the verified
+baseline interval in matched runs, so it was rejected. The run showed
+`jit_frac` about 94--96% and no `FATAL`, `RuntimeError`, or assertion; it was
+not promoted without a completed differential gate and a reproducible gain.
+
+The generated table was restored and the canonical bundle was not changed.
+Canonical hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source is clean at `406daea3` apart from preserved untracked build/cache
+artifacts; no sibling checkout was modified.
+
+The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
 ## 2026-09-03 17:40 IDT: browser IPC -O2 candidate rejected
 
 Observation: rebuilding the verified AOT browser bundle with `CINT=-O2`
