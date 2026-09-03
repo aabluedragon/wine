@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-03 17:40 IDT: browser IPC -O2 candidate rejected
+
+Observation: rebuilding the verified AOT browser bundle with `CINT=-O2`
+(instead of the shipped `-O1`) reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered
+the real 640x400 32-bpp WebGL frame (`a227e01c`), and reported
+`input: ready`. Late samples in the 22-second run were roughly 45--60 FPS;
+there was no reproducible improvement over the verified baseline, so the
+candidate was rejected. No `JITBAD`, `FATAL`, `RuntimeError`, or assertion was
+observed.
+
+The candidate was not published. Canonical hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Source is clean at `b44a2799` apart from preserved untracked build/cache
+artifacts; no sibling checkout was modified.
+
+The stable test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+
 ## 2026-09-03 17:34 IDT: verified baseline restored and playable
 
 Observation: after restoring the verified translator, a fresh browser run at
