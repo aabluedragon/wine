@@ -1,5 +1,33 @@
 # Current browser checkpoint
 
+## 2026-09-03 15:48 IDT: published stable JIT/WASM FPS build
+
+Observation: the browser build was rebuilt with `GENBLK=1` and the generated
+msvcrt AOT table compiled in, but msvcrt AOT execution remains disabled. An
+explicit `WASM_MSVCRT_JIT=1` control run loaded 21,145 blocks and failed before
+the first frame with `FATAL worker exception: memory access out of bounds`, so
+that experimental path was not enabled for the published test build. The
+source commit is `677be4c3`; tracked source is clean, while preserved
+untracked build artifacts remain in the worktree. No sibling checkout was
+modified.
+
+Published artifacts in `/Users/alonamir/.webwine-work/web`: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`ed0a9a819942dec48c424c6415cabc5f80f18b616957669ae5f199e97f29ae14`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Verification URL:
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-safe-aot`.
+The clean end-to-end run logged `wasm_x86: JIT 170758 translated blocks
+loaded`, `Application parameters: /v1 /l1`, and `E1L1: HOLLYWOOD HOLOCAUST`;
+the screenshot showed a real non-black 640×400 rooftop gameplay frame with
+weapon, HUD, and yellow crosshair. Later samples measured approximately
+99–113 FPS (about 103 FPS), with `jit_frac=93.8%`, and no `FATAL`,
+`RuntimeError`, or load hang. This is an observation; the unsafe msvcrt AOT
+fault is not hypothesized to be fixed.
+
 ## 2026-09-03 15:19 IDT: restored tinted OpenGL crosshair and fast-test arguments
 
 Root cause: the browser bundle linked stale `opengl32` unix-thunk objects from
