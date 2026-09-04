@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:13 IDT: XMM helper bulk-memory candidate rejected
+
+Candidate observation: the normal AOT XMM helpers were changed in an isolated
+bundle to use bulk memory copies and word-wise XOR/logic operations, while
+retaining the per-byte write path required by differential verification. The
+candidate at
+`http://localhost:9299/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmm-fast-20260904`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a changing non-black 640x400
+canvas, reported `input: ready`, and accepted synthetic Enter/W input. It
+emitted no `JITBAD`, `FATAL`, or `RuntimeError`. Candidate late samples were
+approximately 88--105 FPS. The same-session canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmm-control-20260904`
+also passed the gate and measured approximately 87--107 FPS, with the control
+slightly ahead in the matched late window.
+
+Decision: revert the helper change and do not publish it. Candidate hashes were
+JS `9bb070953cbca9e97a2ae9d0f7a4d2443a624844fe843e319a9aa6b632d889af` and WASM
+`663990a1cb719c269a0c935b9c8480dc61f54fe3a70d8a7d522b9b8f04665de1`; the
+canonical data/index/worker/audio assets were unchanged. Tracked source is
+clean on `vibe`; preserved untracked build/cache artifacts remain, and no
+sibling checkout was modified.
+
 ## 2026-09-04 23:04 IDT: FP prologue-inclusive candidate rejected
 
 Candidate observation: the hot FP routine around `0x0055b350` was regenerated
