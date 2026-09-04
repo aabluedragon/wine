@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-04 14:28 IDT: narrow 0x6166xx FP experiment rejected
+
+Observation: a 199-block addition covering only `0x00616300--0x00616800`
+and the profiled `0x0061663a--0x0061671b` entries reached E1L1, rendered real
+non-black 640x400 frames, accepted Enter/W input, and produced no `FATAL`,
+`RuntimeError`, or `JITBAD`. Its same-artifact rollback used
+`WASM_NO_FP_HOT=1`. The candidate showed roughly 50--93 FPS during the first
+render interval and about 15.0s to first frame; the rollback was roughly
+79--91 FPS with about 17.6s to first frame. Because the paired run was noisy
+and the candidate did not establish a sustained gain over the published
+129-block build, it was not promoted. The generated table was restored to 129
+blocks and the canonical bundle was not changed.
+
+Decision: keep the published 129-block renderer FP table and use the next
+profiled miss family for further work. The canonical URL and hashes remain
+those recorded in the 14:15 checkpoint below. Tracked source is clean on
+`vibe` apart from preserved untracked generated/build artifacts; no sibling
+checkout was modified.
+
 ## 2026-09-04 14:25 IDT: broader 0x6166xx FP table rejected
 
 Observation: a same-artifact candidate expanded the verified FP table from 129
