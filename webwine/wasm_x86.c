@@ -6804,12 +6804,15 @@ static uint16_t fp_hot_gen_ninsn[FPHOT_GEN_HASHN];
 static int (*fp_hot_gen_fn[FPHOT_GEN_HASHN])(struct x86cpu *);
 static int32_t fp_hot_gen_idx[FPHOT_GEN_HASHN];
 static uint32_t fp_hot_gen_nblk;
+static uint32_t fp_hot_gen_lo = 0xffffffffu, fp_hot_gen_hi;
 static int fp_hot_jit, fp_hot_verify;
 static void fp_hot_gen_build_hash( void )
 {
     for (int i = 0; fp_g_genblk[i].fn; i++)
     {
         uint32_t va = fp_g_genblk[i].va;
+        if (va < fp_hot_gen_lo) fp_hot_gen_lo = va;
+        if (va + 1u > fp_hot_gen_hi) fp_hot_gen_hi = va + 1u;
         unsigned h = (unsigned)((va * 2654435761u) >> (32 - 15));
         while (fp_hot_gen_va[h]) h = (h + 1) & (FPHOT_GEN_HASHN - 1);
         fp_hot_gen_va[h] = va; fp_hot_gen_end[h] = fp_g_genblk[i].end;
@@ -6821,6 +6824,7 @@ static void fp_hot_gen_build_hash( void )
 }
 static int fp_hot_gen_lookup( uint32_t va )
 {
+    if (va < fp_hot_gen_lo || va >= fp_hot_gen_hi) return -1;
     unsigned h = (unsigned)((va * 2654435761u) >> (32 - 15));
     while (fp_hot_gen_va[h])
     { if (fp_hot_gen_va[h] == va) return (int)h; h = (h + 1) & (FPHOT_GEN_HASHN - 1); }
