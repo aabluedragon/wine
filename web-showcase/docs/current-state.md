@@ -1,5 +1,22 @@
 # Current browser checkpoint
 
+## 2026-09-04 17:52 IDT: cold write-logging branch hint rejected; canonical restored
+
+Observation: adding `__builtin_expect(...,0)` to the three verification-only
+write-log branches produced a valid browser run with E1L1, non-black gameplay,
+and Enter/W input, but late samples fell to approximately 53--82 FPS. The
+candidate was not promoted.
+
+Decision: revert the branch hint and rebuild the canonical O2/129-block bundle.
+Port 8799 serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+The rebuilt JS/WASM/data hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+Tracked source remains clean on `vibe` apart from preserved untracked
+build/generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 17:43 IDT: cache-hit lookup candidate rejected; canonical restored
 
 Observation: an opt-in native hit-only shortcut for the hot cache lookup at
