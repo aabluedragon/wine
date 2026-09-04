@@ -4,6 +4,23 @@
 
 ## 2026-09-04 21:53 IDT: dispatch/cache and interpreter optimization candidates rejected
 
+## 2026-09-04 21:57 IDT: generated-code call boundary captured
+
+Observation: the diagnostic run at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_DYNAMIC=1&WW_ARGS=%2Fv1,%2Fl1&build=dynamic-trace-20260904`
+reached E1L1, rendered a real non-black frame, and accepted Enter/W. The
+first post-frame dynamic misses repeatedly entered runtime-generated code at
+`0x00805b90`, `0x0080a800`, `0x00809a30`, and the existing spin-lock helpers
+near `0x008092e0`/`0x00809330`; the trace also showed the absolute jump veneers
+at `0x008070d0`/`0x008070e0`. A live byte dump of `0x00805b90` confirmed a
+stateful lookup/allocation routine with multiple nested calls, not a simple
+return or copy loop. This is the first usable call-level target for a future
+whole-function implementation, but its nested-call ABI and mutable arena
+state are not yet safe to replace. No source or canonical artifact changed.
+
+The diagnostic bundle reached warm samples of roughly 74--82 FPS; those
+samples are not a performance claim because dynamic tracing adds overhead.
+
 Candidate observation: an 8,192-entry JIT lookup cache was packaged and tested
 at
 `http://localhost:9275/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache8192-20260904`.
