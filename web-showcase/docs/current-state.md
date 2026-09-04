@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-04 16:06 IDT: O3/WebAssembly-SIMD build rejected; O2 restored
+
+Observation: a separate browser build compiled `wasm_x86.c` with
+`XOPT='-O3 -msimd128'`. It passed startup/render/input checks and produced a
+real 640x400 frame with no fatal/JIT errors, but first frame slowed to 15.6s
+and late samples were about 60--93 FPS, below the canonical control window of
+roughly 119--124 FPS. No source semantics changed.
+
+Decision: reject the build-level optimization and restore the standard browser
+`-O2` build. The rebuilt WASM is the canonical
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`; the
+other artifact hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` at `d7917d2c` apart from preserved
+untracked build/generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 15:58 IDT: SSE-helper inlining rejected; canonical rebuilt
 
 Observation: making the five SSE AOT helpers inline candidates compiled and
