@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-05 01:20 IDT: fgetzsofslope native fast path rejected
+
+Observation: a skeleton-guarded native fast path for the common flag-clear
+branch of `fgetzsofslope` at `0x0055b350` was tested at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fgetz-fast-20260905`.
+It logged `native fgetzsofslope fast path @ 0055b350`, reached E1L1, rendered
+changing non-black 640x400 frames, reported `input: ready`, accepted
+synthetic Enter/W, and emitted no `JITBAD`, `FATAL`, or `RuntimeError`. Late
+guest samples were approximately 90--110 FPS.
+
+The canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fgetz-control-20260905`
+passed the same gate and produced approximately 91--110 FPS. The candidate
+showed no reproducible gain and was reverted; it is not served.
+
+Candidate hashes were JS
+`9b8d5af99ace126a5cc73622bbca02c001be1d6f3465ea217574b4435a58f048`, WASM
+`165c6f04ba906235acfcc61c8cd046549b9859fc1e0f8ede19ebc6e9edf3a18e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical port 8799 server remains HTTP 200 and unchanged. Preserved
+untracked build/cache/platform artifacts remain in the dirty Wine tree; no
+sibling checkout was modified, and `git diff --check` passes.
+
+Decision: retain the published FP-range build and continue toward a larger
+whole-call optimization with a measurable margin.
+
 ## 2026-09-05 01:15 IDT: generic AOT mid-block candidate rejected
 
 Observation: the generic AOT table was given an exact entry for the profiled
