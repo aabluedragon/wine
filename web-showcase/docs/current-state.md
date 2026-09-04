@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-04 22:52 IDT: synchronization-cluster profile completed
+
+Observation: the canonical bundle was profiled at
+`http://localhost:8799/?WASM_TPUT=1&WASM_MODULES=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=sync-map-20260904`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a changing non-black 640x400
+canvas, reported `input: ready`, and accepted synthetic Enter/W input. The
+profile emitted no `JITBAD`, `FATAL`, or `RuntimeError`. During startup the
+diagnostic showed the previously observed `0x3f923932--0x3f92397f` cluster,
+but the loader-module dump did not produce a stable owning DLL/function name;
+the cluster therefore remains runtime-generated and is not a safe native-hook
+target. A late sample reached `FPSSAMPLE ... fps=97.9` after profiling overhead.
+
+Decision: no source or published artifact was changed. The profile adds
+diagnostic overhead and its FPS is not a performance claim. The canonical
+artifact remains the verified 173-block build below. Tracked source is clean
+on `vibe`; preserved untracked build/cache artifacts remain, and no sibling
+checkout was modified.
+
 ## 2026-09-04 22:50 IDT: MSVCRT AOT and clearerr fast-path experiments rejected
 
 Candidate observation: the complete MSVCRT AOT table was tested at
