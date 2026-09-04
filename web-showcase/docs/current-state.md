@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:37 IDT: executable-range dispatch guard rejected
+
+Observation: an isolated candidate derived the executable AOT address range
+from `gen_blocks.c` and skipped the 512K-entry executable hash lookup for
+addresses outside it. The candidate at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gen-range-20260905`
+reached E1L1, rendered a changing non-black 640x400 frame, reported
+`input: ready`, accepted synthetic Enter/W, and emitted no `JITBAD`, `FATAL`,
+or `RuntimeError`. Its final harness sample was about 23 FPS; late guest
+samples ranged roughly 68--116 FPS.
+
+The promoted FP-range build remained the matched control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-range-control-20260905`.
+It also passed the full gate and ended around 39 FPS in the harness, with
+late guest samples roughly 95--114 FPS. The candidate therefore showed no
+reproducible gain and was slower on the aggregate frame count.
+
+Decision: revert and reject the executable-range guard. Candidate hashes were
+JS `762caf7d4214816b3eadc8e2cdad2f01d2b91e167c581670e92fb7c0efbeb72b`, WASM
+`b3f0d8668215437ef8c68c0981369f57c2dae5000681403e686300dcdae3babb`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical FP-range artifacts remain served unchanged; `webwine/wasm_x86.c`
+is clean, `git diff --check` passes, preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-05 00:28 IDT: FP hot-range dispatch guard promoted
 
 Observation: the FP hot-block dispatcher now derives the minimum and exclusive
