@@ -322,7 +322,7 @@ enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_GLTHUNK_RET, NAT_SETUPQRHLINE, NAT_POW, NAT_WIN_GL_SWAP,
        NAT_PTHREAD_SPIN_UNLOCK, NAT_PTHREAD_SPIN_LOCK, NAT_PTHREAD_GETSPECIFIC,
        NAT_GDI_RELAY, NAT_GDI_CLIENT, NAT_SETUP_VLINE, NAT_SETUP_PVLINE, NAT_SETUP_MVLINE,
-       NAT_SETUP_TVLINE, NAT_DEBUG_MESSAGE };
+       NAT_SETUP_TVLINE, NAT_DEBUG_MESSAGE, NAT_NPOT_EARLY };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -3685,6 +3685,59 @@ static void nat_arm_debug_message( void )
     nat_register( b, NAT_DEBUG_MESSAGE, "buildgl debug-message disabled path" );
 }
 
+/* polymost_npotEmulation has two common no-op exits.  The first is the mode
+ * cache mismatch; the second is an equal cached scalar after the SSE compare.
+ * Reproduce the observable XMM2/flags state for the latter before jumping to
+ * the function's RET.  Any update case (including NaN) stays interpreted. */
+#define ND_NPOT_EMULATION 0x555790u
+#define ND_NPOT_CACHE     0xe16760u
+#define ND_NPOT_CURRENT   0x10d3a28u
+static const uint8_t nd_npot_early_code[] = {
+    0x8b,0x15,0,0,0,0,             /* mov edx,[current mode] */
+    0x39,0x15,0,0,0,0,             /* cmp [cached mode],edx */
+    0x0f,0x85,0x86,0x00,0x00,0x00  /* jne +0x86 -> RET */
+};
+
+static int nat_npot_early( struct x86cpu *c )
+{
+    uint32_t b = ND_NPOT_EMULATION + (uint32_t)nd_slide;
+    uint32_t cache = rd32( ND_NPOT_CACHE + (uint32_t)nd_slide );
+    uint32_t current = rd32( ND_NPOT_CURRENT + (uint32_t)nd_slide );
+    if (cache != current)
+    {
+        set_lazy( c, K_SUB, cache, current, cache - current, 4 );
+        c->eip = b + 0x98;
+        return 1;
+    }
+    {
+        union { uint32_t u; float f; } arg, expected;
+        arg.u = (uint32_t)c->xmm[0][0] | ((uint32_t)c->xmm[0][1] << 8) |
+                ((uint32_t)c->xmm[0][2] << 16) | ((uint32_t)c->xmm[0][3] << 24);
+        expected.f = (float)(c->regs[EAX] & 0xffu);
+        if (arg.f != expected.f) return 0;
+        memset( c->xmm[2], 0, sizeof(c->xmm[2]) );
+        c->xmm[2][0] = (uint8_t)expected.u;
+        c->xmm[2][1] = (uint8_t)(expected.u >> 8);
+        c->xmm[2][2] = (uint8_t)(expected.u >> 16);
+        c->xmm[2][3] = (uint8_t)(expected.u >> 24);
+        c->eflags = (c->eflags & ~(CF | PF | ZF)) | ZF;
+        c->lf_size = 0;
+        c->eip = b + 0x98;
+        return 1;
+    }
+}
+
+static void nat_arm_npot_early( void )
+{
+    uint32_t b = ND_NPOT_EMULATION + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_npot_early_code); i++)
+        if ((i >= 2 && i <= 5) || (i >= 8 && i <= 11)) continue;
+        else if (rd8( b + i ) != nd_npot_early_code[i])
+        { fprintf( stderr, "wasm_x86: polymost_npotEmulation skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_NPOT_EARLY, "polymost NPOT cached return" );
+}
+
 /* ---- vlineasm1: the single-column texture mapper ---------------------------
  *
  * The last self-modifying mapper, and the simplest: one pixel per iteration in
@@ -4796,6 +4849,7 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_GLSTATE) return nat_inthash_find( c );
     if (kind == NAT_GLSAMPLER) return nat_glsampler( c );
     if (kind == NAT_DEBUG_MESSAGE) return nat_debug_message( c );
+    if (kind == NAT_NPOT_EARLY) return nat_npot_early( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
@@ -6940,6 +6994,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
                           if (!getenv( "WASM_NO_DEBUG_MESSAGE" )) nat_arm_debug_message();
+                          if (!getenv( "WASM_NO_NPOT_EARLY" )) nat_arm_npot_early();
                           if (browser_fast_render() && !getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           /* The span mapper touches the engine's self-growing
