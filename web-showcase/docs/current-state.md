@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-04 13:23 IDT: post-debug frame profile identifies next target
+
+Observation: the published debug-message build was profiled at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=post-debug-profile-20260904`.
+It reached its first frame at 11.9s, reached E1L1, rendered a real non-black
+640x400 canvas, and had no `FATAL`, `RuntimeError`, or `JITBAD`. Late samples
+reached 124.9--127.3 FPS. The frame-scoped exact miss leaders are now
+`0x00555790`/`0x0055579c` (polymost NPOT state), followed by
+`0x0055b6f0`, `0x00555610`, and `0x00529500` (renderer/SSE and sampler
+families). The previously shipped `0x00609640` debug-message entry no longer
+appears among the leaders, confirming that bypass is active.
+
+No source or canonical artifact changed during this diagnostic. The next
+action is a complete function-family experiment around the NPOT/sampler early
+returns, with the same real-canvas and input gates; isolated entry seeding is
+not being promoted based on this profile alone. Source remains clean at
+`3095eb0c` apart from preserved untracked build/cache artifacts, and no sibling
+checkout was modified.
+
 ## 2026-09-04 13:19 IDT: NPOT early-return probe rejected
 
 Observation: a same-artifact browser A/B tested a skeleton-checked early return
