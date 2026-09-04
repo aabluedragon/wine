@@ -39,6 +39,17 @@ Candidate JS/WASM/data hashes were
 `9b09d053b9b689b35d931bbed2884763c5ad29e3148c67a93daa7f9d30b27c9a`, and
 `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
 
+Follow-up candidate observation: seeding only `0x00805b90` (170,827 total
+blocks) removed the sibling-table/code-pressure variable. The run at
+`http://localhost:9285/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=one-dynroot-20260904`
+reached E1L1, rendered non-black gameplay, accepted Enter/W, and had no
+`JITBAD`, `FATAL`, or `RuntimeError`; warm samples were approximately 78--98
+FPS. This still does not beat the canonical range, so the generated table was
+restored unchanged. Candidate JS/WASM/data hashes were
+`8dd096a8ad514659c80b7bbe51da7a439f023791be37de60fa9bf10f3176903c`,
+`02fcee4b2efae52fb9c6fb89cd653c76ac2558197eeeeb09dd114cf072abd968`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
 Candidate observation: an 8,192-entry JIT lookup cache was packaged and tested
 at
 `http://localhost:9275/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache8192-20260904`.
