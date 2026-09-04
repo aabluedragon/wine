@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-04 15:58 IDT: SSE-helper inlining rejected; canonical rebuilt
+
+Observation: making the five SSE AOT helpers inline candidates compiled and
+passed the browser gate with a real 640x400 frame, Enter/W input, audio, and no
+fatal/JIT errors. Its late samples were roughly 110--122 FPS, while the direct
+canonical control was roughly 119--124 FPS. This was neutral/noisy rather than
+a demonstrated gain, so the source change was reverted.
+
+Decision: retain the existing helper implementation and verified 129-block FP
+table. The safe rebuild completed successfully and matches the canonical
+artifacts: JS `ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+WASM `97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`,
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` at `8b1e3443` apart from preserved
+untracked build/generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 15:47 IDT: one-block SSE AOT experiment rejected; 129 restored
 
 Observation: a focused AOT table containing the verified 129 blocks plus one
