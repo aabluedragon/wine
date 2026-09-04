@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-04 18:19 IDT: promoted minimal SSE matrix entry
+
+Change: retained the verified 129-block FP table and added only the complete
+renderer SSE matrix routine at guest entry `0x00616630` (71 instructions),
+rather than the entire surrounding range. The candidate loaded
+`floating-point hot JIT 130 translated blocks` and removed the repeated
+`0x0061663a`--`0x00616671` interpreter misses.
+
+Verification: the normal run reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a
+real non-black 640x400 gameplay frame, accepted `SDL key down vk=0xd` and
+`SDL key down vk=0x57`, and had no `JITBAD`, `FATAL`, `RuntimeError`, or black
+frame. Late normal samples were approximately 110--147 FPS. The built-in
+FP differential verification run also reached gameplay with no `JITBAD FP`
+report. The candidate was promoted to the served bundle.
+
+Port 8799 serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+Current JS/WASM/data/index/worker SHA-256 hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`3a1b72e2c7db41192a5377843dae4e3b87ca97b332304e724082e6ccb99104dd`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 18:11 IDT: full SSE matrix-entry candidate rejected; canonical restored
 
 Observation: a focused table with the renderer SSE matrix routine’s true entry
