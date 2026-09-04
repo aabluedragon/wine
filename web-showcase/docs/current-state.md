@@ -7781,3 +7781,33 @@ no sibling checkout was modified.
 Decision: leave the known-good guarded FP-gate artifact served. The next
 optimization needs a complete model or differential verification of the
 remaining `0x006316xx` routine before it is enabled.
+
+# 2026-09-04 20:18 IDT: rejected exact-flow interpolation hook A/B
+
+The fully reconstructed two-stage `0x006315f0` candidate was built and served
+at `http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=wall-interp-v2-20260904`.
+The candidate reached live 640x400 gameplay and accepted the scripted input;
+its screenshot showed the first-person scene and no black/loading canvas. A
+matched run with `WASM_NO_WALL_INTERP=1` also reached
+`E1L1: HOLLYWOOD HOLOCAUST` and accepted Enter/W. The candidate was not
+promoted: both runs were in a degraded host-load window around 40–60 FPS, far
+below the previously measured clean 130–140 FPS, so the change provided no
+credible positive result and its extra native code altered the hot wasm
+layout even when disabled.
+
+Observation: the hook, enum, dispatcher entry, and arm call were then removed
+completely. The browser bundle was rebuilt; its hashes again exactly match the
+known-good artifact: JS `ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+WASM `d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`,
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`,
+and audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server is HTTP 200 and rooted at
+`/Users/alonamir/dev/wine/build-wasm4/ww/web`. No sibling checkout was
+modified; preserved untracked build/cache/platform artifacts remain in the
+Wine tree.
+
+Decision: keep the restored artifact served and do not claim an FPS gain from
+this candidate. Continue profiling the remaining interpreted load for a
+smaller, layout-neutral verified target.
