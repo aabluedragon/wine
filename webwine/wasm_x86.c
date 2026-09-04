@@ -166,7 +166,11 @@ static int browser_fast_render( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_FAST_RENDER" ) ? 1 : 0;
+    /* The aggregate renderer path has now passed the long browser gate:
+     * native qrhline/mhline/surface-blit plus the verified column hooks are
+     * the normal path.  Keep a single emergency rollback switch because a
+     * browser/driver combination can still expose a different GL workload. */
+    if (fast < 0) fast = !getenv( "WASM_NO_FAST_RENDER" );
     return fast;
 #else
     return 1;
