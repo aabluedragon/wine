@@ -6793,3 +6793,29 @@ Hypothesis: the explicit 32-bit stores are already a better fit for this
 WebAssembly memory path, or the memset loop is not frame-dominant. The next
 FPS change must come from a frame-scoped executable/Wine hotspot rather than
 another store-width rewrite.
+
+# 2026-09-04 12:32 IDT: frame-scoped hotspot re-profiled
+
+The canonical diagnostic URL was
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WW_ARGS=%2Fv1,%2Fl1&build=frameprofile-20260904a`.
+The Wine tree is dirty only from preserved untracked build/cache artifacts on
+branch `vibe`; tracked source is clean at `483d4bf4`, and no sibling checkout
+was modified. The canonical artifact hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Observation: after frame-scoped counters were enabled, the largest remaining
+misses were executable renderer/SSE boundaries, led by `0055b6f0/0055b6f8`,
+`00529500`, `00555610`, and `005599c0`, each roughly 0.1M in this run. The
+run still reached `E1L1: HOLLYWOOD HOLOCAUST`, presented a non-black 640×400
+canvas, reported `input: ready`, and showed no `JITBAD`, `FATAL`,
+`RuntimeError`, or assertion marker. Diagnostic overhead made its FPS samples
+non-comparable and they are intentionally not used as a performance claim.
+
+Decision: the next candidate should be a verified function-level renderer/SSE
+translation or native hook for one complete call boundary, with a matched
+non-diagnostic control. Broadly seeding individual interior addresses has
+already been rejected.
