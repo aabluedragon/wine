@@ -6739,3 +6739,32 @@ Hypothesis: a user seeing only black is most likely viewing a stale/cached
 worker or the initial boot canvas. The page now cache-busts the worker, WASM,
 and data requests and shows an explicit boot/worker-failure state; use the
 exact URL above and hard-refresh once.
+
+# 2026-09-04 12:15 IDT: rejected forced-inline FPS experiment
+
+The candidate was tested at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=inline-20260904d`
+with the repository COOP/COEP server. The unchanged control was tested at
+`http://localhost:8808/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-20260904a`.
+The Wine tree is dirty on branch `vibe` at `9a9615fd`; unrelated generated and
+platform artifacts were preserved. The candidate artifact hashes were JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d45a4e25591d879554d1fc22cac6eb9d087250efe722f6936416bd1e9a2afeb0`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+The published control remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`, with
+the same data, index, and worker hashes above.
+
+Observation: both runs reached `E1L1: HOLLYWOOD HOLOCAUST`, presented a real
+640×400 frame with screenshot hash `a227e01c`, reported `input: ready`, and
+had no `JITBAD`, `FATAL`, `RuntimeError`, or assertion marker. The candidate
+reported `FPSSAMPLE t=20.8 ... flips=831 ... fps=94.4`; the matched control
+reported `FPSSAMPLE t=20.9 ... flips=881 ... fps=96.6`. The candidate therefore
+lost about 6% on this controlled run and was reverted; it is not promoted.
+
+Hypothesis: forcing `set_lazy`, `read_reg`, and `write_reg` inline increases
+code pressure or register pressure in the hot translated path. No further
+compiler-only promotion should be made without a matched multi-run gain.
