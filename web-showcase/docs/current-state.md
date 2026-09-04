@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 22:18 IDT: FP direct-page lookup candidate rejected
+
+Candidate observation: an isolated build with a direct exact index for the
+verified FP hot pages (`0x0055xxxx` and `0x0061xxxx`) was tested at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fphotdirect-long-20260904`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a non-black 640x400 frame,
+reported `input: ready`, and accepted the synthetic Enter/W events. It emitted
+no `JITBAD`, `FATAL`, or `RuntimeError`. Warm samples settled around 65--80
+FPS, below the canonical approximately 80--100 FPS range, so the candidate
+was rejected and `wasm_x86.c` was restored with the existing hash lookup.
+
+Candidate JS/WASM/data/index/worker/audio hashes were
+`9a47744303077060ba3ee3c8ea232b6aaa76238e39aed62e1398a3627fdb4085`,
+`4be18bf088492939fe818d2d03c397296298f3d9406348e1aa79830c4f358db3`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server on port 8799 was not modified; preserved dirty/untracked
+build artifacts remain outside the tracked source change.
+
 ## 2026-09-04 21:38 IDT: canonical browser gate and audio A/B
 
 ## 2026-09-04 21:53 IDT: dispatch/cache and interpreter optimization candidates rejected
