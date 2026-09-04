@@ -1,5 +1,27 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:05 IDT: scalar XMM load/store specialization rejected
+
+Candidate observation: the AOT XMM helper was specialized for 4-byte loads
+and stores using one aligned-independent 32-bit memory operation, with the
+bytewise path retained for other widths and verification semantics. The
+candidate at
+`http://localhost:9293/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmm-scalar-20260905`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered changing non-black 640x400
+frames, reported `input: ready`, and accepted synthetic Enter/W input without
+`JITBAD`, `FATAL`, or `RuntimeError`. Late browser samples were approximately
+40--57 FPS, below or overlapping the canonical control's approximately
+44--59 FPS window.
+
+Decision: revert and reject this specialization; it did not demonstrate a
+reproducible browser FPS gain. Candidate hashes were JS
+`f3b37545acf5a1adfc0627f9e762007b0862e1f6cc3aed4575a0dc6c15698538`, WASM
+`ed4b98a104b773e295f66ee2b0b3cd2e544803c4c2fb3b69334f5c443286f411`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical port 8799 artifact remains unchanged; `git diff --check` passes,
+tracked source is clean on `vibe`, preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-05 00:00 IDT: XMM self-XOR zero specialization rejected
 
 Candidate observation: the generated FP helper's `xor xmmN,xmmN` case was
