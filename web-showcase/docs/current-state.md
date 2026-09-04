@@ -7580,3 +7580,32 @@ Decision: keep the 173-block table and serve it as the current test build.
 The diagnostic run moved the leading misses away from the covered
 `0x005554*` continuation into remaining renderer/interpreter boundaries;
 diagnostic FPS is not used as a performance claim.
+
+# 2026-09-04 19:07 IDT: rejected SSE-interior and 0x005595c0 AOT expansions
+
+Two candidates were tested against the current 173-block control. The first
+added 62 interior SSE blocks (`0x00616644` onward), for 235 total; it removed
+the SSE addresses from the diagnostic miss list but its normal run reached
+only about 93–126 FPS in the warm window. The second added the complete
+12-block `0x005595c0` helper path, for 185 total; its normal run reached
+about 87–107 FPS. Both candidates rendered real gameplay and accepted Enter
+and W, but neither was a measured throughput improvement, so both were
+discarded.
+
+Observation: the restored current bundle is again JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`e79067d0773c427ef0b541e97b87f16c686ff99f863f61401ef63f094e82030c`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The exact test URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-173-20260904`.
+The Wine tree is dirty only from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+
+Decision: keep the 173-block control. Future FPS work should target a
+whole-call native implementation or a compiler/runtime dispatch change, with
+matched repeated normal runs; adding more isolated generated blocks is not
+currently profitable.
