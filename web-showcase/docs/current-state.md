@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:11 IDT: corrected FP direct-index candidate rejected
+
+Observation: the corrected narrow direct index for the hot FP page was built
+and tested in the isolated bundle at
+`http://localhost:9292/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-direct2-20260905`.
+The worker failed during the startup/render transition with
+`FATAL worker exception: memory access out of bounds`, before reaching a
+usable canvas or the input gate. There is therefore no valid FPS result.
+
+Decision: revert and reject this candidate. Its hashes were JS
+`218a5a117d377958eb9c03970457e8a6bc409d93b4fa501dd889250df2da3168`, WASM
+`702b8998af97e8e5b61603a00a08bde8d03498c4b8f2e586d963437fcd7f9827`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical server on port 8799 remains HTTP 200 and unchanged with JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+`git diff --check` passes and `webwine/wasm_x86.c` is clean on `vibe`;
+preserved untracked build/cache artifacts remain, and no sibling checkout was
+modified.
+
 ## 2026-09-05 00:05 IDT: scalar XMM load/store specialization rejected
 
 Candidate observation: the AOT XMM helper was specialized for 4-byte loads
