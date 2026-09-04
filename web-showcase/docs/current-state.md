@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:45 IDT: narrow FP dispatch-index candidate rejected
+
+Candidate observation: a temporary exact lookup index for the hot
+`0x0055b000--0x0055bfff` FP page was built and served at
+`http://localhost:9296/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-direct-narrow-20260905c`.
+The first prototype failed before rendering with a memory-out-of-bounds error;
+after correcting its table-slot bookkeeping, the second run passed that point
+but the CDP harness stalled at the browser pointer-lock boundary before a
+usable frame sample. It therefore did not reach the rendering/input gate and
+has no valid FPS result.
+
+Decision: revert the direct-index prototype and do not publish it. The
+canonical bundle at port 8799 remains unchanged with JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+`git diff --check` passes; tracked source is clean on `vibe`, preserved
+untracked build/cache artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-04 23:31 IDT: post-level hotspot profile completed
 
 Observation: the canonical bundle was profiled end-to-end at
