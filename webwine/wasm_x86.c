@@ -3635,7 +3635,38 @@ static const uint8_t nd_glsampler_code[] = {
 static int nat_glsampler( struct x86cpu *c )
 {
     uint32_t esp = c->regs[ESP];
-    if (rd32( ND_GLPROC_PROBE + (uint32_t)nd_slide )) return 0;   /* a real GL: run it */
+    uint32_t slide = (uint32_t)nd_slide, mode, slot, cached, addr;
+
+    /* With no GL, the wrapper's no-sampler branch only clears the cache and
+     * calls a NULL GL slot; the existing no-op remains valid. */
+    if (!rd32( ND_GLPROC_PROBE + slide ))
+    {
+        c->eip = rd32( esp);
+        c->regs[ESP] = esp + 4;
+        return 1;
+    }
+
+    /* Real GL: mirror only the pure cache-hit prefix.  The function's
+     * no-sampler fallback and its cache-miss GL call remain interpreted. */
+    if (!(rd8( 0x826f9du + slide ) & 0x08) || !rd32( 0x829e8cu + slide )) return 0;
+    mode = c->regs[EDX] & 0xc243u;
+    if (mode == 0x43) slot = 7;
+    else if (mode == 2) slot = 10;
+    else if (mode <= 2) slot = mode ? 1u + 4u * (rd32( 0xae1a40u + slide ) != 4) : 0;
+    else if (mode <= 0x43) slot = 2u + 2u * (mode == 0x42);
+    else if (mode == 0x4000) slot = 11;
+    else if (mode == 0x8000) slot = 2;
+    else if (mode == 0x200) slot = 2u + 4u * (rd32( 0xae1a40u + slide ) != 4);
+    else if (mode == 0x201) slot = 1u + 4u * (rd32( 0xae1a40u + slide ) != 4);
+    else if (mode > 0x4000) slot = 8;
+    else slot = 2;
+    if (c->regs[EAX] > (NAT_GUEST_END - 0xe16768u - 4u) / 4u) return 0;
+    addr = 0xe16768u + slide + c->regs[EAX] * 4u;
+    cached = rd32( addr );
+    if (cached != slot) return 0;
+    c->regs[EDX] = mode;
+    c->regs[ECX] = slot;
+    set_lazy( c, K_SUB, cached, slot, cached - slot, 4 );
     c->eip = rd32( esp );
     c->regs[ESP] = esp + 4;
     return 1;
@@ -6992,7 +7023,8 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MIXSTEREO" )) nat_arm_mixstereo();
                           if (!getenv( "WASM_NO_MIDEBUG" )) nat_arm_midebug();
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
-                          if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
+                          if (!getenv( "WASM_NO_GLSTUB" )) nat_arm_inthash();
+                          if (!getenv( "WASM_NO_GLSAMPLER" )) nat_arm_glsampler();
                           if (!getenv( "WASM_NO_DEBUG_MESSAGE" )) nat_arm_debug_message();
                           if (!getenv( "WASM_NO_NPOT_EARLY" )) nat_arm_npot_early();
                           if (browser_fast_render() && !getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
