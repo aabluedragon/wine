@@ -1,5 +1,37 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:28 IDT: FP hot-range dispatch guard promoted
+
+Observation: the FP hot-block dispatcher now derives the minimum and exclusive
+maximum guest addresses from the generated table and skips the 32K-entry FP
+hash probe for addresses outside that interval. The isolated candidate at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-range-20260905`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered changing non-black 640x400
+frames, reported `input: ready`, accepted synthetic Enter/W, and emitted no
+`JITBAD`, `FATAL`, or `RuntimeError`. Late guest samples were approximately
+127--140 FPS.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-range-control-20260905`
+also passed the full render/input gate, with late samples approximately
+80--99 FPS. After promotion, the canonical port-8799 run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-range-published-20260905`
+again reached E1L1, produced a changing non-black 640x400 canvas, reported
+`input: ready`, accepted Enter/W, and showed late samples around 104--114 FPS.
+
+Decision: promote the range guard in source commit `4d475369` and update the
+served canonical bundle. Published hashes are JS
+`4183fbc8f45f7c76230f315a8bc973c9c896b449e3a5ad0e7c544516e210d482`, WASM
+`48a297185756c470be277b51f15f5c112474847c26fde66379d60b806ca26a26`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+`git diff --check` passes; the tracked source change is committed on `vibe`,
+preserved untracked build/cache artifacts remain, and no sibling checkout was
+modified.
+
 ## 2026-09-05 00:19 IDT: single-column pointer-local candidate rejected
 
 Observation: the verified `vlineasm1` and `mvlineasm1` native hooks were
