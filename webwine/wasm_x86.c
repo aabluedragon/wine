@@ -322,7 +322,7 @@ enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_GLTHUNK_RET, NAT_SETUPQRHLINE, NAT_POW, NAT_WIN_GL_SWAP,
        NAT_PTHREAD_SPIN_UNLOCK, NAT_PTHREAD_SPIN_LOCK, NAT_PTHREAD_GETSPECIFIC,
        NAT_GDI_RELAY, NAT_GDI_CLIENT, NAT_SETUP_VLINE, NAT_SETUP_PVLINE, NAT_SETUP_MVLINE,
-       NAT_SETUP_TVLINE };
+       NAT_SETUP_TVLINE, NAT_DEBUG_MESSAGE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -3652,6 +3652,39 @@ static void nat_arm_glsampler( void )
     nat_register( b, NAT_GLSAMPLER, "buildgl sampler (no GL)" );
 }
 
+/* buildgl_outputDebugMessage is called from several renderer state helpers.
+ * In the browser build the engine's debug bit is clear, and the first seven
+ * bytes of the function are the complete fast-exit path.  Only bypass that
+ * path; if the bit becomes enabled, return 0 so formatting and allocation
+ * remain guest-owned. */
+#define ND_DEBUG_MESSAGE 0x609640u
+#define ND_DEBUG_FLAGS   0x826f9cu
+static const uint8_t nd_debug_message_code[] = {
+    0xf6,0x05,0,0,0,0,0x04,       /* testb $4,<debug flags> */
+    0x0f,0x84,0xc3,0x00,0x00,0x00 /* je 0x609710 */
+};
+
+static int nat_debug_message( struct x86cpu *c )
+{
+    uint32_t esp;
+    if (rd8( ND_DEBUG_FLAGS + (uint32_t)nd_slide ) & 0x04) return 0;
+    esp = c->regs[ESP];
+    c->eip = rd32( esp);
+    c->regs[ESP] = esp + 4;
+    return 1;
+}
+
+static void nat_arm_debug_message( void )
+{
+    uint32_t b = ND_DEBUG_MESSAGE + (uint32_t)nd_slide;
+    unsigned i;
+    for (i = 0; i < sizeof(nd_debug_message_code); i++)
+        if (i >= 2 && i <= 5) continue; /* absolute debug-flags address */
+        else if (rd8( b + i ) != nd_debug_message_code[i])
+        { fprintf( stderr, "wasm_x86: buildgl_outputDebugMessage skeleton differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_DEBUG_MESSAGE, "buildgl debug-message disabled path" );
+}
+
 /* ---- vlineasm1: the single-column texture mapper ---------------------------
  *
  * The last self-modifying mapper, and the simplest: one pixel per iteration in
@@ -4762,6 +4795,7 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_MVLINE1NP2) return nat_mvlineasm1np2( c );
     if (kind == NAT_GLSTATE) return nat_inthash_find( c );
     if (kind == NAT_GLSAMPLER) return nat_glsampler( c );
+    if (kind == NAT_DEBUG_MESSAGE) return nat_debug_message( c );
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
@@ -6905,6 +6939,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_MIDEBUG" )) nat_arm_midebug();
                           if (!getenv( "WASM_NO_PALMATCH" )) nat_arm_pal_closest();
                           if (!getenv( "WASM_NO_GLSTUB" )) { nat_arm_inthash(); nat_arm_glsampler(); }
+                          if (!getenv( "WASM_NO_DEBUG_MESSAGE" )) nat_arm_debug_message();
                           if (browser_fast_render() && !getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           /* The span mapper touches the engine's self-growing
