@@ -7404,7 +7404,12 @@ static void run( struct x86cpu *c )
             g_total_insns += idelta; return;
         }
 #endif
-        if (nat_dynamic_jmp( c )) continue;
+        /* The dynamic-jump fast paths are only valid in the runtime-generated
+         * CON arena.  Avoid calling the miss-only helper for static EXE/DLL
+         * instructions; this branch is cheaper than a C call on every guest
+         * instruction while preserving the helper's own safety checks. */
+        if (c->eip >= 0x00800000u && c->eip < 0x01000000u &&
+            nat_dynamic_jmp( c )) continue;
         if (g_wgl_swap_addr && start == g_wgl_swap_addr && nat_wglswap( c )) continue;
         /* Internal entries are the four instruction boundaries inside the
          * verified loop.  Match the small contiguous range directly: their

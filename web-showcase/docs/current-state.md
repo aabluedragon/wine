@@ -1,5 +1,38 @@
 # Current browser checkpoint
 
+## 2026-09-05 01:28 IDT: published dynamic-dispatch range guard
+
+Observation: `run()` now calls the miss-only `nat_dynamic_jmp()` helper only
+for the runtime-generated CON arena (`0x00800000` through `0x00ffffff`).
+Static EXE/DLL instructions take the direct range-test path. The published
+bundle is served at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dyn-guard-published-20260905`.
+
+The isolated candidate passed the browser gate and produced 2,980 guest flips
+versus 2,240 for a fresh canonical control under the same 35-second
+Enter/W harness. The candidate reached its first frame at 9.3s versus 15.9s
+for control. The promoted canonical run passed with `E1L1`, a changing
+non-black 640x400 canvas, `input: ready`, synthetic Enter/W input, and no
+`JITBAD`, `FATAL`, or `RuntimeError`; it reached 2,897 guest flips and its
+late samples were approximately 100--118 FPS. The harness exited 0.
+
+Published artifact hashes: JS
+`3e1bfb880650ef9fb150c2b3bedff6458ae485affd6f709017bafbc514172789`, WASM
+`899cbe0b50e6dd575f51f40b9210b27a4ca5620160d1a69adf3e64e5fcea6efc`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server returned HTTP 200. Preserved untracked build/cache/
+platform artifacts remain in the dirty Wine tree; no sibling checkout was
+modified, and `git diff --check` passes.
+
+Hypothesis/decision: avoiding a C call for static instructions removes a
+whole-loop dispatch cost without changing the dynamic helper's valid address
+domain. The measured margin was sufficient to promote this candidate; the
+next test should use this published bundle as its control.
+
 ## 2026-09-05 01:20 IDT: fgetzsofslope native fast path rejected
 
 Observation: a skeleton-guarded native fast path for the common flag-clear
