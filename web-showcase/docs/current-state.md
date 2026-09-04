@@ -6845,3 +6845,28 @@ Hypothesis: this function’s prologue/stack-alignment entry is called often
 enough that its isolated translation adds dispatch/code-pressure cost, or its
 indirect-entry assumptions are not profitable. Further renderer work needs
 whole hot-loop/function profiling, not isolated AOT entry seeding.
+
+# 2026-09-04 12:46 IDT: rejected whole-interpreter O3 build
+
+The candidate was built with `XOPT=-O3` and tested at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xopt3-20260904a`
+using the COOP/COEP server. Its WASM hash was
+`bdc0b00ee9ac925bc1b4015f1869f3445d50a50f3430de7d18d0ab255315ecc1`.
+The canonical control remains the published WASM
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625` and
+the stable URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-restored`.
+The Wine tree is dirty only from preserved untracked build/cache artifacts;
+tracked source and the generated AOT table were restored, and no sibling
+checkout was modified.
+
+Observation: the O3 run reported `input: ready` and no
+`JITBAD`, `FATAL`, `RuntimeError`, or assertion, but it remained in startup
+through the 20-second test and never logged `E1L1` or a real gameplay frame.
+The stable O2 control reached E1L1 and the real 640×400 frame within the same
+test budget. The candidate was discarded and not published.
+
+Hypothesis: O3 increases code size and compile/runtime pressure in the very
+large generated interpreter translation unit. Keep `XOPT=-O2` as the browser
+baseline; future FPS work must target measured hot code rather than global
+compiler aggressiveness.
