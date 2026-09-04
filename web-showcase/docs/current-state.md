@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-04 16:39 IDT: renderer-band AOT experiments rejected; 129-block build restored
+
+Observation: two generated AOT candidates were tested end-to-end against the
+browser renderer. The 130-block candidate added the exact SSE helper at
+`0x0061663a--0x0061671b`; it rendered non-black E1L1 gameplay, accepted Enter/W,
+and reported no fatal/JIT errors, but the matched `WASM_NO_FP_HOT=1` rollback
+had equivalent late samples. A second candidate translated the whole
+`0x00610000--0x0061ffff` renderer band (3,800 blocks); it also rendered and
+accepted input, but did not improve FPS and substantially increased the AOT
+table. These candidates were not promoted.
+
+Decision: restore the exact verified 129-block floating-point table and rebuild
+the browser bundle. Final control URL:
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+The fresh control run reached E1L1, produced a real non-black gameplay frame,
+accepted `wasm_input: SDL key down/up vk=0x57`, and had no `FATAL`,
+`RuntimeError`, or `JITBAD`; late samples reached approximately 100--111 FPS
+in that host run. Artifact hashes match the published bundle: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`. Tracked
+source remains clean on `vibe` apart from preserved untracked build/generated
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 16:23 IDT: sequential SSE hook rejected; verified browser build restored
 
 Observation: the opt-in `WASM_XFORM=1` native replacement for the 68-instruction
