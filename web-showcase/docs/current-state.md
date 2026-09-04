@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-04 15:47 IDT: one-block SSE AOT experiment rejected; 129 restored
+
+Observation: a focused AOT table containing the verified 129 blocks plus one
+`0x0061663a--0x0061671b` SSE block built as `floating-point hot JIT 130
+translated blocks` and passed the full browser gate: E1L1, non-black 640x400
+gameplay, Enter/W input, audio, and no `FATAL`, `RuntimeError`, or `JITBAD`.
+An initial 25-second run showed about 127--145 FPS late, but a 30-second
+repeat showed about 102--119 FPS; the matched same-artifact rollback ranged
+about 100--118 FPS under the same host period. Startup also varied from 11.8
+to 13.6s. This is not reproducible evidence of a gain, so the table was not
+promoted.
+
+Decision: restore the exact verified 129-block table and rebuild the canonical
+artifact. The temporary URL
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=safe-after-130-rejection-20260904`
+now serves the same artifact hashes as port 8799: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` at `3102f448` apart from preserved
+untracked build/generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 15:31 IDT: second SSE-hook correction rejected; safe artifacts restored
 
 Observation: correcting the matrix multiply order and preserving XMM4/XMM5 in
