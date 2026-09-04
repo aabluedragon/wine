@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-04 18:38 IDT: promoted hot renderer branch path
+
+Change: added the 17 small verified FP-table blocks beginning at
+`0x0055b75d` and continuing through `0x0055b8fc`. The frame profile showed
+`0x0055b75d` and `0x0055b763` as the next dominant interpreted entries after
+the dual SSE promotion. The served table now contains 148 translated blocks
+(the original 129 plus the two SSE entries and this 17-block path).
+
+Verification: the profile no longer lists `0x0055b75d` or `0x0055b763` among
+the dominant misses. A normal run reached `E1L1: HOLLYWOOD HOLOCAUST`,
+rendered a real non-black 640x400 frame, accepted Enter/W input, and measured
+approximately 132--143 FPS in late samples. The FP differential-verification
+run loaded `floating-point hot JIT 148 translated blocks`, reached E1L1, and
+reported no `JITBAD FP`, `FATAL`, or `RuntimeError`.
+
+Port 8799 serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+Current JS/WASM/data/index/worker SHA-256 hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`d628b5584e52f9c5f351836614eaf8356e46664345069a84c6f15b44f793c462`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 18:29 IDT: added the second SSE entry contract
 
 Change: added a second minimal translated entry for the same renderer matrix
