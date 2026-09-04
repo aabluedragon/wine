@@ -21,6 +21,24 @@ state are not yet safe to replace. No source or canonical artifact changed.
 The diagnostic bundle reached warm samples of roughly 74--82 FPS; those
 samples are not a performance claim because dynamic tracing adds overhead.
 
+Candidate observation: explicit AOT roots for the byte-identical runtime
+functions at `0x00805b90`, `0x0080a800`, `0x00809a30`, and `0x00809ae8`
+produced a 170,990-block bundle at
+`http://localhost:9282/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dynroots-normal-20260904`.
+It reached E1L1, rendered non-black gameplay, accepted Enter/W, and emitted
+no `JITBAD`, `FATAL`, or `RuntimeError`. Warm samples were about 80--84 FPS,
+below the canonical run’s roughly 80--100 FPS, so the generated table was
+restored to 170,757 blocks and the candidate was rejected. A verifier run was
+also attempted at
+`http://localhost:9282/?WASM_TPUT=1&WASM_JIT_VERIFY=1&WW_ARGS=%2Fv1,%2Fl1&build=dynroots-verify-20260904`;
+its verification overhead prevented reaching gameplay within 20 seconds and
+therefore supplies no additional performance evidence.
+
+Candidate JS/WASM/data hashes were
+`1bce546537148b18a96ea3c17b8b0c1fa92f28f8995a1b3036a8cb8c459cf331`,
+`9b09d053b9b689b35d931bbed2884763c5ad29e3148c67a93daa7f9d30b27c9a`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
 Candidate observation: an 8,192-entry JIT lookup cache was packaged and tested
 at
 `http://localhost:9275/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache8192-20260904`.
