@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-05 01:15 IDT: generic AOT mid-block candidate rejected
+
+Observation: the generic AOT table was given an exact entry for the profiled
+hot guest address `0x00401e63`. The isolated candidate at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=main-gap-20260905`
+loaded successfully, reached E1L1, rendered changing non-black 640x400
+frames, reported `input: ready`, accepted synthetic Enter/W, and emitted no
+`JITBAD`, `FATAL`, or `RuntimeError`. Its run produced 2,263 guest flips.
+
+The fresh canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=main-gap-control-20260905`
+passed the same gate and produced 2,771 guest flips, with warm samples around
+99--123 FPS versus roughly 80--110 FPS for the candidate. The candidate was
+therefore slower and is not served.
+
+Candidate hashes were JS
+`795a8281c467e471d455864b81aa5464128ce0353ce179b0ba51718925fdc73e`, WASM
+`c4cc53630f18f1a7e1abddf43774c7bd3e52ffa70a7e7bd2553bff07b2aec81d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server remains HTTP 200 and unchanged. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified, and `git diff --check` passes.
+
+Decision: revert this dispatch-gap candidate and continue toward a whole-call
+optimization with a larger expected payoff.
+
 ## 2026-09-05 01:03 IDT: exact FP entry-boundary candidate rejected
 
 Observation: a second candidate added translations for the exact profiled
