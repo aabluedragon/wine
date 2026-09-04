@@ -6768,3 +6768,28 @@ lost about 6% on this controlled run and was reverted; it is not promoted.
 Hypothesis: forcing `set_lazy`, `read_reg`, and `write_reg` inline increases
 code pressure or register pressure in the hot translated path. No further
 compiler-only promotion should be made without a matched multi-run gain.
+
+# 2026-09-04 12:21 IDT: rejected 64-bit MSVCRT memset loop experiment
+
+The candidate was tested at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=memset64-20260904a`
+with COOP/COEP and the unchanged control at
+`http://localhost:8808/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=baseline-20260904a`.
+The Wine tree is dirty on branch `vibe`; generated and unrelated platform
+artifacts were preserved. The candidate JS/WASM hashes were
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3` and
+`057d98699ac7e852a2dd716b00ab6856c4ff1a133f40a744937ddbf1093de85d`;
+data/index/worker remained the published hashes recorded above.
+
+Observation: the candidate reached `E1L1: HOLLYWOOD HOLOCAUST`, presented
+the real 640×400 frame with hash `a227e01c`, reported `input: ready`, and had
+no `JITBAD`, `FATAL`, `RuntimeError`, or assertion marker. Its warm samples
+were approximately 60–68 FPS (`FPSSAMPLE t=20.0 ... flips=453 ... fps=60.6`),
+whereas the matched control reached approximately 83–99 FPS
+(`t=20.9 ... flips=881 ... fps=96.6`). The candidate was reverted and not
+published.
+
+Hypothesis: the explicit 32-bit stores are already a better fit for this
+WebAssembly memory path, or the memset loop is not frame-dominant. The next
+FPS change must come from a frame-scoped executable/Wine hotspot rather than
+another store-width rewrite.
