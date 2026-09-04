@@ -7811,3 +7811,32 @@ Wine tree.
 Decision: keep the restored artifact served and do not claim an FPS gain from
 this candidate. Continue profiling the remaining interpreted load for a
 smaller, layout-neutral verified target.
+
+# 2026-09-04 20:27 IDT: measured existing fast-column path
+
+The current `-O2` artifact was tested with the existing opt-in native
+four-wide mapper hooks at
+`http://localhost:8799/?WASM_TPUT=1&WASM_FAST_COLUMNS=1&WASM_FAST_MVLINE=1&WW_ARGS=%2Fv1,%2Fl1&build=fast-columns-long-20260904`.
+The decisive log lines were `native vlineasm4 @ 006321f3`, `native mvlineasm4
+@ 006325a0`, `E1L1: HOLLYWOOD HOLOCAUST`, and SDL Enter/W input. The screenshot
+was a live first-person 640x400 frame, not a black/loading canvas. Warm samples
+in the measured window ranged approximately 80–95 FPS.
+
+Observation: the same bundle with the safe default (without those two query
+flags) was approximately 55–75 FPS in the contemporaneous host window. This
+is a useful measured faster test configuration, but it is not promoted to the
+default because the documented historical load-stage deadlock risk remains.
+The served artifact itself remains the known-good hashes: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server is rooted at
+`/Users/alonamir/dev/wine/build-wasm4/ww/web`; preserved untracked build/cache
+artifacts remain, and no sibling checkout was modified.
+
+Decision: use the explicit fast-column URL for FPS testing. Keep the safe
+default served until a longer load-stage regression run justifies changing the
+default flags.
