@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:19 IDT: single-column pointer-local candidate rejected
+
+Observation: the verified `vlineasm1` and `mvlineasm1` native hooks were
+changed only to keep texture and palette bases as local host pointers inside
+their inner loops. The isolated candidate at
+`http://localhost:9291/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=singleptr-20260905`
+rendered a changing non-black 640x400 frame and loaded the same native hooks,
+but its temporary Python server did not provide COOP/COEP, so that run was not
+input-gate-valid. Its late guest samples were approximately 76--89 FPS.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=singleptr-control-20260905`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a changing non-black 640x400
+frame, reported `input: ready`, accepted synthetic Enter/W, and produced late
+guest samples of approximately 95--106 FPS. No `JITBAD`, `FATAL`, or
+`RuntimeError` occurred in either run.
+
+Decision: revert and reject the pointer-local change; it was slower than the
+matched control and the candidate itself lacked the required input headers.
+Candidate hashes were JS
+`fc04e774d8eaf4276b5496e301474562502e361b9acbd09d53f5268002fccb14`, WASM
+`b39307e45e700bfb003ad19ffd1114c181600f8a1ac9fe611f5d45fb5b425cdb`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical port 8799 artifacts remain unchanged; `webwine/wasm_x86.c` is
+clean, `git diff --check` passes, preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-05 00:11 IDT: corrected FP direct-index candidate rejected
 
 Observation: the corrected narrow direct index for the hot FP page was built
