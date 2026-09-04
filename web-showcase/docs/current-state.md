@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-04 15:09 IDT: rejected black-screen SSE hook; safe bundle revalidated
+
+Observation: the opt-in `WASM_XFORM=1` native hook for `0x0061663a` reached
+E1L1 quickly and reported high FPS, but its one-call differential check logged
+`xform verify MISMATCH` and the captured canvas was black. The hook was removed
+and the browser bundle was rebuilt from the verified source. The safe run at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=safe-rebuild-20260904`
+loaded the 129-block floating-point table, reached `E1L1:
+HOLLYWOOD HOLOCAUST` at 11.3s, rendered a real non-black 640x400 gameplay
+frame, accepted Enter and held W input (`wasm_input: SDL key down vk=0x57`),
+and reported no `FATAL`, `RuntimeError`, or `JITBAD`. Late samples were about
+80--129 FPS; the harness's final overlay sample was 39.9 FPS while the run was
+still settling.
+
+Decision: do not publish the SSE hook. The rebuilt safe bundle exactly matches
+the canonical artifact hashes: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Canonical URL remains the 14:15 URL below. Tracked source is clean on `vibe`
+at commit `3aa36a3c`; preserved untracked build/generated artifacts remain,
+and no sibling checkout was modified.
+
 ## 2026-09-04 14:35 IDT: exact 0x61663a FP span rejected
 
 Observation: a 142-block table addition for only `0x0061663a--0x0061671b`
