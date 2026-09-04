@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:42 IDT: FP direct-window index rejected
+
+Observation: a fully initialized direct index for FP hot addresses in
+`0x00500000--0x005fffff` was tested at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-direct-window-20260905`.
+The candidate reached the GL/video transition and accepted the synthetic
+Enter event, but then failed with `FATAL worker exception: memory access out
+of bounds` before producing a usable frame. It did not reach the render/input
+gate and has no FPS result.
+
+Decision: revert and reject the direct-window index. Candidate hashes were JS
+`474c1f46215c5e17209bd925b3486c8b93413ef4279fbc3facd6c425d1a25c41`, WASM
+`6da4cdbcdbad7ad9027b09412436da78eb9af8485b7fcea19560d03e7b80327b`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical FP-range build remains served unchanged; `webwine/wasm_x86.c`
+is clean, `git diff --check` passes, preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-05 00:37 IDT: executable-range dispatch guard rejected
 
 Observation: an isolated candidate derived the executable AOT address range
