@@ -1,5 +1,48 @@
 # Current browser checkpoint
 
+## 2026-09-05 01:46 IDT: FP lookup caller guard promoted
+
+Observation: the FP hot-table dispatcher now performs its generated-table
+range test at the call site, so static instructions outside the FP interval
+do not enter the lookup helper at all. The isolated candidate at
+`http://localhost:9292/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-repeat-20260905`
+passed E1L1, rendered a changing non-black 640x400 canvas, reported
+`input: ready`, accepted synthetic Enter/W, and emitted no `JITBAD`, `FATAL`,
+or `RuntimeError`. It reached 886 guest flips; the matched published-build
+control reached 816. Both first frames arrived at about 9.9s, and candidate
+late samples were approximately 107--119 FPS versus roughly 87--101 FPS for
+the control.
+
+The combined generic-page-bitmap variant at
+`http://localhost:9291/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gen-page-20260905`
+also passed the render/input gate, but produced only 741 flips versus 758 for
+its contemporaneous control, so that bitmap was removed and is not served.
+This result is recorded as a combined candidate observation rather than an
+isolated bitmap claim.
+
+The promoted bundle is served at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-published-20260905`.
+Its final harness exited 0 with E1L1, changing non-black 640x400 rendering,
+`input: ready`, synthetic Enter/W input, no `JITBAD`, `FATAL`, or
+`RuntimeError`, 872 guest flips, and a 10.5s first frame; late samples were
+approximately 90--113 FPS. The canonical server returned HTTP 200.
+
+Published artifact hashes: JS
+`387daee09b736a67a02baee2b057c9a6a533ff1d5532a4310afd12ad83422754`, WASM
+`3d97796b204b99704962c7d9026f6c9aee7c2ab1ed21fdfdd8a6d887f2c6ee42`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Preserved untracked build/cache/platform artifacts remain in the dirty Wine
+tree; no sibling checkout was modified, and `git diff --check` passes.
+
+Hypothesis/decision: the caller guard removes a repeated helper-entry cost
+without changing any guest state or the in-range hash behavior. The clean A/B
+margin and final end-to-end gate justify promotion; use this bundle as the
+next optimization's control.
+
 ## 2026-09-05 01:28 IDT: published dynamic-dispatch range guard
 
 Observation: `run()` now calls the miss-only `nat_dynamic_jmp()` helper only

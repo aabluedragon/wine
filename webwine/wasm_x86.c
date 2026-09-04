@@ -7471,7 +7471,9 @@ static void run( struct x86cpu *c )
 #if defined(WEBWINE_FP_HOT)
             if (fp_hot_jit)
             {
-                int fs = fp_hot_gen_lookup( start - (uint32_t)nd_slide );
+                uint32_t fva = start - (uint32_t)nd_slide;
+                int fs = (fva >= fp_hot_gen_lo && fva < fp_hot_gen_hi)
+                       ? fp_hot_gen_lookup( fva ) : -1;
                 if (fs >= 0)
                 {
                     if (g_jit_verify || fp_hot_verify)
