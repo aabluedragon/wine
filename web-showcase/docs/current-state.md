@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:28 IDT: ageBlocks native shortcut rejected
+
+Observation: the existing opt-in native `cache1d::ageBlocks` hook was tested
+at `http://localhost:8799/?WASM_TPUT=1&WASM_AGEBLOCKS=1&WW_ARGS=%2Fv1,%2Fl1&build=ageblocks-native-20260905`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a non-black 640x400 canvas,
+reported `input: ready`, and accepted synthetic Enter/W input. No `JITBAD`,
+`FATAL`, or `RuntimeError` was observed. Late samples ranged approximately
+85--103 FPS, overlapping the canonical bundle rather than exceeding it; the
+final instantaneous sample was host-contended and not used as a throughput
+claim.
+
+Decision: keep the native `ageBlocks` hook opt-in and leave the canonical
+bundle unchanged. The tested assets were the canonical JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+Tracked source remains clean on `vibe`; preserved untracked build/cache
+artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-04 23:25 IDT: ntdll relocation-loop candidate rejected
 
 Observation: the previously unresolved `0x3f9239xx` miss cluster was matched
