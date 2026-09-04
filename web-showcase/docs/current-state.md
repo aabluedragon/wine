@@ -7747,3 +7747,37 @@ artifacts and the generated AOT table; no sibling checkout was modified.
 Decision: retain the guarded float-gate build. The current clean artifact is
 usable for FPS/input testing; continue only with a whole-call optimization
 that can be skeleton-verified and measured against this control.
+
+# 2026-09-04 20:06 IDT: rejected incomplete Wall_SetInterpolations hook
+
+The frame-scoped profile's `0x006316xx` region was disassembled and a
+skeleton-guarded native candidate was briefly built at `0x006315f0`. The
+candidate URL was
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=wall-interp-20260904`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, produced a real gameplay frame, and
+logged SDL Enter/W input. A control with `WASM_NO_WALL_INTERP=1` also reached
+gameplay and input. The candidate was rejected before publication because the
+disassembly's two-stage insertion/branch behavior was not fully modeled; the
+observed FPS difference was therefore not treated as evidence of a valid
+optimization.
+
+Observation: the candidate source was removed with `apply_patch`, and the
+canonical bundle was rebuilt from the guarded FP-gate source. A restored run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=restored-final-20260904`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, real 640x400 32-bpp gameplay, and SDL
+Enter/W events. The final bundle hashes are unchanged: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The restored run's warm samples were 42–64 FPS in that noisy run, so this is a
+validity gate, not a new performance claim. No `JITBAD`, `FATAL`,
+`RuntimeError`, or assertion marker appeared. The Wine tree remains dirty from
+preserved untracked build/cache/platform artifacts and the generated AOT table;
+no sibling checkout was modified.
+
+Decision: leave the known-good guarded FP-gate artifact served. The next
+optimization needs a complete model or differential verification of the
+remaining `0x006316xx` routine before it is enabled.
