@@ -7875,3 +7875,29 @@ artifacts and the generated AOT table; no sibling checkout was modified.
 Decision: keep the fast four-wide mapper default enabled and continue looking
 for the next measured whole-call optimization. Use
 `WASM_NO_FAST_COLUMNS=1` only as a regression control.
+
+# 2026-09-04 20:39 IDT: post-promotion frame-scoped profile
+
+The promoted no-special-flags build was profiled at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WW_ARGS=%2Fv1,%2Fl1&build=post-fast-profile-20260904`.
+It logged the native `vlineasm4`/`mvlineasm4` and dispatcher hooks, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, produced a real 640x400 frame, and accepted W
+down/up plus Enter. The frame-scoped profile's late top pages were
+`00800000`, `3ee30000`, `00550000`, `3b780000`, and `00400000`; the previous
+`00630000` mapper residue fell to about 2%, confirming the promoted hooks are
+active. No `JITBAD`, `FATAL`, `RuntimeError`, assertion, or load-stage hang
+appeared. This diagnostic run reached approximately 108 FPS in a warm sample;
+the profile overhead means it is not a clean FPS benchmark.
+
+The published artifact remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The Wine tree is dirty only from preserved untracked build/cache/platform
+artifacts and generated AOT data; no sibling checkout was modified.
+
+Decision: retain the promoted default and use the reduced `00630000` share as
+the baseline for the next renderer/interpreter optimization.
