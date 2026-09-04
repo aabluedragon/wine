@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-04 13:08 IDT: disabled debug-message fast exit promoted
+
+Change: commit `3095eb0c` adds a skeleton-verified native fast exit for
+`buildgl_outputDebugMessage` at `0x00609640`. It bypasses only the exact
+observed `debug-flags & 4 == 0` return path; enabling the flag falls back to
+the guest formatter and allocator. `WASM_NO_DEBUG_MESSAGE=1` disables the
+hook for A/B comparison. No sibling checkout was modified.
+
+Observation: same-artifact A/B runs both reached E1L1 with real non-black
+640x400 canvases and no `FATAL`, `RuntimeError`, or `JITBAD`. With the hook on,
+late samples were 104--122 FPS; with `WASM_NO_DEBUG_MESSAGE=1`, they were
+81--109 FPS. The published canonical run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=debug-hook-published-3095eb0c`
+logged `native buildgl debug-message disabled path @ 00609640`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, reported `input: ready`, accepted W down/up, and
+produced screenshot hash `6c1978bc`. Late samples reached 110.2, 110.7, and
+123.5 FPS; the run ended live with no fatal/runtime/JIT error.
+
+Published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`1168a133a5b1429b605ac09f23a9aa3558cb952a7882f2198ccd08c844806c59`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean at `3095eb0c`, apart from preserved untracked
+build/cache artifacts. Port 8799 returned 200 with COOP/COEP/CORP headers.
+
 ## 2026-09-04 12:54 IDT: verified fast renderer promoted as browser default
 
 Change: commit `52b5acc6` makes the already-tested aggregate renderer path the
