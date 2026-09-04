@@ -7715,3 +7715,35 @@ artifacts and the generated AOT table; no sibling checkout was modified.
 
 Decision: retain only the measured `0x005595c0` native gate improvement and
 continue toward a larger whole-call/native optimization.
+
+# 2026-09-04 19:53 IDT: clean canonical-bundle FPS/input gate
+
+Observation: the canonical server process is still rooted at
+`/Users/alonamir/dev/wine/build-wasm4/ww/web` and returns HTTP 200 on port
+8799. A clean run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=clean-20260904`
+reached `E1L1: HOLLYWOOD HOLOCAUST` at 11.54s, produced a real 640x400
+32-bpp gameplay frame, and logged SDL Enter plus W key down/up events. Warm
+samples after startup were approximately 87, 99, 98, 103, 127, 122, 111,
+117, 130, 133, 140, 131, and 139 FPS. The matched no-float-gate control at
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_FP_GATE=1&WW_ARGS=%2Fv1,%2Fl1&build=clean-control-20260904`
+also reached gameplay and input, with warm samples approximately 86, 89, 106,
+105, 121, 121, 106, 104, 136, 131, and 129 FPS. No `JITBAD`, `FATAL`,
+`RuntimeError`, or assertion marker appeared.
+
+The clean candidate screenshot is a live first-person scene rather than a
+black/loading canvas. The diagnostic profile run briefly showed a lower
+instantaneous 42 FPS while profiling, so that result is not used for the
+performance comparison. The published hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The Wine tree remains dirty from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+
+Decision: retain the guarded float-gate build. The current clean artifact is
+usable for FPS/input testing; continue only with a whole-call optimization
+that can be skeleton-verified and measured against this control.
