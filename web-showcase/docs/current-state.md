@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-04 20:43 IDT: final published bundle end-to-end gate
+
+Observation: a fresh browser run against the default fast-column bundle reached
+`E1L1: HOLLYWOOD HOLOCAUST` at 11.66s, rendered a real non-black first-person
+640x400 frame, and accepted `SDL key down vk=0xd` (Enter) and `SDL key down
+vk=0x57` (W). The run sustained approximately 94--108 FPS in late samples
+(`FPSSAMPLE` at 29.7--38.8s); no `JITBAD`, `FATAL`, `RuntimeError`, or hang was
+observed. The canvas reported `frames: 2607` and `first-frame: 12.6s` at the
+35-second screenshot.
+
+The exact test URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-gate-20260904`.
+Port 8799 serves the current default fast-column build. Artifact SHA-256
+hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 18:50 IDT: promoted compact 0x00555 renderer path
 
 Change: added 13 newly missing, verified FP-table entries covering the hot
