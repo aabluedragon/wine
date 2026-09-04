@@ -1,5 +1,39 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:54 IDT: focused FP gap candidate rejected
+
+Observation: translations generated for the profiled gaps at `0x0055548f`,
+`0x00555580`, `0x0055558e`, `0x0055b350`, and `0x0055b8fc` were tested in the
+isolated candidate at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-focus-20260905`.
+The candidate loaded `floating-point hot JIT 178 translated blocks`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered changing non-black 640x400 frames,
+reported `input: ready`, accepted synthetic Enter/W, and emitted no `JITBAD`,
+`FATAL`, or `RuntimeError`. Late guest samples ranged approximately 68--103
+FPS.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-focus-control-20260905`
+loaded `floating-point hot JIT 173 translated blocks`, passed the same render
+and input gate, and produced late guest samples approximately 73--89 FPS.
+The candidate therefore did not demonstrate a reproducible gain and was
+generally slower; it was reverted and is not served.
+
+Candidate hashes were JS
+`e7060746c98a43f981450ea39f087b1e5711c3792e27ca4e85556fbed3d7ce28`, WASM
+`ded9b6e9f36477558e369860d2b68db8c048364a70cda7b98a2a2e2295a970c7`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical port 8799 server remains HTTP 200 and unchanged. The Wine tree
+still contains preserved untracked build/cache/platform artifacts; no sibling
+checkout was modified, and `git diff --check` passes.
+
+Decision: keep the known-good FP-range build served and continue from the next
+measured hotspot rather than publishing this slower candidate.
+
 ## 2026-09-05 00:42 IDT: FP direct-window index rejected
 
 Observation: a fully initialized direct index for FP hot addresses in
