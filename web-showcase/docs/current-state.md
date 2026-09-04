@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 17:02 IDT: mapper-setup and 0x55b7 AOT candidates rejected
+
+Observation: the existing `WASM_SETUP_MAPPERS=1` shortcut was tested against
+the published bundle and delayed first frame beyond 28 seconds with `flips=0`.
+A focused AOT candidate adding explicit roots `0x0055b75d` and `0x0055b763`
+translated 157 blocks and passed the render/input path, but its late samples
+were approximately 76--104 FPS, below the stable control range. Neither change
+was promoted.
+
+Decision: restore the verified 129-block table and rebuild the served bundle.
+The exact test URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+The restored artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`. Tracked
+source remains clean on `vibe` apart from preserved untracked build/generated
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 16:50 IDT: native SSE return-ABI fix rejected; canonical restored
 
 Observation: the opt-in native replacement for polymost's `0x0061663a` SSE
