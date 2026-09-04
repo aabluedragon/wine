@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:31 IDT: post-level hotspot profile completed
+
+Observation: the canonical bundle was profiled end-to-end at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=profile-next-20260905`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a changing non-black 640x400
+canvas, reported `input: ready`, and accepted synthetic Enter/W input. The
+profile emitted no `JITBAD`, `FATAL`, or `RuntimeError`. After the first real
+frame, the dominant misses were the previously tested FP regions around
+`0x0055b350`, `0x005595c0`, and `0x0055548f`, plus the already identified CRT
+cluster around `0x3ee399xx`; a late diagnostic sample reported about 78 FPS.
+
+Decision: no new shortcut was published from this profile. The FP regions are
+already covered by the verified hot-block table or the guarded float gate, and
+the CRT cluster does not yet expose a correctness-safe whole-call target. The
+canonical artifact remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+Tracked source remains clean on `vibe`; preserved untracked build/cache
+artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-04 23:28 IDT: ageBlocks native shortcut rejected
 
 Observation: the existing opt-in native `cache1d::ageBlocks` hook was tested
