@@ -6819,3 +6819,29 @@ Decision: the next candidate should be a verified function-level renderer/SSE
 translation or native hook for one complete call boundary, with a matched
 non-diagnostic control. Broadly seeding individual interior addresses has
 already been rejected.
+
+# 2026-09-04 12:38 IDT: rejected isolated polymost_drawpoly entry seed
+
+The candidate added only the complete executable entry
+`0x0055b6f0` (`polymost_drawpoly`) to the generated AOT seed list and was
+tested at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=entry55b6f0-20260904a`.
+The stable control was previously measured through the identical COOP/COEP
+harness at port 8808. The candidate WASM hash was
+`74db770797655de0c6a7e77f46384048707672e9a571c5dbb7e3ca17e0a43bda`; the
+canonical published WASM remains
+`fe9b426a0ee8001edc831d0189fc56d3dd306977bbb96c390603bf7d2e0ed625`.
+The Wine tree is dirty only from preserved untracked build/cache artifacts;
+the generated table was restored and no sibling checkout was modified.
+
+Observation: the candidate generated 170,758 translated blocks, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, and presented a real 640×400 frame. It did not
+produce `JITBAD`, `FATAL`, `RuntimeError`, or assertion output, but reached
+only `FPSSAMPLE t=21.5 ... flips=64 ... fps=30.8`; the matched stable control
+reached `t=20.9 ... flips=881 ... fps=96.6`. The seed was reverted and is not
+published.
+
+Hypothesis: this function’s prologue/stack-alignment entry is called often
+enough that its isolated translation adds dispatch/code-pressure cost, or its
+indirect-entry assumptions are not profitable. Further renderer work needs
+whole hot-loop/function profiling, not isolated AOT entry seeding.
