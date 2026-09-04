@@ -1,5 +1,22 @@
 # Current browser checkpoint
 
+## 2026-09-04 14:25 IDT: broader 0x6166xx FP table rejected
+
+Observation: a same-artifact candidate expanded the verified FP table from 129
+to 3,813 blocks to cover the profiled `0x0061663a--0x0061671b` SSE cluster.
+It reached E1L1, rendered real non-black 640x400 frames, accepted Enter/W,
+and produced no `FATAL`, `RuntimeError`, `JITBAD`, or `JITBADEIP`. The matched
+rollback used `WASM_NO_FP_HOT=1`. The larger table was slower: late samples
+were about 104--119 FPS enabled versus 111--123 FPS disabled, and first-frame
+startup was about 13.8s versus 12.4s. It was not published. The workspace
+generated table was restored to the 129-block version.
+
+Decision: keep the canonical 129-block renderer FP build and continue from the
+new post-FP miss profile rather than promoting the broad table. The published
+URL and hashes remain those recorded in the 14:15 checkpoint below. The source
+tree remains clean on `vibe` apart from preserved untracked generated/build
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 14:15 IDT: verified renderer FP hot table published
 
 Change: commit `39a455c3` enables the verified 129-block renderer floating-
