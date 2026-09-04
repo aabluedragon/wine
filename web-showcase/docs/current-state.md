@@ -1,5 +1,80 @@
 # Current browser checkpoint
 
+## 2026-09-04 21:19 IDT: exact renderer-boundary profile and 175-block rejection
+
+Observation: a frame-scoped profile of the published bundle at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=next-exact-profile-20260904`
+reached gameplay, a non-black canvas, and Enter/W input. Its leading executable
+misses were `0x005595c0`, `0x005595c7`, `0x005554bc`, and `0x0055548f`, each
+131,077 entries in the sampled frame; the remaining leaders were generated
+msvcrt code at `0x3ee399xx`. The profile is diagnostic and adds overhead.
+
+Candidate observation: replacing the stale overlapping renderer table entry
+with exact `0x0055548f`, `0x0055549b`, and `0x005554bc` blocks produced a
+175-block bundle that reached E1L1, rendered non-black 640x400 gameplay, and
+accepted Enter/W, but late samples were only about 65--83 FPS. It was rejected
+and the 173-block canonical artifact was restored. Candidate hashes were JS
+`63a98f844096621cde0ee05b20733c415374ac6ba7d9c3d389c5258218066f2e`, WASM
+`94f74c3b162387282372d0a6d87a96ba998affaf4df6948136469513164eaed8`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical 173-block bundle on port 8799 was re-tested afterward: it
+reached E1L1, rendered 12 non-black samples with 7 distinct frames, and
+accepted Enter/W. Its hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
+## 2026-09-04 20:50 IDT: whole-module O3 link candidate rejected
+
+Observation: a separate bundle built with `LOPT=-O3` reached E1L1, rendered
+non-black 640x400 gameplay, and accepted Enter/W through the real header-serving
+path at `http://localhost:9242/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=lopt3-header-20260904`.
+Late samples were approximately 96--102 FPS, overlapping the O2 published
+bundle, so the candidate was not promoted. No `JITBAD`, `FATAL`, or
+`RuntimeError` occurred.
+
+Candidate hashes were JS
+`3fbe5f31cbc46613ed698b400499983b6372d28c97847fe9eaa1a777759b8d5b`, WASM
+`7568a443e18cb2776b57c5e1c5f3b03fbfa064b18f5b20da21ec9d132455225d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical port 8799 build was not changed; tracked source is clean apart
+from preserved untracked build/cache and generated artifacts, and no sibling
+checkout was modified.
+
+## 2026-09-04 20:56 IDT: narrow FP-prefix candidate rejected
+
+Observation: an isolated candidate added the exact 9-instruction SSE/prologue
+prefix at `0x0055b350` to the existing FP table, increasing it from 173 to 174
+blocks. Through the real COOP/COEP server at
+`http://localhost:9247/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-prefix-20260904`,
+the candidate reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a real non-black
+640x400 frame, and accepted Enter and W input. The differential run loaded
+`floating-point hot JIT 174 translated blocks` and reported no `JITBAD FP`.
+
+Decision: reject the candidate for publication. Its late samples were about
+96--102 FPS, overlapping the current bundle's matched 94--108 FPS window, so
+there is no reproducible FPS gain. The generated prefix was removed; port 8799
+continues serving the verified 173-block build. Candidate artifact hashes were
+JS `b81d7e30df70b441a4652f05ab97241fc3060bd0e618fbd19fdc92ec09ca06e7`, WASM
+`435ffd6221e85146bcc5cd0833302a323bd35165b6cf3efde28acdc4d7d07371`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 20:43 IDT: final published bundle end-to-end gate
 
 Observation: a fresh browser run against the default fast-column bundle reached
