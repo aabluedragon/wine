@@ -7691,3 +7691,27 @@ artifacts and the generated AOT table; no sibling checkout was modified.
 
 Decision: keep the guarded hook enabled by default and continue profiling for
 the next whole-call/native gain.
+
+# 2026-09-04 19:58 IDT: rejected FP page-filter dispatch experiment
+
+The candidate added a two-page filter before the FP AOT hash lookup. It was
+tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-page-filter-20260904`.
+It reached gameplay and accepted input, but its warm samples were about
+84–88 FPS, indistinguishable from the existing guarded-hook control, so the
+dispatch change was reverted and rebuilt.
+
+Observation: the restored canonical bundle is served from
+`/Users/alonamir/dev/wine/build-wasm4/ww/web` at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-gate-20260904`.
+The current hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+The Wine tree remains dirty only from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+
+Decision: retain only the measured `0x005595c0` native gate improvement and
+continue toward a larger whole-call/native optimization.
