@@ -23,6 +23,14 @@ reached E1L1 and rendered non-black gameplay, but warm samples were only
 about 40--48 FPS versus roughly 80--100 FPS for the canonical run. It was
 rejected and the served artifact was not changed.
 
+Control observation: disabling the default single-column hooks with
+`WASM_NO_FAST_SINGLE_COLUMNS=1` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_FAST_SINGLE_COLUMNS=1&WW_ARGS=%2Fv1,%2Fl1&build=single-columns-ab-20260904`
+eventually reached E1L1 and accepted input, but startup was delayed to 68.5s
+by concurrent browser-test process contention and the late samples were only
+about 12--42 FPS. This run is not a clean performance comparison and does not
+justify changing the shipped default.
+
 The canonical artifact hashes are JS
 `ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
 `a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
