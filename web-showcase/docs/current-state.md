@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 21:26 IDT: CRT miss trace classified
+
+Observation: the diagnostic run at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_MSVCRT_MISS=1&WW_ARGS=%2Fv1,%2Fl1&build=clearerr-trace-20260904`
+reached E1L1, rendered a real non-black 640x400 frame, and accepted Enter.
+The capped first-64 miss trace was dominated by startup integer helper
+`0x3ee000f0` (`__udivmoddi4`) and did not reach the later `0x3ee399xx`
+clearerr-family entries. This does not provide a safe new native target; the
+focused clearerr candidate remains rejected based on the separate end-to-end
+comparison recorded below.
+
+The canonical port 8799 bundle remains unchanged: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 21:26 IDT: focused msvcrt clearerr candidate rejected
 
 Observation: the profile’s repeated `0x3ee399xx` entries resolve to the
