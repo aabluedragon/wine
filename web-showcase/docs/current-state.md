@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-04 13:27 IDT: cached NPOT renderer return promoted
+
+Change: commit `c4149271` adds a skeleton-verified native fast path for both
+side-effect-free return cases in `polymost_npotEmulation` at `0x00555790`.
+The update/SSE/GL path remains interpreted, and `WASM_NO_NPOT_EARLY=1` is the
+runtime rollback control. No sibling checkout was modified.
+
+Observation: same-artifact A/B runs both reached E1L1, rendered real non-black
+640x400 canvases, accepted W input, and had no `FATAL`, `RuntimeError`, or
+`JITBAD`. The enabled arm measured late samples of about 111--131 FPS; the
+disabled arm measured about 104--120 FPS. The published canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=npot-cached-published-c4149271`
+then reached `E1L1: HOLLYWOOD HOLOCAUST`, reported `input: ready`, and stayed
+live through late samples of 107.0, 116.6, and 116.8 FPS. Its screenshot was
+non-black gameplay at 640x400, hash `58f501b8`.
+
+Published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`f02c1d991c597fd6e42651c74364baf016dfc62805fdb2f8c41b9ab19aa41a9f`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean at `c4149271`, apart from preserved untracked
+build/cache artifacts. Port 8799 returned 200 with COOP/COEP/CORP headers.
+
 ## 2026-09-04 13:23 IDT: post-debug frame profile identifies next target
 
 Observation: the published debug-message build was profiled at
