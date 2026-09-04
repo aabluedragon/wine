@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-04 13:40 IDT: cached sampler-state fast path promoted
+
+Change: commit `1bd844b2` adds a cache-hit fast path to the existing
+skeleton-verified `buildgl_bindSamplerObject` hook. It mirrors the executable's
+state-slot mapping and returns natively only when the cached sampler state is
+unchanged; no-sampler and cache-miss paths remain interpreted. The isolated
+rollback is `WASM_NO_GLSAMPLER=1`. No sibling checkout was modified.
+
+Observation: corrected same-artifact A/B runs both reached E1L1, rendered real
+non-black 640x400 canvases, accepted W input, and reported no `FATAL`,
+`RuntimeError`, or `JITBAD`. The sampler-on arm reached about 79--90 FPS in
+late samples; the sampler-only-off arm reached about 60--73 FPS. The fresh
+canonical run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=sampler-hit-published-1bd844b2`
+loaded `JIT 170757 translated`, initialized OpenGL, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, produced screenshot hash `a227e01c`, and remained
+live with input events. Its late samples reached 107.0--116.8 FPS. Absolute
+startup/FPS timing in that final run was degraded by unrelated host `rustc`
+processes using roughly 90--97% CPU; this is recorded as an observation, not a
+performance claim about the bundle.
+
+Published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`78e284cd637757d2a0952d553104900259f1b38f0acab1b31a7d402716496c66`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean at `1bd844b2`, apart from preserved untracked
+build/cache artifacts. Port 8799 returned 200 with COOP/COEP/CORP headers.
+
 ## 2026-09-04 13:27 IDT: cached NPOT renderer return promoted
 
 Change: commit `c4149271` adds a skeleton-verified native fast path for both
