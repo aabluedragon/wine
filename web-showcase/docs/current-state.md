@@ -21,7 +21,7 @@ now serves the same artifact hashes as port 8799: JS
 `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
 `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
 worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
-Tracked source is clean on `vibe` at `3102f448` apart from preserved
+Tracked source is clean on `vibe` at `1149ce7a` apart from preserved
 untracked build/generated artifacts; no sibling checkout was modified.
 
 ## 2026-09-04 15:31 IDT: second SSE-hook correction rejected; safe artifacts restored
