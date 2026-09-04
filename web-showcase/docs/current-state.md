@@ -1,5 +1,38 @@
 # Current browser checkpoint
 
+## 2026-09-04 21:38 IDT: canonical browser gate and audio A/B
+
+Observation: the canonical published bundle was tested end-to-end at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-fps-20260904-test`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST` at 14.7s, created a real non-black
+640x400 frame at 16.8s, reported `input: ready`, and accepted Enter and W.
+Warm steady-state samples were approximately 80--100 FPS with
+`jit_frac=95.8--95.9%`; no `JITBAD`, `FATAL`, or `RuntimeError` occurred.
+
+Control observation: the same artifact with `WASM_NO_AUDIO=1` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_AUDIO=1&WW_ARGS=%2Fv1,%2Fl1&build=audio-ab-20260904`
+also rendered and accepted input, but fell to approximately 24--25 FPS and
+emitted repeated `Unable to play wind54.voc`/`drip3.voc: unsupported format or
+file corrupt` messages. The audio-disabled setting is therefore rejected;
+the default audio/native configuration remains the faster verified build.
+
+Candidate observation: enabling the opt-in native `surfspan` hook with
+`WASM_SURFSPAN=1` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_SURFSPAN=1&WW_ARGS=%2Fv1,%2Fl1&build=surfspan-ab-20260904`
+reached E1L1 and rendered non-black gameplay, but warm samples were only
+about 40--48 FPS versus roughly 80--100 FPS for the canonical run. It was
+rejected and the served artifact was not changed.
+
+The canonical artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 21:26 IDT: CRT miss trace classified
 
 Observation: the diagnostic run at
