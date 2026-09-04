@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-04 16:23 IDT: sequential SSE hook rejected; verified browser build restored
+
+Observation: the opt-in `WASM_XFORM=1` native replacement for the 68-instruction
+polymost SSE matrix helper was corrected for the third/fourth output stores and
+tested at `http://localhost:8807/?WASM_TPUT=1&WASM_XFORM=1&WW_ARGS=%2Fv1,%2Fl1&build=seq-xform-20260904`.
+It registered successfully and reached OpenGL setup, but the browser run ended
+with `FATAL worker exception: table index is out of bounds` before the first
+frame. The candidate was removed and was not published.
+
+Decision: retain the verified O2 build and 129-block floating-point table. The
+canonical URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+A fresh 25-second end-to-end run reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a
+non-black 640x400 gameplay frame, accepted Enter and held W input
+(`wasm_input: SDL key down/up vk=0x57`), and had no `FATAL`, `RuntimeError`, or
+`JITBAD`. Late samples were approximately 90--139 FPS on this host, with one
+sample at 138.6 FPS. Artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`. Tracked
+source is clean on `vibe` apart from preserved untracked build/generated
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 16:06 IDT: O3/WebAssembly-SIMD build rejected; O2 restored
 
 Observation: a separate browser build compiled `wasm_x86.c` with
