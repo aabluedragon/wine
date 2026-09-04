@@ -1,5 +1,46 @@
 # Current browser checkpoint
 
+## 2026-09-04 22:50 IDT: MSVCRT AOT and clearerr fast-path experiments rejected
+
+Candidate observation: the complete MSVCRT AOT table was tested at
+`http://localhost:9293/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=msvcrt-full-20260904`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a non-black 640x400 frame,
+and accepted Enter/W with no `JITBAD`, `FATAL`, or `RuntimeError`, but warm
+samples were only about 47--56 FPS. It was rejected. Candidate JS/WASM/data
+hashes were
+`dfcc241d70da8e69b2a30f19de4d372c6ef5d4583e6bac3d7a2f7cbfee7a6ae9`,
+`a9bde076c2feadfcbf68e8c4e58b73b7a860c9477b264ac8c536862a790afdb6`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+Candidate observation: the guarded non-standard-stream `clearerr` hook was
+then tested at
+`http://localhost:9297/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=clearerr-fast2-long-20260904`.
+The runtime confirmed `native clearerr non-standard stream fast path @
+3ee29930`; it reached E1L1, rendered non-black gameplay, and accepted
+Enter/W. Same-bundle enabled/disabled runs were heavily host-contended and
+did not establish a reproducible gain; the clean canonical control below
+returned to approximately 84--102 FPS. Because the hook elides CRT stream
+locking and the measured gain was not repeatable, it was removed. Candidate
+JS/WASM/data hashes were
+`19695ab79073a90b48edbd7944d8bbbd81c1d8655d287f1a07a1467c0e603898`,
+`dc92914a3d4d22041e6ca5273f3f1e51704293ea8c7b144a7deee94e5eb1c0e7`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+Final canonical observation: after stopping all temporary headless test
+processes, the published bundle at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-fps-20260904-finalcheck`
+reached E1L1, rendered a real non-black 640x400 frame, reported `input:
+ready`, accepted Enter/W, and emitted no `JITBAD`, `FATAL`, or `RuntimeError`.
+Late samples were approximately 84--102 FPS. Canonical hashes remain JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Tracked source is clean on `vibe`; preserved untracked build/cache artifacts
+remain and no sibling checkout was modified.
+
 ## 2026-09-04 22:18 IDT: FP direct-page lookup candidate rejected
 
 Candidate observation: an isolated build with a direct exact index for the
