@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:04 IDT: FP prologue-inclusive candidate rejected
+
+Candidate observation: the hot FP routine around `0x0055b350` was regenerated
+with its four-byte entry prologue included, producing a 174-block isolated
+bundle at
+`http://localhost:9298/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-prologue-20260904`.
+The bundle built successfully, reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a
+changing non-black 640x400 canvas, reported `input: ready`, and accepted
+synthetic Enter/W input. It loaded `floating-point hot JIT 174 translated
+blocks` and emitted no `JITBAD`, `FATAL`, or `RuntimeError`. Late samples ranged
+approximately 85--107 FPS, overlapping the canonical approximately 84--102 FPS
+range, so the candidate did not demonstrate a reproducible improvement.
+
+Decision: the extra prologue block was removed and was not published. Candidate
+hashes were JS
+`9bb070953cbca9e97a2ae9d0f7a4d2443a624844fe843e319a9aa6b632d889af`, WASM
+`663990a1cb719c269a0c935b9c8480dc61f54fe3a70d8a7d522b9b8f04665de1`, and the
+canonical data/index/worker/audio assets. The canonical server on port 8799
+remains unchanged. Tracked source is clean on `vibe`; preserved untracked
+build/cache artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-04 22:52 IDT: synchronization-cluster profile completed
 
 Observation: the canonical bundle was profiled at
