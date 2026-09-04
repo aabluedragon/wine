@@ -1,5 +1,21 @@
 # Current browser checkpoint
 
+## 2026-09-04 14:35 IDT: exact 0x61663a FP span rejected
+
+Observation: a 142-block table addition for only `0x0061663a--0x0061671b`
+reached E1L1, rendered a real non-black 640x400 frame, accepted Enter/W, and
+reported no `FATAL`, `RuntimeError`, or `JITBAD`. It nevertheless delayed
+first frame to about 16.9s and measured about 58--101 FPS during the observed
+render interval. It was not promoted; the generated table was restored to the
+verified 129-block version and the canonical bundle was not changed.
+
+Decision: the remaining `0x006166xx` SSE family is not a safe static-table FPS
+lever under the current block-dispatch cost. Continue profiling other frame
+work instead of widening the FP table. The published URL and hashes remain
+those in the 14:15 checkpoint below. Tracked source is clean on `vibe` apart
+from preserved untracked generated/build artifacts; no sibling checkout was
+modified.
+
 ## 2026-09-04 14:28 IDT: narrow 0x6166xx FP experiment rejected
 
 Observation: a 199-block addition covering only `0x00616300--0x00616800`
