@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-04 14:15 IDT: verified renderer FP hot table published
+
+Change: commit `39a455c3` enables the verified 129-block renderer floating-
+point table in browser builds whenever `fp_hot_gen_blocks.c` is present. The
+runtime rollback is `WASM_NO_FP_HOT=1`; non-browser builds retain the existing
+opt-in `WASM_FP_HOT=1` behavior. No sibling checkout was modified.
+
+Observation: the final canonical run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`
+logged `floating-point hot JIT 129 translated blocks loaded`, reached
+`E1L1: HOLLYWOOD HOLOCAUST` at about 10.8s, rendered a real non-black 640x400
+canvas, accepted Enter/W input, and reported no `FATAL`, `RuntimeError`,
+`JITBAD`, or `JITBADEIP`. The matched candidate/control gate showed roughly
+123--140 FPS with the table enabled versus 95--105 FPS with
+`WASM_NO_FP_HOT=1`; host scheduling makes individual one-second samples noisy.
+
+Published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` at `39a455c3`; preserved untracked
+build/cache artifacts remain.
+
 ## 2026-09-04 14:01 IDT: SSE micro-optimizations rejected
 
 Observation: two same-artifact experiments targeted the remaining interpreted
