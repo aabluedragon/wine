@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-04 18:29 IDT: added the second SSE entry contract
+
+Change: added a second minimal translated entry for the same renderer matrix
+body at `0x0061663a`, alongside the full `0x00616630` entry. Some callers
+enter directly at the interior address; the frame profile confirmed those
+were still interpreter misses after the first promotion. The table is now
+131 blocks, not a broad renderer range.
+
+Verification: the frame profile no longer lists the `0x0061663a`--`0x00616671`
+SSE instructions among the dominant misses; remaining misses are mapper/cache
+and renderer housekeeping addresses. The normal run reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered a real non-black 640x400 frame, accepted
+Enter/W input, and measured approximately 135--150 FPS in late samples. The
+FP differential-verification run reached gameplay with no `JITBAD FP`,
+`FATAL`, or `RuntimeError` output.
+
+Port 8799 now serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+Current JS/WASM/data/index/worker SHA-256 hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`7a407247062f2bc846d5667666f609644a07a9eb365d071bd2931d7b3cd18cdb`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 18:19 IDT: promoted minimal SSE matrix entry
 
 Change: retained the verified 129-block FP table and added only the complete
