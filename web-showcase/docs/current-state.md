@@ -1,5 +1,40 @@
 # Current browser checkpoint
 
+## 2026-09-05 01:03 IDT: exact FP entry-boundary candidate rejected
+
+Observation: a second candidate added translations for the exact profiled
+entry boundaries inside the FP gaps, including `0x0055548f`, `0x005554bc`,
+`0x00555580/86/8c/8e`, `0x0055b350/354/356/357/359/35a/35c/35d`, and
+`0x0055b902/908`. The isolated bundle at
+`http://localhost:9290/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-entry-exact-20260905`
+loaded `floating-point hot JIT 189 translated blocks`, reached E1L1, rendered
+changing non-black 640x400 frames, reported `input: ready`, accepted
+synthetic Enter/W, and emitted no `JITBAD`, `FATAL`, or `RuntimeError`. Its
+late guest samples ranged approximately 72--105 FPS.
+
+The fresh canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-entry-exact-control2-20260905`
+loaded the normal `floating-point hot JIT 173 translated blocks`, passed the
+same gate, and produced late samples approximately 102--123 FPS. It reached
+2,771 guest flips versus 1,839 for the candidate over the comparable run.
+The exact-entry candidate is therefore rejected as slower and is not served.
+
+Candidate hashes were JS
+`29ffe0ff1383f8944d2e03d9468768c016e1e7adbf779d50ca501077ace27fea`, WASM
+`b62f0d1e394559143cfefac4169e3db6097df8b476405b38138605632069ef91`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical port 8799 server remains HTTP 200 and unchanged. The Wine tree
+contains preserved untracked build/cache/platform artifacts; no sibling
+checkout was modified, and `git diff --check` passes.
+
+Decision: restore and retain the 173-block FP-range artifact. The next FPS
+work must target a whole-call boundary or a measured runtime/CRT cost, not
+additional isolated FP dispatch entries.
+
 ## 2026-09-05 00:54 IDT: focused FP gap candidate rejected
 
 Observation: translations generated for the profiled gaps at `0x0055548f`,
