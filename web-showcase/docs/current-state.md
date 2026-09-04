@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 17:34 IDT: XMM word-access helper candidate rejected; canonical restored
+
+Observation: replacing byte-at-a-time XMM helper memory accesses with four
+`rd32`/`wr32` operations was tested in a normal O2 browser build. The CDP
+end-to-end run stalled without producing a usable result directory or first
+frame, so the candidate failed the practical render gate and was removed.
+The test processes were stopped explicitly; no sibling checkout was touched.
+
+Decision: restore the original XMM helper implementations and rebuild the
+verified 129-block browser bundle. Port 8799 serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+The served WASM hash is confirmed as
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`; the
+canonical JS, data, index, and worker hashes remain
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` apart from preserved untracked build/generated
+artifacts.
+
 ## 2026-09-04 17:35 IDT: specialized SSE AOT candidate rejected; canonical restored
 
 Observation: a focused 130-block build replaced the 68 helper-call SSE matrix
