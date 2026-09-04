@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-05 00:00 IDT: XMM self-XOR zero specialization rejected
+
+Candidate observation: the generated FP helper's `xor xmmN,xmmN` case was
+specialized to a bulk zero, while distinct-register XOR remained bytewise.
+The isolated bundle at
+`http://localhost:9294/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-xor-zero-20260905`
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered changing non-black 640x400
+frames, reported `input: ready`, and accepted synthetic Enter/W input without
+`JITBAD`, `FATAL`, or `RuntimeError`. Its late browser samples were roughly
+40--53 FPS, below the matched canonical control's roughly 44--59 FPS window.
+
+Decision: revert and reject the specialization; it did not improve measured
+browser throughput. Candidate hashes were JS
+`2f73c0f5a1acee254e48a1cca8bf237934eef363636e885b771d79b947b4303c`, WASM
+`b463e4c3a752f1b7cb1ce74efeabaffc0e2e0698633fb8cec40e458083d4d206`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical port 8799 artifact remains unchanged; `git diff --check` passes,
+tracked source is clean on `vibe`, preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-04 23:55 IDT: FP lookup last-result cache rejected
 
 Candidate observation: a one-entry cache for the generated FP lookup result
