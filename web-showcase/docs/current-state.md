@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-04 17:35 IDT: specialized SSE AOT candidate rejected; canonical restored
+
+Observation: a focused 130-block build replaced the 68 helper-call SSE matrix
+block at `0x0061663a` with a single specialized C routine. It reached gameplay
+and accepted keyboard input, but its apparently high throughput came with a
+black 640x400 canvas. The existing FP verifier did not reach a decisive block
+report before the test window ended, so the candidate failed the correctness
+gate and was removed.
+
+Decision: restore the exact verified 129-block table and rebuild. Port 8799 is
+serving the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`;
+the fresh bundle hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`. Tracked
+source is clean on `vibe` apart from preserved untracked build/generated
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 17:02 IDT: mapper-setup and 0x55b7 AOT candidates rejected
 
 Observation: the existing `WASM_SETUP_MAPPERS=1` shortcut was tested against
