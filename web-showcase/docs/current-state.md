@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-04 18:11 IDT: full SSE matrix-entry candidate rejected; canonical restored
+
+Observation: a focused table with the renderer SSE matrix routine’s true entry
+`0x00616630` translated 11,004 blocks and reported no unhandled opcodes. It
+reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered a real non-black 640x400 frame,
+and accepted Enter/W input, but late gameplay samples fell to approximately
+10--33 FPS. The large table’s code/dispatch pressure outweighed the saved
+interpreter work.
+
+Decision: discard the candidate and restore the verified 129-block FP table.
+The canonical bundle on port 8799 was rebuilt and re-tested; it reached E1L1,
+accepted Enter/W, and measured approximately 90--115 FPS in the same window.
+Canonical JS/WASM/data/index/worker hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+The exact test URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+artifacts; no sibling checkout was modified. No `JITBAD`, `FATAL`,
+`RuntimeError`, or black-frame result was observed.
+
 ## 2026-09-04 17:59 IDT: end-to-end mapper comparison; canonical remains healthy
 
 Observation: matched browser runs on the current bundle both reached
