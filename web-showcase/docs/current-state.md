@@ -1,5 +1,33 @@
 # Current browser checkpoint
 
+## 2026-09-04 12:54 IDT: verified fast renderer promoted as browser default
+
+Change: commit `52b5acc6` makes the already-tested aggregate renderer path the
+browser default. It enables the native qrhline, mhline, surface-blit, and
+verified renderer hooks without requiring a query flag. The emergency rollback
+is `WASM_NO_FAST_RENDER=1`; no sibling checkout was modified.
+
+Observation: a fresh temporary-build run at
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=default-fast-promoted`
+reached `E1L1: HOLLYWOOD HOLOCAUST` at 11.3s, reported `input: ready`, rendered
+a real non-black 640x400 canvas, accepted W down/up, and sustained roughly
+97--121 FPS through its 57s sample. A fresh canonical run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fast-default-52b5acc6`
+reached its first frame at 11.1s and logged late samples of 116.1, 124.1,
+125.6, 122.0, 125.5, 131.0, and 120.0 FPS through 37s. It remained live with
+`input: ready`, `audio: on`, and no `FATAL`, `RuntimeError`, or `JITBAD`.
+The screenshot result was non-black gameplay at 640x400 (hash `58f501b8`).
+
+Published artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`1627d37e680212f4c10910532dcc05dce75e13b471001e326413717a2cceb663`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+The tracked source is clean at `52b5acc6`, apart from the preserved untracked
+build/cache artifacts listed by git status. Port 8799 returns 200 with COOP,
+COEP, and CORP headers.
+
 ## 2026-09-03 17:56 IDT: larger JIT lookup cache rejected
 
 Observation: a browser candidate increasing the direct-mapped JIT hint cache
