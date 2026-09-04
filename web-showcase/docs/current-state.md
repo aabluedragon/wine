@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-04 16:50 IDT: native SSE return-ABI fix rejected; canonical restored
+
+Observation: the opt-in native replacement for polymost's `0x0061663a` SSE
+matrix helper was retried with the correct register-only return ABI. This
+removed the earlier table-index crash, but the end-to-end browser run still
+had `flips=0` after approximately 28 seconds despite creating the OpenGL
+context, so it failed the first-frame gate and was removed.
+
+Decision: do not enable the native SSE shortcut. The generated table is back to
+the verified 129 blocks, and port 8799 serves the canonical bundle at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+The rebuilt artifact hashes are unchanged: JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`97648ce8f79c17523089b50c65427e9dcaa17a4b8f43406ac1337d6fc8e0940d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`. The
+source tree is clean on `vibe` apart from preserved untracked build/generated
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 16:39 IDT: renderer-band AOT experiments rejected; 129-block build restored
 
 Observation: two generated AOT candidates were tested end-to-end against the
