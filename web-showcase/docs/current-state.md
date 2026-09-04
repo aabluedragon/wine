@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:46 IDT: corrected narrow FP index candidate rejected
+
+Observation: after correcting the prototype's hash-slot bookkeeping, the
+temporary candidate at
+`http://localhost:9296/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-direct-narrow-20260905c`
+survived startup farther than the first version, but the headless CDP run
+stalled at pointer-lock setup before producing a frame. It did not reach the
+rendering/input gate, so it provides no FPS evidence and is not a valid
+performance result.
+
+Decision: revert and reject the narrow FP-page index. The canonical server on
+port 8799 remains HTTP 200 and unchanged with JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+`git diff --check` passes; tracked source remains clean on `vibe`, preserved
+untracked build/cache artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-04 23:45 IDT: narrow FP dispatch-index candidate rejected
 
 Candidate observation: a temporary exact lookup index for the hot
