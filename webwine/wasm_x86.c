@@ -6963,7 +6963,11 @@ static void run( struct x86cpu *c )
                           g_jit_verify = getenv( "WASM_JIT_VERIFY" ) ? 1 : 0;
                           if (g_jit_on) gen_build_hash();
 #if defined(WEBWINE_FP_HOT)
+ #ifdef WEBWINE_BROWSER
+                          fp_hot_jit = getenv( "WASM_NO_FP_HOT" ) ? 0 : 1;
+ #else
                           fp_hot_jit = getenv( "WASM_FP_HOT" ) ? 1 : 0;
+ #endif
                           fp_hot_verify = getenv( "WASM_FP_HOT_VERIFY" ) ? 1 : 0;
                           if (fp_hot_jit) fp_hot_gen_build_hash();
 #endif
