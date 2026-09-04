@@ -322,7 +322,7 @@ enum { NAT_FLIP = 1, NAT_MEMMOVE, NAT_MEMSET, NAT_COUNT, NAT_AGELOOP,
        NAT_GLTHUNK_RET, NAT_SETUPQRHLINE, NAT_POW, NAT_WIN_GL_SWAP,
        NAT_PTHREAD_SPIN_UNLOCK, NAT_PTHREAD_SPIN_LOCK, NAT_PTHREAD_GETSPECIFIC,
        NAT_GDI_RELAY, NAT_GDI_CLIENT, NAT_SETUP_VLINE, NAT_SETUP_PVLINE, NAT_SETUP_MVLINE,
-       NAT_SETUP_TVLINE, NAT_DEBUG_MESSAGE, NAT_NPOT_EARLY };
+       NAT_SETUP_TVLINE, NAT_DEBUG_MESSAGE, NAT_NPOT_EARLY, NAT_FP_GATE };
 static uint64_t g_count_hits;   /* diagnostic: executions of a watched address */
 static uint64_t g_vl_calls, g_vl_iters;   /* native vlineasm4: entries and loop iterations */
 static uint64_t g_sb_calls, g_sb_iters;   /* native surface blit: entries and iterations */
@@ -4856,6 +4856,31 @@ static void nat_arm_setup_mappers( void )
     }
 }
 
+/* This renderer-side gate is a frequent no-op call.  Keep only its proved
+ * fast return native; when the state selects the float path, return 0 so the
+ * complete guest implementation remains authoritative. */
+#define ND_FP_GATE 0x5595c0u
+static int nat_fp_gate( struct x86cpu *c )
+{
+    uint32_t a = rd32( 0xae1a40u + (uint32_t)nd_slide );
+    uint32_t r = a - 3u;
+    set_lazy( c, K_SUB, a, 3u, r, 4 );
+    if (!r) return 0;
+    { uint32_t sp = c->regs[ESP];
+      c->regs[ESP] = sp + 4; c->eip = rd32( sp ); }
+    return 1;
+}
+
+static void nat_arm_fp_gate( void )
+{
+    uint32_t a = ND_FP_GATE + (uint32_t)nd_slide;
+    if (rd8(a) != 0x83 || rd8(a+1) != 0x3d ||
+        rd32(a+2) != 0xae1a40u || rd8(a+6) != 0x03 ||
+        rd8(a+7) != 0x74 || rd8(a+8) != 0x07 || rd8(a+9) != 0xc3)
+    { fprintf( stderr, "wasm_x86: fp gate skeleton differs at %08x - left interpreted\n", a ); return; }
+    nat_register( a, NAT_FP_GATE, "renderer float gate" );
+}
+
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
@@ -4884,6 +4909,7 @@ static int nat_call( struct x86cpu *c, int kind )
     if (kind == NAT_LIBDIV)   return nat_libdivide( c );
     if (kind == NAT_SURFSPAN) return nat_surfspan( c );
     if (kind == NAT_SURFBLIT) return nat_surfblit( c );
+    if (kind == NAT_FP_GATE) return nat_fp_gate( c );
     if (kind == NAT_MEMCMP) return nat_memcmp( c );
     if (kind == NAT_STRCMP) return nat_strcmp( c );
     if (kind == NAT_STRLEN) return nat_strlen( c );
@@ -7031,6 +7057,7 @@ static void run( struct x86cpu *c )
                           if (!getenv( "WASM_NO_GLSAMPLER" )) nat_arm_glsampler();
                           if (!getenv( "WASM_NO_DEBUG_MESSAGE" )) nat_arm_debug_message();
                           if (!getenv( "WASM_NO_NPOT_EARLY" )) nat_arm_npot_early();
+                          if (!getenv( "WASM_NO_FP_GATE" )) nat_arm_fp_gate();
                           if (browser_fast_render() && !getenv( "WASM_NO_SURFBLIT" )) nat_arm_surfblit();
                           g_skip_blit = getenv( "WASM_KEEP_BLIT" ) ? 0 : 1;
                           /* The span mapper touches the engine's self-growing

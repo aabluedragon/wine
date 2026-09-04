@@ -7663,3 +7663,31 @@ and worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
 Decision: keep the verified 173-block control and the corrected canonical
 server. The next FPS change must be a measured whole-call/native optimization;
 the AOT-table and FP-lookup micro-optimizations tested here are rejected.
+
+# 2026-09-04 19:41 IDT: promoted guarded renderer float-gate hook
+
+Added a skeleton-verified native fast return for executable address
+`0x005595c0`. It models the guest `cmp [0xae1a40],3` flags with the existing
+lazy-flag helper, returns through the guest stack only when the condition takes
+the proven no-op branch, and declines to native execution for the float path.
+The opt-out is `WASM_NO_FP_GATE=1`. The candidate URL was
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-gate-20260904`;
+the matched control used the same URL plus `WASM_NO_FP_GATE=1`.
+
+Observation: both 30-second browser runs reached
+`E1L1: HOLLYWOOD HOLOCAUST`, produced real 640×400 gameplay frames, accepted
+Enter and W key down/up events, and showed no `JITBAD`, `FATAL`,
+`RuntimeError`, or assertion marker. Warm samples for the hook averaged about
+86 FPS versus about 83 FPS for the control (approximately 3–4% improvement;
+timing variance remains significant). The published artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`d851f170e913d6e8dbee7149777beeafa7e92d63343b92edad26f1feffe03f40d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The Wine tree is dirty from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+
+Decision: keep the guarded hook enabled by default and continue profiling for
+the next whole-call/native gain.
