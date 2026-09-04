@@ -7840,3 +7840,38 @@ artifacts remain, and no sibling checkout was modified.
 Decision: use the explicit fast-column URL for FPS testing. Keep the safe
 default served until a longer load-stage regression run justifies changing the
 default flags.
+
+# 2026-09-04 20:37 IDT: promoted fast four-wide mappers to browser default
+
+After the sustained 60-second opt-in gate, browser builds now enable both
+four-wide native mapper families by default: `vlineasm4` and `mvlineasm4` plus
+their dispatchers. `WASM_NO_FAST_COLUMNS=1` remains an explicit rollback
+switch; the old `WASM_FAST_COLUMNS` and `WASM_FAST_MVLINE` opt-ins remain
+harmless compatibility query parameters. The source change is limited to the
+browser default selection; native skeleton checks still decide whether each
+hook arms.
+
+Observation: the rebuilt no-special-flags run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fast-columns-default-20260904`
+logged `native vlineasm4 @ 006321f3`, `native vlineasm4 dispatcher @ 006320b0`,
+`native mvlineasm4 @ 006325a0`, and `native mvlineasm4 dispatcher @ 006324d0`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST` at 15.50s, produced a real 640x400
+32-bpp gameplay frame, and accepted SDL Enter, Space, and W events. The run
+remained live through approximately 55s; warm samples reached 115 FPS, with
+the measured window varying from roughly 80–130 FPS. No `JITBAD`, `FATAL`,
+`RuntimeError`, assertion, or load-percentage hang appeared. The canvas result
+was live gameplay, not black/loading output.
+
+The final hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The Wine tree remains dirty from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+
+Decision: keep the fast four-wide mapper default enabled and continue looking
+for the next measured whole-call optimization. Use
+`WASM_NO_FAST_COLUMNS=1` only as a regression control.

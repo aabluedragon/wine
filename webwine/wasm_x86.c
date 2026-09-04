@@ -181,7 +181,10 @@ static int browser_fast_columns( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_FAST_COLUMNS" ) && !getenv( "WASM_NO_FAST_COLUMNS" );
+    /* The four-wide unmasked mapper passed the sustained 60-second browser
+     * gate, including level load and live input.  Make the measured fast path
+     * the default; retain one explicit rollback switch for driver regressions. */
+    if (fast < 0) fast = !getenv( "WASM_NO_FAST_COLUMNS" );
     return fast;
 #else
     return 1;
@@ -192,7 +195,8 @@ static int browser_fast_masked_columns( void )
 {
 #ifdef WEBWINE_BROWSER
     static int fast = -1;
-    if (fast < 0) fast = getenv( "WASM_FAST_MVLINE" ) && !getenv( "WASM_NO_FAST_COLUMNS" );
+    /* The masked companion passed the same sustained gate as vlineasm4. */
+    if (fast < 0) fast = !getenv( "WASM_NO_FAST_COLUMNS" );
     return fast;
 #else
     return 1;
