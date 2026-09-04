@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-04 21:26 IDT: focused msvcrt clearerr candidate rejected
+
+Observation: the profile’s repeated `0x3ee399xx` entries resolve to the
+`msvcrt.dll!clearerr` family. A six-block focused AOT candidate was tested at
+`http://localhost:9258/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=clearerr-aot-20260904`.
+It reached E1L1, rendered non-black 640x400 gameplay, accepted Enter/W, and
+reported no `JITBAD`, `FATAL`, or `RuntimeError`. Late samples were roughly
+88--99 FPS, overlapping the canonical run; no repeatable FPS gain was found.
+
+Decision: reject the candidate and restore the prior generated CRT artifact.
+Candidate hashes were JS
+`956e9b8cec49f66f8aa950daadbbe9da9a70fd01bd38ee2aef4d42a2437431f0`, WASM
+`c57df720f6b570dc7eec2c9c4bf60bd72decd9c010fb81b0283ae54d5152cd45`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, worker
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`, and audio
+worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical port 8799 artifact remains JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`a7cfa1a1ccea0ced9f26972b735e85301ef3c03150ac9dc87058c5370fc4e16e`, and the
+same data/index/worker/audio hashes recorded above. Tracked source is clean on
+`vibe` apart from preserved untracked build/cache and generated artifacts; no
+sibling checkout was modified.
+
 ## 2026-09-04 21:19 IDT: exact renderer-boundary profile and 175-block rejection
 
 Observation: a frame-scoped profile of the published bundle at
