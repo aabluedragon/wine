@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:55 IDT: FP lookup last-result cache rejected
+
+Candidate observation: a one-entry cache for the generated FP lookup result
+was tested end-to-end at
+`http://localhost:9295/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-cache-20260905`.
+It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered changing non-black 640x400
+frames, reported `input: ready`, and accepted synthetic Enter/W input without
+`JITBAD`, `FATAL`, or `RuntimeError`. The short run showed approximately
+83--92 FPS in guest samples, but the longer candidate run's browser samples
+were lower and inconsistent with the matched canonical control; no
+reproducible throughput gain was established.
+
+Decision: revert the cache and do not publish it. Candidate hashes were JS
+`39eb312881bd654e85d39e916765749da876e1524b20f1d21e0b965985f6a08a`, WASM
+`ca363eb9b0b8fe83d059c659ea9252f6e72370028a452bc16f5f3636d375e5be`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`. The
+canonical port 8799 bundle remains unchanged; tracked source is clean on
+`vibe`, preserved untracked build/cache artifacts remain, and no sibling
+checkout was modified.
+
 ## 2026-09-04 23:46 IDT: corrected narrow FP index candidate rejected
 
 Observation: after correcting the prototype's hash-slot bookkeeping, the
