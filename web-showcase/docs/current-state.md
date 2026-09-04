@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-04 13:19 IDT: NPOT early-return probe rejected
+
+Observation: a same-artifact browser A/B tested a skeleton-checked early return
+for `polymost_npotEmulation` when its cached mode differs from the current mode.
+Both arms reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered real non-black 640x400
+frames, accepted W input, and had no `FATAL`, `RuntimeError`, or `JITBAD`.
+Late samples overlapped substantially: the probe measured about 111--128 FPS,
+while `WASM_NO_NPOT_EARLY=1` measured about 98--121 FPS. This is not
+reproducible evidence of a gain, so the probe was removed and not promoted.
+
+The published bundle was rebuilt from the prior verified source and restored at
+the canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=debug-hook-published-3095eb0c`.
+The restored WASM hash is
+`1168a133a5b1429b605ac09f23a9aa3558cb952a7882f2198ccd08c844806c59`; JS,
+data, index, and worker remain respectively
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean at `3095eb0c`, apart from preserved untracked
+build/cache artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 13:08 IDT: disabled debug-message fast exit promoted
 
 Change: commit `3095eb0c` adds a skeleton-verified native fast exit for
