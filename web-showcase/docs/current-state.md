@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-04 23:25 IDT: ntdll relocation-loop candidate rejected
+
+Observation: the previously unresolved `0x3f9239xx` miss cluster was matched
+to `ntdll!LdrProcessRelocationBlock`, whose packaged PE32 image RVA is
+`0x13910` (runtime address `0x3f923910`). An isolated skeleton-guarded native
+implementation of the exact Wine PE32 relocation loop was tested at
+`http://localhost:9300/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=ntdll-reloc-20260905`.
+It logged `native ntdll LdrProcessRelocationBlock @ 3f923910`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered a changing non-black 640x400 canvas,
+reported `input: ready`, and accepted synthetic Enter/W input. It emitted no
+`JITBAD`, `FATAL`, or `RuntimeError`. Late samples were approximately 85--98
+FPS; the same-session canonical control was approximately 81--107 FPS, so no
+reproducible throughput gain was established.
+
+Decision: remove the relocation shortcut and do not publish it. Candidate
+hashes were JS
+`aa1e8ae251b30c265b7c7d45d87c570a5d7904d0e4697a3e80f459a2ae9ce870`, WASM
+`47b7a81c859ab716741c2aa180922fe92916fb90a6470693ef311a5af0ede1a3`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+The canonical server on port 8799 remains unchanged. Tracked source is clean
+on `vibe`; preserved untracked build/cache artifacts remain, and no sibling
+checkout was modified.
+
 ## 2026-09-04 23:13 IDT: XMM helper bulk-memory candidate rejected
 
 Candidate observation: the normal AOT XMM helpers were changed in an isolated
