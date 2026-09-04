@@ -2,6 +2,35 @@
 
 ## 2026-09-04 21:38 IDT: canonical browser gate and audio A/B
 
+## 2026-09-04 21:53 IDT: dispatch/cache and interpreter optimization candidates rejected
+
+Candidate observation: an 8,192-entry JIT lookup cache was packaged and tested
+at
+`http://localhost:9275/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache8192-20260904`.
+It reached E1L1, rendered non-black gameplay, and accepted Enter/W, but warm
+samples were approximately 66--84 FPS versus the canonical approximately
+80--100 FPS. It was rejected; the source and served bundle retain the
+1,024-entry cache. Candidate JS/WASM/data hashes were
+`8361c3e5d679b36107e2e352d81b553ea39e7f8a3aa85ee1e64096a1681c5d6c`,
+`871c66d2cff55db759cfaf1746ff03faa5d6bd4473908535b39585d1d600d123`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+Candidate observation: enabling the generated-CON near-return shortcut
+(`WASM_DYNAMIC_RET=1`) at
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_RET=1&WW_ARGS=%2Fv1,%2Fl1&build=dynamic-ret-ab-20260904`
+reached E1L1, rendered gameplay, and accepted input, but warm samples were
+approximately 76--89 FPS. It was rejected and remains opt-in.
+
+Candidate observation: compiling the browser interpreter/JIT translation unit
+with `XOPT=-O3` produced a valid candidate at
+`http://localhost:9278/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xopt3-20260904`.
+It reached E1L1, rendered gameplay, and accepted input, but warm samples were
+approximately 42--63 FPS. It was rejected; the canonical `-O2` object remains
+served. Candidate JS/WASM/data hashes were
+`711134755e8c54def9522282e06c7fcb8f26bb4a786e3960e797258285db815e`,
+`a6380e20d14377020200957b7d3dc5ec8f631bc93a9b8667eaf7e7d4ff0783ab`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
 Observation: the canonical published bundle was tested end-to-end at
 `http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-fps-20260904-test`.
 It reached `E1L1: HOLLYWOOD HOLOCAUST` at 14.7s, created a real non-black
