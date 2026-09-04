@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-04 14:01 IDT: SSE micro-optimizations rejected
+
+Observation: two same-artifact experiments targeted the remaining interpreted
+SSE stream on the temporary URL
+`http://localhost:8807/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=binps-on2-20260904`
+and its rollback control with `WASM_NO_BINPS=1`. Both reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered real non-black 640x400 frames, accepted
+the Enter/W input sequence, and produced no `FATAL`, `RuntimeError`, or
+`JITBAD`. The packed-SSE memory-helper candidate was not a reproducible FPS
+gain: late samples overlapped noisily, with the enabled run roughly 74--94 FPS
+and the rollback roughly 104--116 FPS. A separate narrow interpreter shortcut
+for `0f 28`/`0f 59` was likewise neutral and was reverted.
+
+Decision: neither SSE experiment was promoted or published. The canonical
+bundle remains the sampler-hit build at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=sampler-hit-published-1bd844b2`
+with JS `ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+WASM `78e284cd637757d2a0952d553104900259f1b38f0acab1b31a7d402716496c66`,
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+and worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe`; preserved untracked build/cache artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-04 13:40 IDT: cached sampler-state fast path promoted
 
 Change: commit `1bd844b2` adds a cache-hit fast path to the existing
