@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-04 18:50 IDT: promoted compact 0x00555 renderer path
+
+Change: added 13 newly missing, verified FP-table entries covering the hot
+`0x00555470`/`0x00555500`/`0x00555590`/`0x00555690`/`0x00555710` branches.
+This is a compact addition to the existing table; it does not translate the
+whole renderer range. The bundle now loads 161 translated FP blocks.
+
+Verification: the frame profile moved the dominant misses away from the
+previous `0x00555690`, `0x00555710`, `0x0055550c`, and `0x0055547c` cluster to
+later `0x005554d*` and cache/mapper entries. The normal run reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered a real non-black 640x400 frame, accepted
+Enter/W input, and measured approximately 106--138 FPS in late samples. The
+differential-verification run loaded `floating-point hot JIT 161 translated
+blocks`, reached E1L1, and reported no `JITBAD FP`, `FATAL`, or `RuntimeError`.
+
+Port 8799 serves
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=renderer-fp-published-39a455c3`.
+Current JS/WASM/data/index/worker SHA-256 hashes are
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+`1ef05865e1e79bc32781e252fcb1bb6638619b47917e397ac1354485cb366cfd`,
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+`72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+Tracked source is clean on `vibe` apart from preserved untracked build/cache
+and generated artifacts; no sibling checkout was modified.
+
 ## 2026-09-04 18:38 IDT: promoted hot renderer branch path
 
 Change: added the 17 small verified FP-table blocks beginning at
