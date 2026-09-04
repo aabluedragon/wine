@@ -7637,3 +7637,29 @@ audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`
 
 Decision: the 173-block control is the only published build. Future
 comparisons must verify the serving process cwd before measuring FPS.
+
+# 2026-09-04 19:29 IDT: rejected FP-dispatch range guard; final control checked
+
+The candidate added a constant-range guard before the floating-point AOT hash
+lookup in `wasm_x86.c`. It preserved the 173-block table and reached gameplay,
+but the normal browser run fell to approximately 45–50 FPS in the warm
+window, so the source change was reverted. The candidate was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-173-dispatch-guard-20260904`.
+
+Observation: after the revert and rebuild, the canonical server remained
+rooted at `/Users/alonamir/dev/wine/build-wasm4/ww/web`. The 25-second gate at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-173-final-20260904d`
+logged `floating-point hot JIT 173 translated blocks loaded`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, produced a real 640×400 frame with
+`first-frame: 16.2s`, and logged SDL Enter and W key down/up events. After
+startup, samples reached 83.1, 82.1, 91.9, and 87.9 FPS. No `JITBAD`, `FATAL`,
+`RuntimeError`, or assertion marker appeared. The restored artifact hashes
+remain JS `ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`,
+WASM `e79067d0773c427ef0b541e97b87f16c686ff99f863f61401ef63f094e82030c`,
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+and worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Decision: keep the verified 173-block control and the corrected canonical
+server. The next FPS change must be a measured whole-call/native optimization;
+the AOT-table and FP-lookup micro-optimizations tested here are rejected.
