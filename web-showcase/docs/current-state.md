@@ -7552,3 +7552,31 @@ Hypothesis: O3 increases code size and compile/runtime pressure in the very
 large generated interpreter translation unit. Keep `XOPT=-O2` as the browser
 baseline; future FPS work must target measured hot code rather than global
 compiler aggressiveness.
+
+# 2026-09-04 18:49 IDT: promoted 173-block floating-point/renderer candidate
+
+The current published build is available at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-173-20260904`.
+It was built with `WORK=/Users/alonamir/dev/wine/build-wasm4/ww ./webwine/browser/build-browser.sh`.
+The Wine tree remains dirty from preserved untracked build/cache/platform
+artifacts and the generated AOT table; no sibling checkout was modified.
+Artifact hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`e79067d0773c427ef0b541e97b87f16c686ff99f863f61401ef63f094e82030c`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+worker `72605037636d97a478c14e43b9f614f8d4aeb270769a94a9598b04c85c249651`.
+
+Observation: the normal 20-second browser gate logged
+`floating-point hot JIT 173 translated blocks loaded`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, presented a real non-black 640×400 gameplay
+frame, and logged SDL Enter and W key down/up events. Warm samples reached
+`FPSSAMPLE t=19.5 ... fps=134.7`, `t=20.6 ... fps=137.8`, and
+`t=21.6 ... fps=142.4`. The floating-point verification run also reached
+E1L1 and produced a real frame with no `JITBAD`, `FATAL`, `RuntimeError`, or
+assertion marker.
+
+Decision: keep the 173-block table and serve it as the current test build.
+The diagnostic run moved the leading misses away from the covered
+`0x005554*` continuation into remaining renderer/interpreter boundaries;
+diagnostic FPS is not used as a performance claim.
