@@ -2842,6 +2842,7 @@ static int nat_memset_loop( struct x86cpu *c )
 
 static void jit_xmm_store( struct x86cpu *c, int src, uint32_t a, int n );
 static inline __attribute__((always_inline)) int cond( struct x86cpu *c, int cc );
+static int nat_dynamic_tls_wrapper( struct x86cpu *c );
 
 /* The loop is sometimes entered at an instruction boundary inside the
  * movaps sequence by a translated caller.  Those four addresses intentionally
@@ -2884,8 +2885,12 @@ static int nat_dynamic_jmp( struct x86cpu *c )
     static int div64_enabled = -1;
     static uint32_t div64_addr;
     static unsigned div64_hits;
+    static int dyn_tls_enabled = -1;
     if (enabled < 0) enabled = getenv( "WASM_NO_DYNAMIC_THUNK" ) ? 0 : 1;
     if (!enabled) return 0;
+    if (dyn_tls_enabled < 0)
+        dyn_tls_enabled = !getenv( "WASM_NO_DYNAMIC_TLSWRAP" );
+    if (dyn_tls_enabled && a == 0x00805b90u && nat_dynamic_tls_wrapper( c )) return 1;
     /* Runtime-generated CON helpers end at ordinary near returns.  These
      * instructions are fully self-contained: the interpreter's implementation
      * only reads the stack return address (and, for C2, the immediate cleanup)
@@ -4692,6 +4697,72 @@ static int nat_pthread_getspecific( struct x86cpu *c )
      * is pending; require exactly that observable condition before eliding it. */
     if (!(rd8( obj + 0x20u ) & 0x0cu) &&
         rd32( ND_PTHREAD_CANCEL_FLAG + (uint32_t)nd_slide )) return 0;
+    return nat_ret_eax( c, sp, value );
+}
+
+/* SDL's generated TLS wrapper at 0x00805b90 calls pthread_getspecific with
+ * the engine's private key and then indexes the returned array with a
+ * one-based slot from its object argument.  Keep a separate exact wrapper
+ * candidate: the common nonzero lookup is fully bounded, while all fallback
+ * cases remain in the self-modifying guest code. */
+static int nat_dynamic_tls_wrapper( struct x86cpu *c )
+{
+    static int checked, skeleton_ok;
+    uint32_t b = c->eip;
+    uint32_t sp = c->regs[ESP], frame = rd32( sp + 4u ), requested;
+    uint32_t teb = c->fs_base, tlskey, obj = 0, count, value, lock;
+
+    if (!checked)
+    {
+        skeleton_ok =
+            rd8(b+0)==0x55 && rd8(b+1)==0x57 && rd8(b+2)==0x56 &&
+            rd8(b+3)==0x53 && rd8(b+4)==0x83 && rd8(b+5)==0xec &&
+            rd8(b+6)==0x2c && rd8(b+7)==0x8b && rd8(b+8)==0x6c &&
+            rd8(b+9)==0x24 && rd8(b+10)==0x40 && rd8(b+11)==0x8b &&
+            rd8(b+12)==0x75 && rd8(b+13)==0x08 && rd8(b+14)==0x85 &&
+            rd8(b+15)==0xf6 && rd8(b+16)==0x74 && rd8(b+17)==0x3e &&
+            rd8(b+18)==0xa1 && rd32(b+19)==0x01acd098u &&
+            rd8(b+23)==0x89 && rd8(b+24)==0x04 && rd8(b+25)==0x24 &&
+            rd8(b+26)==0xe8 && b + 0x1fu + rd32(b+27)==0x0080a800u &&
+            rd8(b+31)==0x89 && rd8(b+32)==0xc3 && rd8(b+33)==0x85 &&
+            rd8(b+34)==0xc0 && rd8(b+35)==0x74 && rd8(b+36)==0x6b &&
+            rd8(b+37)==0x8b && rd8(b+38)==0x38 && rd8(b+39)==0x39 &&
+            rd8(b+40)==0xf7 && rd8(b+41)==0x0f && rd8(b+42)==0x82 &&
+            rd8(b+47)==0x83 && rd8(b+48)==0xee && rd8(b+49)==0x01 &&
+            rd8(b+50)==0x8b && rd8(b+51)==0x7c && rd8(b+52)==0xb3 &&
+            rd8(b+53)==0x04 && rd8(b+54)==0x85 && rd8(b+55)==0xff &&
+            rd8(b+56)==0x0f && rd8(b+57)==0x84;
+        checked = 1;
+        fprintf( stderr, "wasm_x86: dynamic TLS wrapper %s @ %08x\n",
+                 skeleton_ok ? "native path armed" : "skeleton differs; interpreted", b );
+    }
+    if (!skeleton_ok) return 0;
+
+    if (!frame || frame >= NAT_GUEST_END - 0x0cu) return 0;
+    requested = rd32( frame + 8u );
+    if (!requested || !teb || teb >= NAT_GUEST_END - 0xf98u ||
+        rd32( ND_PTHREAD_ONCE_STATE + (uint32_t)nd_slide ) != 1u) return 0;
+    tlskey = rd32( ND_PTHREAD_TLS_KEY + (uint32_t)nd_slide );
+    if (tlskey < 64u)
+        obj = rd32( teb + 0xe10u + tlskey * 4u );
+    else if (tlskey < 320u)
+    {
+        uint32_t slots = rd32( teb + 0xf94u );
+        if (slots && slots < NAT_GUEST_END - 256u)
+            obj = rd32( slots + (tlskey - 64u) * 4u );
+    }
+    if (!obj || obj >= NAT_GUEST_END - 0x3cu) return 0;
+    lock = __atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST );
+    if (lock != 0xffffffffu) return 0;
+    count = rd32( obj );
+    if (requested > count || requested > (NAT_GUEST_END - obj - 4u) / 4u) return 0;
+    value = rd32( obj + requested * 4u );
+    if (!value) return 0;
+    if (__atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST ) != lock)
+        return 0;
+    if (!(rd8( obj + 0x20u ) & 0x0cu) &&
+        rd32( ND_PTHREAD_CANCEL_FLAG + (uint32_t)nd_slide ))
+        return 0;
     return nat_ret_eax( c, sp, value );
 }
 

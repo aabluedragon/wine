@@ -1,5 +1,40 @@
 # Current browser checkpoint
 
+## 2026-09-05 21:44 IDT: promote generated TLS-wrapper fast path
+
+Observation: the exact runtime-generated wrapper at `0x00805b90` was given a
+bounded native common path. It calls the already verified
+`pthread_getspecific` target at `0x0080a800`, then performs the wrapper's
+one-based TLS-array lookup. Null, out-of-range, zero-value, cancellation, and
+lock-change cases return to the interpreter. The path is enabled by default;
+`WASM_NO_DYNAMIC_TLSWRAP=1` is the rollback switch.
+
+Two paired browser runs passed the full gate with the candidate enabled:
+changing non-black 640x400 frames, OpenGL 3.3, `input: ready`, synthetic
+Enter/W input, E1L1, audio, and no `RuntimeError`, `JITBAD`, `JITBADEIP`,
+`FATAL`, or `UNIMPLEMENTED`. In the first order, candidate/control ended at
+405/361 frames; in reverse order they ended at 399/380 frames. The aggregate
+candidate result was 804 frames versus 741 control frames (about 8.5% higher
+under the same short-run protocol). Candidate logs reported
+`dynamic TLS wrapper candidate armed @ 00805b90`.
+
+The promoted default was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dyn-tls-promoted-20260905`.
+It reported `dynamic TLS wrapper native path armed @ 00805b90`, reached E1L1,
+accepted input, rendered changing non-black 640x400 frames, and ended at 445
+frames with no runtime/JIT errors. The rollback URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_DYNAMIC_TLSWRAP=1&WW_ARGS=%2Fv1,%2Fl1&build=dyn-tls-rollback-20260905`
+also reached E1L1 and rendered successfully without arming the wrapper.
+
+Canonical artifacts are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`0859c3c9c0ac84393a3666b801988c6696aae23b4ec552b44230b7c516ba24ab`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. No sibling checkout was
+modified.
+
 ## 2026-09-05 21:18 IDT: rejected dynamic generated __udivmoddi4 shortcut
 
 Candidate observation: the runtime-generated miss profile identified
