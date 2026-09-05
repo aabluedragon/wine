@@ -9642,3 +9642,19 @@ matched canonical control at
 `http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dynneg-control-20260905`.
 Late candidate samples were below the control. The optimization is rejected;
 its source was reverted and no canonical artifact was replaced.
+## 2026-09-05 20:28 IDT: one-shot dynamic DIV probe logging rejected
+
+Candidate observation: the repeated `DIV_ARM` diagnostic print in the dynamic
+generated-code probe was changed to print once per target, then built and
+served at
+`http://localhost:9506/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=divlog-candidate-20260905`.
+Candidate JS/WASM/data hashes were
+`90fc54228f50b821a3bd2df216fec33b370f8974225d346f0bde8dd24329d893`,
+`2350e9044cbc8c201dd74d8c76e785d0f0f6443484932aeea3e6a4b4e84a7b8d`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+It reached E1L1, rendered non-black 640x400 frames, reported `input: ready`,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`, but ended at
+252 frames (first frame 19.6s). The matched canonical run at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=divlog-control-20260905`
+ended at 357 frames (first frame 19.6s). The candidate is rejected and its
+source was reverted; no canonical artifact was replaced.
