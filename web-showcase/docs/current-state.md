@@ -1,5 +1,17 @@
 # Current browser checkpoint
 
+## 2026-09-05 20:05 IDT: audio rollback not an FPS lever
+
+Observation: an end-to-end canonical run with `WASM_NO_AUDIO=1` passed input and
+did not produce a black canvas, but it was startup-heavy and its late samples
+were only about 17 FPS, so it provides no credible performance comparison and
+was not promoted. Audio behavior and the served bundle remain unchanged.
+
+The earlier runtime dump and rejected cache1d native implementation remain the
+actionable evidence: the next safe optimization must preserve the allocator/
+loader side effects around `0x004029f0`. Canonical port 8799 still returns HTTP
+200 with COOP/COEP headers; no sibling checkout was modified.
+
 ## 2026-09-05 19:35 IDT: cache1d native implementation rejected
 
 Observation: a one-shot runtime byte dump reconstructed the live
