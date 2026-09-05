@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:04 IDT: 2,048-entry executable JIT hint cache rejected
+
+Observation: the executable direct-mapped JIT hint cache was temporarily
+expanded from 1,024 to 2,048 entries with an 11-bit hash and built with JS/WASM
+hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`d382723dbcf4b701af306c85ee0d4211790ddcfe0af2b47d02623960f25fc21d`.
+The candidate was served at
+`http://localhost:9302/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache2048-20260905`;
+both runs passed changing non-black 640x400 rendering, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `FATAL`, or `RuntimeError`.
+
+The first candidate/control pair ended at 476/383 frames, but comparable late
+samples were about 68/71 FPS. The reverse-order repeat ended at 458/426 frames,
+with late samples about 63 FPS for the candidate versus 68--85 FPS for control.
+The result is not a sustained throughput win. The cache was restored to 1,024
+entries/10-bit hashing and is not published. The canonical controls used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache2048-control-20260905`
+and its `-r2` URL; port 8799 remained HTTP 200. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
+Hypothesis: reducing collisions helps occasional startup/phase timing but the
+larger cache footprint and changed conflict pattern do not improve the steady
+renderer workload.
+
 ## 2026-09-05 13:58 IDT: native dispatch table expansion rejected
 
 Observation: the native exact-address table was temporarily expanded from
