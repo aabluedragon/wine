@@ -4705,11 +4705,10 @@ static void nat_arm_pthread_getspecific( void )
         { fprintf( stderr, "wasm_x86: pthread_getspecific skeleton differs at %08x+%u - left interpreted\n", b, i ); return; }
     if (rd8( b + 0x0du ) != 0x89 || rd8( b + 0x0eu ) != 0xc6 || rd8( b + 0x14u ) != 0xa1)
     { fprintf( stderr, "wasm_x86: pthread_getspecific body differs at %08x - left interpreted\n", b ); return; }
-    /* Keep this experimental shortcut opt-in.  It can alter the guest's
-     * cancellation/ TLS ordering, so a normal browser run must stay on the
-     * interpreter until it has been proven against the complete startup and
-     * render path. */
-    if (getenv( "WASM_PTHREAD_GETSPECIFIC" ) && !getenv( "WASM_NO_PTHREAD_GETSPECIFIC" ))
+    /* This path has now passed paired startup/render/input validation. Keep
+     * the explicit rollback switch because cancellation/TLS ordering remains
+     * the correctness boundary for unusual callers. */
+    if (!getenv( "WASM_NO_PTHREAD_GETSPECIFIC" ))
         nat_register( b, NAT_PTHREAD_GETSPECIFIC, "pthread_getspecific cached path" );
 }
 

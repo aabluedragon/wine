@@ -9674,3 +9674,34 @@ reverted and the canonical artifact was not replaced. The next meaningful
 target remains a correctness-modeled whole-function implementation for the
 stateful generated routines at `0x00805b90`/`0x0080a800`/`0x00809a30`, not
 another dispatch micro-optimization.
+## 2026-09-05 20:54 IDT: pthread_getspecific native hook promoted
+
+Observation: the existing exact, guarded `pthread_getspecific` implementation
+for generated address `0x0080a800` was enabled by default, retaining
+`WASM_NO_PTHREAD_GETSPECIFIC=1` as a rollback switch. Two paired browser runs
+passed the full gate: changing non-black 640x400 frames, OpenGL 3.3,
+`input: ready`, synthetic Enter/W input, E1L1, and no `RuntimeError`, `JITBAD`,
+`JITBADEIP`, or `FATAL`.
+
+The first pair used
+`http://localhost:8799/?WASM_TPUT=1&WASM_PTHREAD_GETSPECIFIC=1&WW_ARGS=%2Fv1,%2Fl1&build=pthread-specific-candidate-20260905`
+versus the same bundle without the flag: candidate 382 frames versus control
+345. The reverse-order pair ended at 454 candidate frames versus 390 control
+frames. Late samples in both pairs were consistently higher with the native
+hook. The candidate log explicitly reported
+`native pthread_getspecific cached path @ 0080a800`.
+
+The promoted canonical bundle was rebuilt and smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=pthread-specific-promoted-20260905`.
+It reported the native hook, rendered changing frames, accepted input, reached
+E1L1, and emitted no runtime/JIT errors. That final smoke run was host-
+contended by unrelated high-CPU processes, so its low FPS is not used as a
+performance measurement; the clean paired runs above are the performance
+gate. Canonical hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`7ffcf33edfa45925612ffe966b591ca76d50f3f0d6a7dd79ac92985237522c99`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. No sibling checkout was
+modified.
