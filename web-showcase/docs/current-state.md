@@ -1,5 +1,36 @@
 # Current browser checkpoint
 
+## 2026-09-05 12:37 IDT: generic AOT range guard rejected
+
+Observation: a candidate moved the generic AOT lookup range test to the
+caller, skipping the hash probe outside the generated-block address interval.
+The valid isolated run at
+`http://localhost:9293/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gen-range2-20260905`
+reached E1L1, rendered changing non-black 640x400 frames, reported
+`input: ready`, accepted synthetic Enter/W, and emitted no `JITBAD`, `FATAL`,
+or `RuntimeError`. It reached 965 guest flips with an 8.4s first frame and
+late samples around 113--124 FPS. A clean canonical control retry passed the
+same gate and reached 1,038 flips with an 8.0s first frame and late samples
+around 128--140 FPS, so the candidate showed no reproducible gain and was
+reverted.
+
+A later attempted repeat was invalid: the temporary candidate directory had
+already been removed after an interrupted tool session, so port 9293 served
+HTTP 200 for `/` but HTTP 404 for `/index.html`; it produced no canvas and is
+not used as performance evidence. Candidate hashes from the valid run were
+JS `80e9cf76199c1b2316ae3235891a3f4d10168147b05d2ef382a107151e5ecfc1`, WASM
+`2c3d47f1e1108fe22f270c373447739afcf601f473a2308d14d8d98e0ae73666`.
+
+Decision: restore the published FP caller-guard source and bundle; do not
+serve this generic range candidate. The canonical port 8799 remains the
+FP-callguard build and is HTTP 200. Preserved untracked build/cache/platform
+artifacts remain in the dirty Wine tree; no sibling checkout was modified,
+and `git diff --check` passes.
+
+Hypothesis: the extra range branch did not offset its per-instruction cost on
+this workload; the next optimization must target a measured whole-call or
+renderer path rather than another generic dispatch guard.
+
 ## 2026-09-05 01:46 IDT: FP lookup caller guard promoted
 
 Observation: the FP hot-table dispatcher now performs its generated-table
