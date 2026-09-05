@@ -9658,3 +9658,19 @@ and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`, but ended at
 `http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=divlog-control-20260905`
 ended at 357 frames (first frame 19.6s). The candidate is rejected and its
 source was reverted; no canonical artifact was replaced.
+## 2026-09-05 20:38 IDT: dynamic-thunk opcode prefilter rejected
+
+Candidate observation: a single-byte prefilter was added before the guarded
+dynamic-thunk matcher for the runtime-generated `0x00800000` arena and served
+at `http://localhost:9508/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dynpref-candidate-20260905`.
+Candidate JS/WASM/data hashes were
+`86e71d5c1869ad10fc95b459b76a40a2f4d06f31188c449636840d03704944bf`,
+`9249b20f5c101f01ec98f4aa42539f6acca6d071dbc41b76cd7c8420855e9fd8`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+It reached E1L1, rendered non-black 640x400 frames, reported `input: ready`,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`, but ended at
+265 frames with substantial late stalls. It was rejected; the source was
+reverted and the canonical artifact was not replaced. The next meaningful
+target remains a correctness-modeled whole-function implementation for the
+stateful generated routines at `0x00805b90`/`0x0080a800`/`0x00809a30`, not
+another dispatch micro-optimization.
