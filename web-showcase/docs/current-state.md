@@ -1,5 +1,26 @@
 # Current browser checkpoint
 
+## 2026-09-05 18:00 IDT: warm end-to-end memmove A/B confirms FPS gain
+
+Observation: the canonical published bundle was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=warm-baseline-20260905`
+for 28 seconds with Enter and held W. After startup and E1L1, the late sample
+mean was 57.76 FPS (33 samples at `t>=20`). It reported a real 640x400 frame,
+`input: ready`, audio on, and no runtime/JIT errors. The matched rollback URL
+added `WASM_NO_MEMMOVE_INTERNAL=1`; it also reached E1L1 with input and audio,
+but its late sample mean was 39.56 FPS (22 samples at `t>=20`). The host window
+is noisy, so these are directional rather than a controlled benchmark, but the
+direct internal memmove hook is now supported by a substantial warm A/B delta.
+
+The frame-scoped profile confirms the next major sustained residue is the
+previously identified executable `0x006316xx` interpolation/cache routine;
+the msvcrt overlap cluster is no longer present in the late frame profile.
+The earlier whole-call candidate for that routine was rejected because its
+two-stage insertion/branch model was incomplete, so it remains an investigation
+target rather than an enabled hook. Canonical hashes and URL are unchanged
+from the preceding memmove promotion. The canonical server returned HTTP 200
+with COOP/COEP headers; no sibling checkout was modified.
+
 ## 2026-09-05 17:50 IDT: internal msvcrt memmove implementation promoted
 
 Observation: warm miss profiling identified the repeated `0x3ee39900` cluster
