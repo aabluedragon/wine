@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-05 22:23 IDT: reject dynamic-return environment-cache candidate
+
+Candidate observation: caching the disabled-by-default `WASM_DYNAMIC_RET`
+decision in `nat_dynamic_jmp()` was tested with the rollback control
+`WASM_NO_DYNAMIC_RET_CACHE=1` using the same generated bundle. Both orders
+passed the render/input gate, but the first pair ended at 283 candidate versus
+341 control frames, and the reverse pair at 402 candidate versus 386 control
+frames. Aggregate candidate/control was 685/727 frames, so the result did not
+show a reliable FPS gain and the candidate was rejected.
+
+The source was restored to the verified `e46c43ec` implementation. The clean
+canonical smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=e46c43ec-clean-canonical-20260905`
+reached E1L1, changing non-black 640x400 frames, `input: ready`, Enter/W
+events, audio at 22050Hz/2ch, and no `RuntimeError`, `JITBAD`, `JITBADEIP`,
+`FATAL`, or `UNIMPLEMENTED`. It ended at 325 frames with first frame at
+10.5s and a final 26.1 FPS sample; warm samples reached 89.6 FPS.
+
+Canonical JS/WASM/data hashes after restoration are
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`,
+`16a6275c1ee154d950dcffcc935413dd81acb5397a2a91473c3f145c48d17740`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+Preserved untracked build/cache/platform artifacts remain; no sibling checkout
+was modified.
+
 ## 2026-09-05 22:05 IDT: promote initialized generated-helper fast path
 
 Observation: the runtime-generated helper at `0x00809a30` begins with an exact
