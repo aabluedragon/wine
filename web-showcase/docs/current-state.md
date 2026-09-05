@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-05 16:18 IDT: explicit hot-function entries rejected
+
+Observation: executable-miss profiling identified warm clusters at
+`0x00805b90`, `0x00809a30`, and `0x0080a800`. A candidate regenerated the AOT
+table with those three functions as explicit roots and was served at
+`http://localhost:9432/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=hotentry-20260905`.
+Candidate hashes were JS
+`8c40534b6ac2946272e42d41cccb50f9aeb2c4cd81faf14cfbbb501d7b3eb5c3`, WASM
+`e89fd1e90d2ffb3724408446c1a9b847cbb0cad196932e0525d5e6dfc9b781ed`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+The candidate loaded its page and assets but did not reach the normal
+`input: ready`/canvas sampling state in the automated run, so it failed the
+browser gate and was rejected. The generated table and default entry-list
+change were restored. The canonical URL remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-published-20260905`,
+HTTP 200, with the published artifacts unchanged. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
+Hypothesis: these functions are reached through call/return or relocation
+patterns that the standalone AOT roots do not preserve safely; they are not a
+publication candidate without a narrower verified call-site translation.
+
 ## 2026-09-05 15:20 IDT: PE import-thunk fast path rejected
 
 Observation: `WASM_IPAGE=1` showed executable-page interpreter residue around
