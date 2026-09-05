@@ -1,5 +1,45 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:22 IDT: expanded `polymost_drawpoly` FP table rejected
+
+Observation: the canonical profile at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=next-profile-20260905`
+passed the end-to-end gate: changing non-black 640x400 canvas, `input: ready`,
+synthetic Enter/W input, E1L1, and no `JITBAD`, `FATAL`, or `RuntimeError`.
+Its late profile remained dominated by `00800000=30.3%`, `00550000=14.1%`,
+`3ee30000=13.7%`, and `3b780000=8.6%`; `0055b8fc`/`0055b908` are interior
+points in the large `polymost_drawpoly` x87/SSE function, not independent
+callable helpers.
+
+Hypothesis: the existing 173-block FP table left usable drawpoly blocks
+uncovered. A temporary `x86toc.py` range over `0x0055b6f0-0x0055f000`
+generated 432 blocks, including the missing `0x0055b97f`--`0x0055bae8`
+region. The candidate was built with JS/WASM hashes
+`7a24612fa111e78da9db7c8486fbf89671c244ddba5b67a93d9a158cdbf51ca0` /
+`44158a7de8168af3307048078f7a879736c7f6a128077e6a1aef03868e2e1137` and
+served at
+`http://localhost:9297/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=drawpoly-expanded-20260905`.
+
+Candidate observation: run 1 passed the same gate and ended at 728 frames at
+25s; run 2 at
+`http://localhost:9297/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=drawpoly-expanded-20260905-r2`
+also passed the gate but ended at 680 frames. The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=drawpoly-control-20260905`
+ended at 710 frames. Warm samples likewise overlapped: the candidate repeat
+was about 71 FPS over its comparable interval versus about 71 FPS for control.
+The result is therefore not reproducible and the 432-block candidate was not
+published; the temporary generated table was restored to 173 blocks.
+
+Decision: retain the published canonical artifacts (JS
+`387daee09b736a67a02baee2b057c9a6a533ff1d5532a4310afd12ad83422754`, WASM
+`3d97796b204b99704962c7d9026f6c9aee7c2ab1ed21fdfdd8a6d887f2c6ee42`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, audio
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`). Port
+8799 returned HTTP 200. Preserved untracked build/cache/platform artifacts
+remain in the dirty Wine tree; no sibling checkout was modified; `git diff
+--check` passes.
+
 ## 2026-09-05 13:05 IDT: texture-position native hook rejected
 
 Observation: a skeleton-guarded candidate for `0x00555470`
