@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:55 IDT: register-only `0x89` interpreter fast path rejected
+
+Observation: opcode histogram profiling showed `0x89` as the largest
+interpreted opcode, with register-only ModRM `e5` the largest form. A fast
+path for all `mod=3` `mov r/m16/32,reg` cases was built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`47ad1ba4ac6b0e89b11fd0279b9bee0aee8e02d2dea4b5cdbbcb995127428a81` and
+served at
+`http://localhost:9311/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=op89-regfast-20260905`.
+It passed the full gate: changing non-black 640x400 canvas, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or `RuntimeError`; the
+30-second run ended at 893 frames with first frame at 8.8s.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=op89-control-20260905`
+ended at 887 frames with first frame at 9.9s. Late samples were comparable,
+so this is not a reproducible sustained gain. The fast path and temporary
+ModRM diagnostics were reverted and are not published. Canonical port 8799
+remained HTTP 200; preserved untracked build/cache/platform artifacts remain
+in the dirty Wine tree; no sibling checkout was modified; `git diff --check`
+passes.
+
+Hypothesis: the dispatch/decode cost for `0x89` is not the dominant renderer
+cost once the AOT/JIT phase is warm; further gains require a larger whole-loop
+or native renderer boundary.
+
 ## 2026-09-05 14:44 IDT: FP-chain native-overlap cache rejected
 
 Observation: the FP hot-chain dispatcher was temporarily changed to precompute
