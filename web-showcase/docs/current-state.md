@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:58 IDT: native dispatch table expansion rejected
+
+Observation: the native exact-address table was temporarily expanded from
+2,048 to 4,096 slots and built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`d3c5d06b0f115ac23351498f49ed1fd5a3daf03df5cbd05cc20f6926a927b00e`, served
+at
+`http://localhost:9301/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=natslots4096-20260905`.
+Both repeat candidate runs passed the end-to-end gate with changing non-black
+640x400 canvas, `input: ready`, Enter/W, E1L1, and no `JITBAD`, `FATAL`, or
+`RuntimeError`. Candidate/control final samples were 697/710 frames in the
+first pair and 558/539 in the reverse-order pair. Warm samples overlapped and
+there was no consistent gain or decisive additional hot hook.
+
+The 4,096-slot change was reverted to 2,048 and is not published. The matched
+controls used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=natslots-control-20260905`
+and
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=natslots-control-20260905-r2`;
+port 8799 remained HTTP 200. Preserved untracked build/cache/platform
+artifacts remain in the dirty Wine tree; no sibling checkout was modified;
+`git diff --check` passes.
+
+Hypothesis: the collision rate of the native table is too low for the extra
+table footprint to improve this workload; continue targeting measured work,
+not lookup-table size.
+
 ## 2026-09-05 13:46 IDT: half-texel cache-hit hook rejected
 
 Observation: a skeleton-guarded native cache-hit path for
