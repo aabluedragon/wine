@@ -1,5 +1,22 @@
 # Current browser checkpoint
 
+## 2026-09-05 18:20 IDT: browser LTO candidate rejected
+
+Observation: a browser candidate compiled `wasm_x86.c` and linked the bundle
+with `-O3 -flto`. It passed the end-to-end gate: real non-black 640x400
+rendering, E1L1, `input: ready`, audio, Enter/W, and no `RuntimeError`,
+`JITBAD`, `JITBADEIP`, or `FATAL`. The first warm candidate window averaged
+70.22 FPS at `t>=20`; the fresh canonical control immediately afterward
+averaged 80.38 FPS. A reverse-order candidate run averaged 67.64 FPS. LTO is
+therefore rejected as a slower/noisy candidate and was not copied into the
+canonical web root.
+
+The canonical server remains HTTP 200 on port 8799 with the prior memmove
+bundle and COOP/COEP headers. No source or served artifact changed in this
+experiment; no sibling checkout was modified. The next target remains the
+measured executable `0x006316xx` residue, requiring a new complete model before
+another native shortcut is attempted.
+
 ## 2026-09-05 18:00 IDT: warm end-to-end memmove A/B confirms FPS gain
 
 Observation: the canonical published bundle was tested at
