@@ -1,5 +1,18 @@
 # Current browser checkpoint
 
+## 2026-09-05 18:50 IDT: larger generated-block dispatch cache rejected
+
+Observation: an 8,192-entry direct-mapped `gen_lookup_cached` experiment passed
+the browser gate with real non-black 640x400 rendering, E1L1, `input: ready`,
+audio, Enter/W, and no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. The
+first candidate/control pair measured 71.26 versus 69.06 FPS after warm-up,
+but the reverse-order pair measured 61.57 candidate versus 74.63 FPS control.
+The result is host/load-sensitive and does not establish a gain, so the cache
+was restored to 1,024 entries and no candidate artifact was promoted.
+
+The canonical port 8799 bundle and hashes are unchanged, and the server still
+returns HTTP 200 with COOP/COEP headers. No sibling checkout was modified.
+
 ## 2026-09-05 18:20 IDT: browser LTO candidate rejected
 
 Observation: a browser candidate compiled `wasm_x86.c` and linked the bundle
