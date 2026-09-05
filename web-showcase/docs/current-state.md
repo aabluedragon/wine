@@ -1,5 +1,44 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:46 IDT: half-texel cache-hit hook rejected
+
+Observation: a skeleton-guarded native cache-hit path for
+`polymost_setHalfTexelSize` at `0x00555500` was built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`f7458b498cc18c88fa4f745cf3f9cd85f6f87a192bc57518e934ad48a6792f0e` and
+served at
+`http://localhost:9300/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=halftexel-20260905`.
+It logged `native polymost half-texel cached return`, reached E1L1, rendered
+changing non-black 640x400 frames, reported `input: ready`, accepted Enter/W,
+and emitted no `JITBAD`, `FATAL`, or `RuntimeError`. Its final sample was 524
+frames with first frame at 13.1s.
+
+The matched canonical control remains
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-published-20260905`
+and the immediately preceding matched control reached 617 frames with first
+frame at 11.1s. The candidate was slower and was reverted; it is not
+published. The canonical port 8799 returned HTTP 200. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
+Hypothesis: even this two-float cache hit is too small to amortize the native
+dispatch and XMM state reconstruction cost.
+
+## 2026-09-05 13:46 IDT: generated-code near-return shortcut rejected again
+
+Observation: the existing opt-in `WASM_DYNAMIC_RET=1` path was tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_RET=1&WW_ARGS=%2Fv1,%2Fl1&build=dynamic-ret-20260905`.
+It reached E1L1, rendered changing non-black 640x400 frames, reported
+`input: ready`, accepted Enter/W, and emitted no `JITBAD`, `FATAL`, or
+`RuntimeError`, but its final sample was 372 frames with first frame at 14.8s.
+The shortcut was disabled for the canonical build; port 8799 returned HTTP
+200 and its published artifacts are unchanged.
+
+Hypothesis: checking every instruction in the broad generated-code arena costs
+more than the return-shaped entries save. Preserved untracked build/cache/
+platform artifacts remain in the dirty Wine tree; no sibling checkout was
+modified.
+
 ## 2026-09-05 13:37 IDT: `polymost_setClamp` native hook rejected
 
 Observation: a skeleton-guarded native fast path for the cached-return case of
