@@ -1,5 +1,24 @@
 # Current browser checkpoint
 
+## 2026-09-05 22:39 IDT: reject corrected initialized-helper fast path
+
+Candidate observation: the prior `0x00809a30` guard was corrected to its
+actual branch target `0x00809ae8`; the candidate log confirmed execution with
+`dynamic initialized-helper fast path @ 00809a30 -> 00809ae8`. It passed the
+full browser gate, but paired runs versus
+`WASM_NO_DYNAMIC_INITFAST=1` were neutral to negative: the first pair ended at
+302 candidate versus 306 control frames, and the reverse pair at 239 candidate
+versus 260 control frames (aggregate 541/566). The corrected native shortcut
+is therefore rejected for FPS and the source is restored to the verified
+`e46c43ec` behavior.
+
+The canonical bundle was rebuilt from that restored source and served at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=final-e46c43ec-20260905`.
+The final smoke reached E1L1, changing 640x400 output, `input: ready`, W key
+events, audio at 22050Hz/2ch, and no runtime/JIT fatal errors. It ended at 108
+frames with first frame at 16.3s; the short run was still warming up, so it is
+not a new performance claim.
+
 ## 2026-09-05 22:23 IDT: reject dynamic-return environment-cache candidate
 
 Candidate observation: caching the disabled-by-default `WASM_DYNAMIC_RET`
