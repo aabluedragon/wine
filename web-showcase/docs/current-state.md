@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:22 IDT: whole `polymost_updatePalette` cache-hit shortcut rejected
+
+Observation: a live-state probe showed the renderer entering mode 3 with
+stable cache values after initialization. A guarded shortcut for the complete
+all-cache-hit return path of `0x005595c0` was built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`4511f4002e348fa4b2c45af36b9175097f4c89890ebc26582e894d0bfeb9c3a9` and
+served at
+`http://localhost:9303/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=palette-cachehit-20260905`.
+It passed the full gate: changing non-black 640x400 canvas, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or `RuntimeError`.
+The candidate ended at 496 frames with first frame at 17.1s.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=palette-cachehit-control-20260905`
+ended at 498 frames with first frame at 16.8s; late samples were slightly
+better for control. The shortcut was reverted and is not published. The
+canonical port 8799 remained HTTP 200. Preserved untracked build/cache/
+platform artifacts remain in the dirty Wine tree; no sibling checkout was
+modified; `git diff --check` passes.
+
+Hypothesis: the extra cache loads and register reconstruction cost about as
+much as the stable palette-return body saves; the remaining gain requires a
+larger renderer loop or a lower-level JIT improvement.
+
 ## 2026-09-05 14:10 IDT: guarded libdivide recheck rejected
 
 Observation: the existing opt-in guarded libdivide cache was re-tested at
