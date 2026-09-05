@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-06 23:00 IDT: reject guarded generated udiv helper
+
+Observation: the page profile identified generated helper `0x00801561` as the
+largest remaining executable-miss cluster (`IMISS detail` about 94,557 hits
+per listed interior entry). A candidate reused the verified cdecl
+`__udivmoddi4` implementation only after matching the helper prologue and
+requiring an executable return address, specifically guarding the earlier
+invalid `0032xxxx` resume failure. Candidate and control both passed E1L1,
+changing 640x400 output, input, and audio with no runtime/JIT errors. The
+first pair ended at 393 candidate versus 409 control frames; reverse order was
+381 candidate versus 398 control (aggregate 774/807). The candidate was
+rejected and removed.
+
+The canonical bundle was rebuilt from the restored `e46c43ec` source and
+served at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-udiv-reject-20260906`.
+The final smoke reached E1L1, changing 640x400 frames, `input: ready`, W key
+events, and audio at 22050Hz/2ch, with no `RuntimeError`, `JITBAD`,
+`JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`. It ended at 105 frames with first
+frame at 17.7s; this short sample is a restore gate, not a performance claim.
+Canonical JS/WASM/data hashes are
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`,
+`16a6275c1ee154d950dcffcc935413dd81acb5397a2a91473c3f145c48d17740`, and
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+No sibling checkout was modified.
+
 ## 2026-09-05 22:39 IDT: reject corrected initialized-helper fast path
 
 Candidate observation: the prior `0x00809a30` guard was corrected to its
