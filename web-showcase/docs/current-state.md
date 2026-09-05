@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:32 IDT: forced XMM-helper inlining rejected
+
+Observation: the small `jit_xmm_*` load/store/copy/xor/scalar-FP helpers were
+temporarily marked `always_inline` and built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`3ca3b7ec3c876f18095aa1fd47216220ef40fa8a1c8151b86e65fba1d817ee3b`.
+The candidate was served at
+`http://localhost:9304/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmminline-20260905`.
+It passed the full gate: changing non-black 640x400 canvas, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or `RuntimeError`; its
+25-second run ended at 1,034 frames with first frame at 12.0s.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmminline-control-20260905`
+ended at 1,309 frames with first frame at 9.0s and higher comparable late
+samples. The forced inlining was reverted and is not published. The candidate
+data/index hashes were `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`
+and `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`;
+canonical port 8799 remained HTTP 200. Preserved untracked build/cache/
+platform artifacts remain in the dirty Wine tree; no sibling checkout was
+modified; `git diff --check` passes.
+
+Hypothesis: the generated FP functions are already optimized adequately by
+the compiler, while forced inlining increases code/register pressure and
+hurts the renderer loop.
+
 ## 2026-09-05 14:22 IDT: whole `polymost_updatePalette` cache-hit shortcut rejected
 
 Observation: a live-state probe showed the renderer entering mode 3 with
