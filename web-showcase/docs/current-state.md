@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:10 IDT: guarded libdivide recheck rejected
+
+Observation: the existing opt-in guarded libdivide cache was re-tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_FAST_LIBDIV=1&WW_ARGS=%2Fv1,%2Fl1&build=libdiv-current-20260905`.
+The short pair passed the full gate and initially measured 431 candidate
+frames versus 347 control frames, with late samples near 80 versus 69 FPS.
+The decisive 45-second repeat also passed the gate, crossed the cache-growth
+boundary without hanging, rendered changing non-black 640x400 frames, reported
+`input: ready`, accepted Enter/W, reached E1L1, and emitted no `JITBAD`,
+`FATAL`, or `RuntimeError`; however it ended at 1,275 frames with first frame
+at 11.1s.
+
+The matched 45-second canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=libdiv-current-control-long-20260905`
+ended at 1,407 frames with first frame at 10.4s and late samples around
+88--100 FPS. The opt-in shortcut is therefore rejected and remains disabled
+by default. Port 8799 remained HTTP 200; canonical artifacts are unchanged.
+Preserved untracked build/cache/platform artifacts remain in the dirty Wine
+tree; no sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: libdivide’s short-run benefit is startup/load variance; its cache
+and guarded nested-call path do not reduce sustained renderer work reliably.
+
 ## 2026-09-05 14:04 IDT: 2,048-entry executable JIT hint cache rejected
 
 Observation: the executable direct-mapped JIT hint cache was temporarily
