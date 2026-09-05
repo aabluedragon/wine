@@ -2843,6 +2843,7 @@ static int nat_memset_loop( struct x86cpu *c )
 static void jit_xmm_store( struct x86cpu *c, int src, uint32_t a, int n );
 static inline __attribute__((always_inline)) int cond( struct x86cpu *c, int cc );
 static int nat_dynamic_tls_wrapper( struct x86cpu *c );
+static int nat_dynamic_init_fast( struct x86cpu *c );
 
 /* The loop is sometimes entered at an instruction boundary inside the
  * movaps sequence by a translated caller.  Those four addresses intentionally
@@ -2886,11 +2887,16 @@ static int nat_dynamic_jmp( struct x86cpu *c )
     static uint32_t div64_addr;
     static unsigned div64_hits;
     static int dyn_tls_enabled = -1;
+    static int initfast_enabled = -1;
     if (enabled < 0) enabled = getenv( "WASM_NO_DYNAMIC_THUNK" ) ? 0 : 1;
     if (!enabled) return 0;
     if (dyn_tls_enabled < 0)
         dyn_tls_enabled = !getenv( "WASM_NO_DYNAMIC_TLSWRAP" );
     if (dyn_tls_enabled && a == 0x00805b90u && nat_dynamic_tls_wrapper( c )) return 1;
+    if (initfast_enabled < 0)
+        initfast_enabled = !getenv( "WASM_NO_DYNAMIC_INITFAST" );
+    if (initfast_enabled && a == 0x00809a30u &&
+        nat_dynamic_init_fast( c )) return 1;
     /* Runtime-generated CON helpers end at ordinary near returns.  These
      * instructions are fully self-contained: the interpreter's implementation
      * only reads the stack return address (and, for C2, the immediate cleanup)
@@ -4764,6 +4770,29 @@ static int nat_dynamic_tls_wrapper( struct x86cpu *c )
         rd32( ND_PTHREAD_CANCEL_FLAG + (uint32_t)nd_slide ))
         return 0;
     return nat_ret_eax( c, sp, value );
+}
+
+/* The generated once/initialization helper begins with a byte-state test and
+ * branches over its mutating slow path when the state is already 1.  Preserve
+ * that exact branch, including lazy flags, but leave the branch target to the
+ * normal translator/interpreter.  This deliberately does not model the
+ * initializer or its lock protocol; it only removes the repeated dispatch
+ * overhead of the proven terminal fast path. */
+static int nat_dynamic_init_fast( struct x86cpu *c )
+{
+    uint32_t a = c->eip, target, state;
+    int32_t rel;
+    if (rd8(a+0) != 0x83 || rd8(a+1) != 0x3d ||
+        rd32(a+2) != 0x01acd0f4u || rd8(a+6) != 0x01 ||
+        rd8(a+7) != 0x0f || rd8(a+8) != 0x84) return 0;
+    rel = (int32_t)rd32(a+9);
+    target = a + 13u + (uint32_t)rel;
+    if (target != a + 0xb1u) return 0;
+    state = rd8(0x01acd0f4u);
+    set_lazy( c, K_SUB, state, 1u, state - 1u, 1 );
+    if (state != 1u) return 0;
+    c->eip = target;
+    return 1;
 }
 
 static void nat_arm_pthread_getspecific( void )

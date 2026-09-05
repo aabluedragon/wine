@@ -1,5 +1,47 @@
 # Current browser checkpoint
 
+## 2026-09-05 22:05 IDT: promote initialized generated-helper fast path
+
+Observation: the runtime-generated helper at `0x00809a30` begins with an exact
+byte-state comparison against `0x01acd0f4`; when the state is already `1`, its
+conditional branch skips the mutating/locking initializer. A guarded native
+dispatch path now reproduces only that comparison and branch, leaving the
+branch target to the existing translator/interpreter. The slow path and all
+other states remain unchanged. The path is enabled by default;
+`WASM_NO_DYNAMIC_INITFAST=1` is the rollback switch.
+
+Two paired browser tests passed the full gate with the same Enter/W input
+protocol. Candidate URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_INITFAST=1&WW_ARGS=%2Fv1,%2Fl1&build=initfast2-candidate-20260905`
+ended at 446 frames / 39.0 FPS versus 410 frames / 29.8 FPS for the matched
+control. In reverse order, candidate ended at 284 frames / 36.0 FPS versus
+242 frames / 31.9 FPS for control. Both runs reached E1L1, rendered changing
+non-black 640x400 frames, reported `input: ready`, accepted keyboard events,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`.
+
+The promoted canonical URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=canonical-initfast-20260905`.
+Its final smoke reached 358 frames, reported `fps: 35.6`, first frame at
+13.9s, E1L1, `input: ready`, changing 640x400 output, audio at 22050Hz/2ch,
+and Enter/W log events. The only audio note was one underrun during startup;
+there were no runtime/JIT fatal errors.
+
+Canonical artifact hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`16a6275c1ee154d950dcffcc935413dd81acb5397a2a91473c3f145c48d17740`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. Preserved untracked
+build/cache/platform artifacts remain; no sibling checkout was modified.
+
+Hypothesis: this removes repeated dispatch overhead from the terminal
+initialized branch while avoiding the correctness risk of implementing the
+stateful initializer itself. The paired samples favor it, though browser host
+load remains a source of FPS variance.
+
 ## 2026-09-05 21:44 IDT: promote generated TLS-wrapper fast path
 
 Observation: the exact runtime-generated wrapper at `0x00805b90` was given a
