@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-05 15:00 IDT: surface-span experiment rejected
+
+Observation: the existing opt-in `WASM_SURFSPAN=1` path was tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_SURFSPAN=1&WW_ARGS=%2Fv1,%2Fl1&build=surfspan-experiment-20260905`.
+It reached E1L1, produced changing non-black 640x400 frames, reported
+`input: ready`, and accepted Enter/W. The decisive renderer counters remained
+`sb=0/0` throughout gameplay, so the surface-span hook was not exercised.
+The run ended at 707 frames with first frame at 10.9s. The matched canonical
+control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=surfspan-control-20260905`
+also rendered and accepted input; its run ended at 1144 frames with first
+frame at 9.5s. Because the two browser runs were launched together, the raw
+frame totals are not treated as a definitive benchmark, but there is no
+evidence of a gain and the hook was not on the hot path. No source or
+canonical artifact changed; port 8799 remained HTTP 200. Preserved
+untracked build/cache/platform artifacts remain in the dirty Wine tree; no
+sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: the OpenGL Polymost workload bypasses the surface-span conversion,
+so optimizing that path cannot improve the current browser frame loop.
+
+Sequential confirmation: the same candidate/control setup was rerun at
+`http://localhost:8799/?WASM_TPUT=1&WASM_SURFSPAN=1&WW_ARGS=%2Fv1,%2Fl1&build=surfspan-seq-experiment-20260905`
+and
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=surfspan-seq-control-20260905`.
+Both passed the canvas/input gate and both still reported `sb=0/0`; the
+candidate ended at 274 frames in the 20-second capture, while the control was
+still rendering at the end. The opt-in remains disabled and the canonical
+artifacts are unchanged.
+
 ## 2026-09-05 15:02 IDT: audio-disabled throughput test rejected
 
 Observation: the canonical bundle was tested with
