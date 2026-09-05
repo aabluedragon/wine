@@ -9595,3 +9595,34 @@ artifacts and generated AOT data; no sibling checkout was modified.
 
 Decision: retain the promoted default and use the reduced `00630000` share as
 the baseline for the next renderer/interpreter optimization.
+## 2026-09-05 20:07 IDT: post-cache1d runtime-generated hotspot audit
+
+Observation: the promoted canonical bundle was profiled end-to-end at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=profile-post-aot-20260905`.
+It reached a changing non-black 640x400 canvas, OpenGL 3.3, `input: ready`,
+E1L1 after synthetic Enter/W input, and no `RuntimeError`, `JITBAD`,
+`JITBADEIP`, or `FATAL`. The late sample reached `FPSSAMPLE ... fps=44.8`
+with `jit_frac=94.8%`; the remaining page profile was dominated by the
+runtime-generated `0x00800000` arena, not the previously measured executable
+`0x006316xx` cache routine.
+
+Candidate observation: the existing guarded `WASM_DYNAMIC_RET=1` shortcut for
+generated `ret` stubs was tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_RET=1&WW_ARGS=%2Fv1,%2Fl1&build=dynamic-ret-test-20260905`.
+It passed the same render/input gate and produced about 45.9 FPS in the late
+window. The matched canonical control produced about 45.6 FPS; this is a
+neutral result within host noise, so the shortcut was not enabled by default.
+
+The dynamic trace at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_DYNAMIC=1&WW_ARGS=%2Fv1,%2Fl1&build=dynamic-trace-20260905`
+again identified `0x00805b90`, `0x0080a800`, `0x00809a30`, and their interior
+entries as the hot stateful nested-call routines. Prior whole-function AOT
+tests for these routines were slower, so no source or canonical artifact was
+changed. The canonical artifact hashes remain JS
+`f37e082d32ee45dabd52f6e345eda244aa98dc608e42b97c493df275bb7cce6c`, WASM
+`a82517c0f48bcfd34740916d928af9e45ff7abc6d24d724525d658679cce22cc`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. Preserved untracked
+build/cache/platform artifacts remain; no sibling checkout was modified.
