@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:27 IDT: executable JIT lookup-cache expansion rejected
+
+Observation: a candidate changing the executable JIT lookup cache from 1,024
+to 8,192 direct-mapped entries (and changing its hash width accordingly) was
+built with JS/WASM hashes
+`16e896939a379496abe820095602fe97bc088faaa1030d8f0264d27c1a94973c` /
+`69853d60b0489962371b22fd80c28691014a87a228971adff2c8ae3e7e4342a2` and
+served at
+`http://localhost:9298/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=gencache-8192-20260905`.
+It reached E1L1, rendered changing non-black 640x400 frames, reported
+`input: ready`, accepted Enter/W, and emitted no `JITBAD`, `FATAL`, or
+`RuntimeError`; however its first frame was 13.5s and its 25s final sample was
+492 frames.
+
+The canonical control remains served at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-published-20260905`;
+the matched normal runs are approximately 710 frames at 25s. The cache
+expansion is therefore a clear throughput/startup regression, was reverted,
+and is not published. The canonical port 8799 returned HTTP 200. Preserved
+untracked build/cache/platform artifacts remain in the dirty Wine tree; no
+sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: the larger cache increases hot-path memory traffic/code footprint
+enough to outweigh its lower collision rate on this workload. Keep the 1,024
+entry cache and target measured renderer work instead.
+
 ## 2026-09-05 13:22 IDT: expanded `polymost_drawpoly` FP table rejected
 
 Observation: the canonical profile at
