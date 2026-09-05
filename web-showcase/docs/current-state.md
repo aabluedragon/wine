@@ -1,5 +1,30 @@
 # Current browser checkpoint
 
+## 2026-09-05 12:42 IDT: link-time `-O3` candidate rejected
+
+Observation: the unchanged FP-callguard source was linked once with
+Emscripten `LOPT=-O3` at
+`http://localhost:9294/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=link-o3-20260905`.
+The candidate reached E1L1, rendered changing non-black 640x400 frames,
+reported `input: ready`, accepted synthetic Enter/W, and emitted no `JITBAD`,
+`FATAL`, or `RuntimeError`. It reached 840 guest flips, with a 10.0s first
+frame and late samples approximately 92--120 FPS.
+
+The matched canonical `-O2` control passed the same gate and reached 836
+guest flips, with a 10.5s first frame and late samples approximately 92--114
+FPS. The small difference was within run variance and did not establish a
+reproducible throughput gain, so the candidate was not published. Its hashes
+were JS `906cb74e0decc69ed010bd001dcb11aaa5ce1c38488dc8e0ac5c046a408b6896`
+and WASM `daaa61a348266ac7f8ca39df956f9d1fa68dd6c6170a3592390942f41719a43a`.
+
+Decision: retain the verified `-O2` link and the published FP caller guard.
+The canonical port 8799 remains HTTP 200; preserved untracked build/cache/
+platform artifacts remain in the dirty Wine tree, no sibling checkout was
+modified, and `git diff --check` passes.
+
+Hypothesis: link-time optimization is no longer the limiting cost; the next
+gain must come from a correctness-safe whole-call/native renderer or CRT path.
+
 ## 2026-09-05 12:37 IDT: generic AOT range guard rejected
 
 Observation: a candidate moved the generic AOT lookup range test to the
