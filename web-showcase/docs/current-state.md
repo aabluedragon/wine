@@ -1,5 +1,25 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:36 IDT: non-power-of-two single-column mapper experiment rejected
+
+Observation: the existing guarded `WASM_EXPERIMENT_NP2=1` path was tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_EXPERIMENT_NP2=1&WW_ARGS=%2Fv1,%2Fl1&build=np2-experiment-20260905`.
+It passed the full gate with changing non-black 640x400 frames, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or `RuntimeError`; the
+run ended at 730 frames with first frame at 9.1s. The decisive logs remained
+`np2v=0/0 np2m=0/0`, so this workload did not execute either NP2 mapper.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=np2-control-20260905`
+ended at 712 frames with first frame at 8.7s. This is startup variance, not a
+reproducible gain. The opt-in remains disabled by default; canonical port 8799
+remained HTTP 200 and its artifacts are unchanged. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
+Hypothesis: E1L1 uses only power-of-two single-column mapping or the existing
+native four-wide paths, so NP2 work cannot improve this benchmark.
+
 ## 2026-09-05 14:32 IDT: forced XMM-helper inlining rejected
 
 Observation: the small `jit_xmm_*` load/store/copy/xor/scalar-FP helpers were
