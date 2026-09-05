@@ -1,5 +1,39 @@
 # Current browser checkpoint
 
+## 2026-09-06 23:15 IDT: promote generated 32-bit division fast path
+
+Observation: the generated helper at `0x00801561` was given a narrow native
+path only when numerator and denominator high words are zero. It performs
+32-bit quotient/remainder arithmetic, writes the optional 64-bit remainder,
+and preserves the cdecl return convention. Wide operands, zero divisors,
+invalid remainder pointers, non-executable return addresses, and mismatched
+helper bytes fall back to the interpreter. The path is enabled by default;
+`WASM_NO_DYNAMIC_UDIV32=1` is the rollback switch.
+
+Two same-artifact A/B pairs passed the full browser gate. Candidate URL
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_UDIV32=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv32-candidate-20260906`
+versus control ended at 269 versus 248 frames. Reverse order ended at 372
+candidate versus 304 control. Aggregate candidate/control was 641/552 frames,
+about 16% higher for the candidate. Both orders reached E1L1, rendered
+changing 640x400 frames, accepted Enter/W, enabled audio, and emitted no
+`RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`.
+
+The promoted canonical URL is
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv32-promoted-20260906`.
+Its final smoke reached E1L1, `input: ready`, changing 640x400 output, W key
+events, and audio at 22050Hz/2ch, with no runtime/JIT fatal errors. It ended
+at 307 frames at t=25s, first frame 16.4s; warm samples reached 66 FPS.
+
+Canonical artifact hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`81c88318a982c62a4c0903a9c237fb815e07c1a94d8bc9fe119302a0fad2889b`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. No sibling checkout was
+modified.
+
 ## 2026-09-06 23:00 IDT: reject guarded generated udiv helper
 
 Observation: the page profile identified generated helper `0x00801561` as the

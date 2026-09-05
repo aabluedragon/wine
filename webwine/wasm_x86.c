@@ -2844,6 +2844,7 @@ static void jit_xmm_store( struct x86cpu *c, int src, uint32_t a, int n );
 static inline __attribute__((always_inline)) int cond( struct x86cpu *c, int cc );
 static int nat_dynamic_tls_wrapper( struct x86cpu *c );
 static int nat_dynamic_init_fast( struct x86cpu *c );
+static int nat_dynamic_udiv32( struct x86cpu *c );
 
 /* The loop is sometimes entered at an instruction boundary inside the
  * movaps sequence by a translated caller.  Those four addresses intentionally
@@ -2888,6 +2889,7 @@ static int nat_dynamic_jmp( struct x86cpu *c )
     static unsigned div64_hits;
     static int dyn_tls_enabled = -1;
     static int initfast_enabled = -1;
+    static int dyn_udiv32_enabled = -1;
     if (enabled < 0) enabled = getenv( "WASM_NO_DYNAMIC_THUNK" ) ? 0 : 1;
     if (!enabled) return 0;
     if (dyn_tls_enabled < 0)
@@ -2897,6 +2899,10 @@ static int nat_dynamic_jmp( struct x86cpu *c )
         initfast_enabled = !getenv( "WASM_NO_DYNAMIC_INITFAST" );
     if (initfast_enabled && a == 0x00809a30u &&
         nat_dynamic_init_fast( c )) return 1;
+    if (dyn_udiv32_enabled < 0)
+        dyn_udiv32_enabled = !getenv( "WASM_NO_DYNAMIC_UDIV32" );
+    if (dyn_udiv32_enabled && a == 0x00801561u &&
+        nat_dynamic_udiv32( c )) return 1;
     /* Runtime-generated CON helpers end at ordinary near returns.  These
      * instructions are fully self-contained: the interpreter's implementation
      * only reads the stack return address (and, for C2, the immediate cleanup)
@@ -4792,6 +4798,33 @@ static int nat_dynamic_init_fast( struct x86cpu *c )
     set_lazy( c, K_SUB, state, 1u, state - 1u, 1 );
     if (state != 1u) return 0;
     c->eip = target;
+    return 1;
+}
+
+/* Common generated-helper case: both operands fit in 32 bits.  Avoid the
+ * compiler's 64-bit division support in Wasm, but leave all wide/zero-divisor
+ * cases to the exact guest routine. */
+static int nat_dynamic_udiv32( struct x86cpu *c )
+{
+    uint32_t sp = c->regs[ESP], ret, n, d, rem;
+    static const uint8_t head[] = {
+        0x57,0x56,0x53,0x83,0xec,0x2c,0x8b,0x5c,0x24,0x44,
+        0x8b,0x4c,0x24,0x40,0x8b,0x44,0x24,0x4c,0x8b,0x74,
+        0x24,0x48
+    };
+    for (unsigned i = 0; i < sizeof(head); i++)
+        if (rd8(c->eip + i) != head[i]) return 0;
+    if (sp > NAT_GUEST_END - 24u) return 0;
+    ret = rd32(sp);
+    if (ret < 0x00400000u || ret >= NAT_GUEST_END) return 0;
+    if (rd32(sp + 8u) || rd32(sp + 16u)) return 0;
+    n = rd32(sp + 4u); d = rd32(sp + 12u); rem = rd32(sp + 20u);
+    if (!d || (rem && (rem >= NAT_GUEST_END - 8u))) return 0;
+    c->regs[EAX] = n / d;
+    c->regs[EDX] = 0;
+    if (rem) { wr32(rem, n % d); wr32(rem + 4u, 0); }
+    c->eip = ret;
+    c->regs[ESP] = sp + 4u;
     return 1;
 }
 
