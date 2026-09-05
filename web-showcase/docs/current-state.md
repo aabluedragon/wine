@@ -1,5 +1,37 @@
 # Current browser checkpoint
 
+## 2026-09-05 21:18 IDT: rejected dynamic generated __udivmoddi4 shortcut
+
+Candidate observation: the runtime-generated miss profile identified
+`0x00801561` as a hot generated helper, so an exact skeleton-guarded shortcut
+to the already verified five-word cdecl `__udivmoddi4` implementation was
+tested with
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_UDIV64=1&WW_ARGS=%2Fv1,%2Fl1&build=dyn-udiv-candidate-20260905`.
+The candidate logged
+`native dynamic __udivmoddi4 @ 00801561`, but failed the correctness gate
+before the first frame with
+`UNIMPLEMENTED opcode fe at eip=0032fdc9` and
+`initial thread run returned`; it did not reach E1L1 or render a frame. The
+candidate was removed and not promoted.
+
+The known-good promoted source was rebuilt end-to-end afterward. Canonical
+artifacts are again JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`7ffcf33edfa45925612ffe966b591ca76d50f3f0d6a7dd79ac92985237522c99`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. No sibling checkout was
+modified.
+
+Canonical smoke observation after restoration:
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=canonical-restored-20260905`
+reached OpenGL 3.3, a changing non-black 640x400 canvas, `input: ready`,
+synthetic Enter/W input, E1L1, and audio. The final CDP sample reported first
+frame at 15.3s and 516 presented frames at t=30s; no `RuntimeError`, `JITBAD`,
+`JITBADEIP`, `FATAL`, or `UNIMPLEMENTED` output appeared. The sample includes
+startup, so it is a functional restoration gate rather than a new FPS claim.
+
 ## 2026-09-05 20:00 IDT: cache1d narrow AOT slice promoted
 
 Observation: the generated-block build now includes only the non-SMC cache1d
