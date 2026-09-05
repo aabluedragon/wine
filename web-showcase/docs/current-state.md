@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:37 IDT: `polymost_setClamp` native hook rejected
+
+Observation: a skeleton-guarded native fast path for the cached-return case of
+`0x00555580` was built with JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`f04cc92d94c65dcad5cdc554940ac836cf86be64c8e037f3c3688962631a249c` and
+served at
+`http://localhost:9299/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=setclamp-20260905`.
+It passed the end-to-end gate: changing non-black 640x400 canvas, `input:
+ready`, synthetic Enter/W input, E1L1, and no `JITBAD`, `FATAL`, or
+`RuntimeError`. Its 25-second final sample was 596 frames with first frame at
+11.6s.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=setclamp-control-20260905`
+also passed the gate and reached 617 frames with first frame at 11.1s. The
+candidate is therefore a startup and throughput regression; the hook was
+reverted and is not published. Canonical artifacts remain JS
+`387daee09b736a67a02baee2b057c9a6a533ff1d5532a4310afd12ad83422754`, WASM
+`3d97796b204b99704962c7d9026f6c9aee7c2ab1ed21fdfdd8a6d887f2c6ee42`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`;
+port 8799 returned HTTP 200.
+
+Hypothesis: the helper is too small and too cold for its extra native dispatch
+and state-reconstruction overhead to pay back. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
 ## 2026-09-05 13:27 IDT: executable JIT lookup-cache expansion rejected
 
 Observation: a candidate changing the executable JIT lookup cache from 1,024
