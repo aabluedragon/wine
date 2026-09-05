@@ -1,5 +1,34 @@
 # Current browser checkpoint
 
+## 2026-09-05 12:54 IDT: full `fgetzsofslope` native candidate rejected
+
+Observation: a skeleton-guarded native implementation of the complete
+`0x0055b350` `fgetzsofslope` helper was tested at
+`http://localhost:9295/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fgetz-full-20260905`.
+It logged `native fgetzsofslope full @ 0055b350`, reached E1L1, rendered
+changing non-black 640x400 frames, reported `input: ready`, accepted
+synthetic Enter/W, and emitted no `JITBAD`, `FATAL`, or `RuntimeError`. It
+reached 803 guest flips, with an 11.9s first frame and late samples around
+90--101 FPS.
+
+The matched published FP-callguard control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fgetz-full-control-20260905`
+passed the same gate and reached 794 flips, with a 10.6s first frame and late
+samples around 73--89 FPS. The approximately 1% flip-count difference is not
+a reproducible margin, so the native helper was reverted and is not served.
+Candidate hashes were JS
+`5f0329c9e0fa9bc2d2682e1df19693c8adecf65cbca086c30c57c2e314f8142c` and WASM
+`4574c44836eda87e93143e0d9a778e5eb9d85cf3dd819f400d203cdf4c51ea04`.
+
+Decision: retain the published FP caller guard and continue toward a larger
+whole-call/native gain. The canonical port 8799 returned HTTP 200; preserved
+untracked build/cache/platform artifacts remain in the dirty Wine tree, no
+sibling checkout was modified, and `git diff --check` passes.
+
+Hypothesis: replacing this helper’s interpreter body alone is too small to
+move the frame workload; the next target must cover a larger measured call or
+loop boundary.
+
 ## 2026-09-05 12:42 IDT: link-time `-O3` candidate rejected
 
 Observation: the unchanged FP-callguard source was linked once with
