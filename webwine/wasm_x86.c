@@ -612,6 +612,26 @@ static void nat_init( struct x86cpu *c )
     nat_register( pe_export( base, "memmove" ), NAT_MEMMOVE, "memmove" );
     nat_register( pe_export( base, "memcpy" ),  NAT_MEMMOVE, "memcpy" );
     nat_register( pe_export( base, "memset" ),  NAT_MEMSET,  "memset" );
+    /* Renderer traffic can enter the implementation from inside the CRT,
+     * bypassing the exported memmove wrapper at base+0x495c0.  The overlap
+     * copy loop below is otherwise a large interpreted residue.  Only arm the
+     * direct cdecl shortcut when the exact implementation skeleton is there;
+     * this build does not install the CRT's optional alternate hook. */
+    { uint32_t impl = base + 0x49600u;
+      static const uint8_t head[] = {
+          0x55, 0x89, 0xe5, 0x83, 0xec, 0x24, 0x8b, 0x45, 0x08,
+          0x8b, 0x55, 0x10, 0x89, 0x75, 0xf8, 0x8b, 0x75, 0x0c,
+          0x89, 0x7d, 0xfc
+      };
+      int ok = !getenv( "WASM_NO_MEMMOVE_INTERNAL" );
+      for (unsigned i = 0; ok && i < sizeof(head); i++)
+          if (head[i] && rd8( impl + i ) != head[i]) ok = 0;
+      if (ok) {
+          nat_register( impl, NAT_MEMMOVE, "msvcrt internal memmove implementation" );
+      }
+      else if (!getenv( "WASM_NO_MEMMOVE_INTERNAL" ))
+          fprintf( stderr, "wasm_x86: msvcrt internal memmove implementation differs at %08x - left interpreted\n", impl );
+    }
     { uint32_t loop = base + 0x49b80u;
       static const uint8_t code[] = { 0x0f,0x29,0x06,0x83,0xc6,0x20,
                                       0x0f,0x29,0x46,0xf0,0x39,0xde,0x72,0xf2 };
@@ -2811,7 +2831,7 @@ static int nat_memset_loop( struct x86cpu *c )
     /* Keep the guest do-while's one mandatory 32-byte store, including the
      * final overrun that the verified machine loop intentionally performs. */
     if (uniform)
-        memset( (void *)(uintptr_t)cur, ((uint8_t *)p)[0], n );
+        memset( (void *)(uintptr_t)cur, block[0], n );
     else
         for (uint32_t left = n; left; left -= 32)
             memcpy( (void *)(uintptr_t)(cur + n - left), block, 32 );

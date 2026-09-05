@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-05 17:50 IDT: internal msvcrt memmove implementation promoted
+
+Observation: warm miss profiling identified the repeated `0x3ee39900` cluster
+as the overlap-copy loop reached by direct internal jumps from msvcrt. The
+exported `memmove` entry was already native, but those jumps bypassed it. A
+relocation- and byte-skeleton-guarded hook for the implementation entry at
+`base+0x49600` was built and served as a candidate. The candidate logged
+`native msvcrt internal memmove implementation @ 3ee39600`, reached E1L1,
+rendered changing non-black frames, reported `input: ready` and audio on, and
+accepted Enter/W. No `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL` appeared.
+
+The canonical bundle was updated from that verified candidate at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=mvimpl-20260905`.
+Published hashes are JS
+`0669cc2eedce4a2a4f055fe3b7e1c9d3023c93910b5b14e5ee0d0ba92a04d7f8`, WASM
+`143d1581d2bef6467cc3291afdd193734d1cd2db7c6a812c9ce29be8ba178c17`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical server returned HTTP 200 after replacement. The short candidate
+window was startup-heavy, so this promotion is based on correctness plus the
+profile-target match; a longer FPS comparison remains useful after warm-up.
+Tracked source is otherwise clean apart from preserved untracked build/cache
+artifacts; no sibling checkout was modified.
+
 ## 2026-09-05 17:25 IDT: bulk msvcrt memset loop promoted
 
 Observation: warm miss profiling found repeated entries at the verified
