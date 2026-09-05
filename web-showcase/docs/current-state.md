@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-05 19:04 IDT: corrected cache1d native candidate rejected
+
+Observation: the corrected, opt-in `WASM_CACHE_NATIVE=1` cache1d candidate was
+built from the current `vibe` source and tested at
+`http://localhost:9496/?WASM_TPUT=1&WASM_CACHE_NATIVE=1&WW_ARGS=%2Fv1,%2Fl1&build=cache-native2-candidate2-20260905`.
+Its candidate hashes were JS
+`70ab4124d593bbd9f2c9df689342acda450e563681de8d43288267b83cec1e07`, WASM
+`ae17b39557075dc123b2143c6b952f6848290d8079818c395ce0889b64b3c400`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, and
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`.
+The decisive log lines were `native cache1d lookup/insert @ 006315f0`,
+`input: ready`, `E1L1: HOLLYWOOD HOLOCAUST`, and OpenGL/WebGL 2 context
+initialization; the canvas was real 640x400 and non-black. Enter and held W
+were received. However, the late window averaged only 25.3 FPS and fell to
+5.3--7.5 FPS, versus the verified canonical warm baseline around 57.8 FPS.
+The candidate was rejected and not copied to port 8799.
+
+The corrected hook and its diagnostic build are removed from source. The
+canonical port 8799 bundle remains the prior verified artifact, with HTTP 200
+and COOP/COEP headers. This is an observation, not a claim that cache1d is the
+only remaining cause; its loader/allocator behavior is still not modeled well
+enough for a native replacement. No sibling checkout was modified.
+
 ## 2026-09-05 20:05 IDT: audio rollback not an FPS lever
 
 Observation: an end-to-end canonical run with `WASM_NO_AUDIO=1` passed input and
