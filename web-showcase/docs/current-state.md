@@ -9626,3 +9626,19 @@ changed. The canonical artifact hashes remain JS
 audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
 Port 8799 returned HTTP 200 with COOP/COEP headers. Preserved untracked
 build/cache/platform artifacts remain; no sibling checkout was modified.
+## 2026-09-05 20:24 IDT: dynamic negative-cache candidate rejected
+
+Candidate observation: a negative-only cache for repeated ordinary instructions
+in the runtime-generated `0x00800000` arena was built and served at
+`http://localhost:9503/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dynneg-candidate-20260905`.
+The candidate artifacts were JS
+`359614a6306b6a99effece9524e048039bedd3f2032f3c1d6df0ed73cd087fc6`, WASM
+`ca9c1263910ae3bc64a48f938f8011b9bf6f8643b117a1cb07a84710b008a9a8`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+It reached a changing non-black 640x400 frame, `input: ready`, E1L1, and no
+`RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`, but the candidate ended at
+255 frames (first frame 18.3s) versus 357 frames (first frame 19.6s) for the
+matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=dynneg-control-20260905`.
+Late candidate samples were below the control. The optimization is rejected;
+its source was reverted and no canonical artifact was replaced.
