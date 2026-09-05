@@ -1,5 +1,21 @@
 # Current browser checkpoint
 
+## 2026-09-05 19:35 IDT: cache1d native implementation rejected
+
+Observation: a one-shot runtime byte dump reconstructed the live
+`0x006315f0` routine as cache1d lookup/insert code, including its 12-byte
+pointer table, hit counters, insertion branches, and loader call at
+`0x004029f0`. An opt-in skeleton-guarded native implementation was built and
+tested end-to-end. It reached E1L1, rendered non-black 640x400 frames, accepted
+Enter/W, and initialized audio, but it produced severe stutter and only about
+20 FPS in the warm window. It was rejected and removed completely; no
+diagnostic dump or candidate hook remains in source or the served bundle.
+
+The canonical port 8799 bundle remains unchanged and HTTP 200 with COOP/COEP
+headers. The `0x006316xx` routine is therefore confirmed as the next major
+residue, but its loader/allocator side effects need a fuller model before a
+native replacement can be safe. No sibling checkout was modified.
+
 ## 2026-09-05 18:50 IDT: larger generated-block dispatch cache rejected
 
 Observation: an 8,192-entry direct-mapped `gen_lookup_cached` experiment passed

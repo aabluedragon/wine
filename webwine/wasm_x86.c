@@ -4919,6 +4919,11 @@ static void nat_arm_fp_gate( void )
     nat_register( a, NAT_FP_GATE, "renderer float gate" );
 }
 
+/* cache1d's hot lookup/insert routine.  This is runtime-patched code in the
+ * executable, so it is opt-in until the guest-memory model has differential
+ * coverage.  The common flag!=0 path only updates the cache's pointer table
+ * and hit counters; the flag==0 path calls the allocator/loader and remains
+ * interpreted. */
 static int nat_call( struct x86cpu *c, int kind )
 {
     if (kind == NAT_CRC32)   return nat_crc32( c );
