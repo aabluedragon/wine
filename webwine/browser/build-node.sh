@@ -47,7 +47,8 @@ echo "[2/4] shims ($OPT) + interpreter ($XOPT)"
 # binary.  It is a build artifact (~40MB, ~1M lines) - generated, never committed.
 # The hook list must match the guest addresses wasm_x86.c registers via nat_arm_*
 # (so those functions stay native fast paths and are never mid-block-translated);
-# the excluded 0x631000-0x634000 window is the SMC mapper region.
+# the excluded 0x631000-0x634000 window is the SMC mapper region, with only
+# the non-SMC cache1d lookup slice explicitly included below.
 if [ -n "$GENBLK" ]; then
   NDEXE="${NDEXE:-$HOME/games/netduke32_v1.2.1/netduke32.exe}"
   NDHOOKS='--hooks=0x401e60,0x4e28a0,0x4e3070,0x519620,0x5196c0,0x519a41,0x519f87,0x529500,0x52a6a0,0x594550,0x60b9c0,0x6a8140,0x6a8170,0x6a81a0,0x6a81b0,0x6a8240,0x6a8250,0x6a8260,0x6a8270,0x6a8280,0x6a8290,0x6a8420,0x6a8c80'
@@ -59,7 +60,7 @@ if [ -n "$GENBLK" ]; then
     # post-loop epilogue is ordinary code.  Translating that 43-byte tail
     # removes the native mapper -> interpreter boundary without making any
     # assumptions about the caller's stack layout.
-  python3 "$WEBW/x86toc.py" "$NDEXE" "$WEBW/gen_blocks.c" 0x401000-0x631000 0x631c40-0x631c90 0x632630-0x63265b 0x634000-0x81f710 "$NDHOOKS" "${NDARGS[@]}" --entries=0x00631c40,0x00631c60,0x00631c7d
+  python3 "$WEBW/x86toc.py" "$NDEXE" "$WEBW/gen_blocks.c" 0x401000-0x631000 0x6315f0-0x631750 0x631c40-0x631c90 0x632630-0x63265b 0x634000-0x81f710 "$NDHOOKS" "${NDARGS[@]}" --entries=0x006315f0,0x00631c40,0x00631c60,0x00631c7d
   fi
   if [ -n "$FP_HOT" ]; then
     FPHOT_GENFILE="$WEBW/fp_hot_gen_blocks.c"

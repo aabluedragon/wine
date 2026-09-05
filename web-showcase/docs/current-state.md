@@ -1,5 +1,55 @@
 # Current browser checkpoint
 
+## 2026-09-05 20:00 IDT: cache1d narrow AOT slice promoted
+
+Observation: the generated-block build now includes only the non-SMC cache1d
+slice `0x006315f0-0x0063174a` inside the otherwise excluded mapper window.
+The candidate was tested at
+`http://localhost:9502/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=cache-aot2-candidate-20260905`.
+It translated `170621` blocks, reached a real non-black 640x400 WebGL frame,
+reported `input: ready`, audio on, E1L1, and accepted Enter/W. No
+`RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL` appeared. A candidate/control
+pair measured 49.8 vs 39.4 FPS at `t>=20`; the reverse-order pair measured
+48.8 vs 46.0 FPS. The differential-verification URL was also run, but its
+interpreter comparison did not reach gameplay within 24 seconds; it produced
+no JIT or runtime error, so it is recorded as inconclusive rather than as a
+passing gameplay verification.
+
+The candidate was promoted to port 8799 and retested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=cache-aot2-promoted-20260905`.
+The promoted run reached OpenGL context version 3.3, a real changing frame,
+`input: ready`, E1L1, and audio, with a 45.4 FPS late-window mean. Published
+hashes are JS
+`f37e082d32ee45dabd52f6e345eda244aa98dc608e42b97c493df275bb7cce6c`, WASM
+`a82517c0f48bcfd34740916d928af9e45ff7abc6d24d724525d658679cce22cc`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 returned HTTP 200 with COOP/COEP headers. No sibling checkout was
+modified.
+
+## 2026-09-05 19:24 IDT: cache1d hit-only candidate rejected
+
+Observation: a guarded `WASM_CACHE_HIT=1` candidate was tested at
+`http://localhost:9498/?WASM_TPUT=1&WASM_CACHE_HIT=1&WW_ARGS=%2Fv1,%2Fl1&build=cache-hit-candidate-20260905`.
+Candidate hashes were JS
+`4ee12f62a668f44368b7b635ac8e5971bb8e7e6a297965839c1ac6512118d64c`, WASM
+`226d9709e033fc5567fdfe4a7ec92f44d5db10743d1d07a493cb0ad10baa526c`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, and
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`.
+It logged `native cache1d hit-only @ 006315f0`, reached a real non-black
+640x400 WebGL frame, `input: ready`, E1L1, audio, and accepted Enter/W. The
+same candidate bundle with the hook disabled was the control. The hook-enabled
+run averaged 25.0 FPS at `t>=20`; the matched control averaged 47.4 FPS and
+reached the first frame earlier. The candidate was rejected and never copied
+to port 8799.
+
+The hit-only hook and its build experiment are removed from source. The
+canonical port 8799 artifact remains unchanged and verified. This result shows
+that the native-dispatch seam itself is too expensive or still has incomplete
+caller-visible state, even when misses fall back to the interpreter; it does
+not justify replacing the loader path. No sibling checkout was modified.
+
 ## 2026-09-05 19:04 IDT: corrected cache1d native candidate rejected
 
 Observation: the corrected, opt-in `WASM_CACHE_NATIVE=1` cache1d candidate was
