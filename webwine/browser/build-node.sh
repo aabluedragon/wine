@@ -4,16 +4,16 @@
 # Also produces the env-agnostic objects (srv/*.o, wasm_cpu_bridge.o, wasm_vm.o,
 # combined_main.o) that build-browser.sh reuses.
 #
-#   OPT=-O3 XOPT=-O2 WORK=/tmp/webwine-browser ./build-node.sh
+#   OPT=-O3 XOPT=-O3 WORK=/tmp/webwine-browser ./build-node.sh
 # NOTE: run under bash, not zsh (zsh does not word-split $DLLS/$INC).
-# The browser build defaults to -O3 for support objects and -O2 for the
+# The browser build defaults to -O3 for support objects and the
 # interpreter/generated blocks.  This is the measured fast configuration that
 # preserves the interpreter's differential-verification behavior; override
 # either variable for diagnostic or size-oriented builds.
 set -e
 WINE="${WINE:-$HOME/dev/wine}"; WINEMAC="${WINEMAC:-$WINE/wine-macos}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
 OPT="${OPT:--O3}"
-XOPT="${XOPT:--O2}"
+XOPT="${XOPT:--O3}"
 LINKOPT="${LINKOPT:-$OPT}"
 WORK="${WORK:-/tmp/webwine-browser}"
 OUT="$WORK/nd_${OPT#-}"

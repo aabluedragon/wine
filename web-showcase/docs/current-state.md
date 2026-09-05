@@ -1,5 +1,37 @@
 # Current browser checkpoint
 
+## 2026-09-05 16:35 IDT: interpreter `-O3` promoted
+
+Observation: rebuilding only `wasm_x86.c` at `-O3` preserved the validated AOT
+table and passed the full browser gate. The candidate was served at
+`http://localhost:9443/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=x3-interpreter-coi-20260905`
+with COOP/COEP headers. Its hashes were JS
+`6915c4f74afda58c056d3058a22cba77824103ad7f0bb203d5b48e8df74d99f9`, WASM
+`b6d779df3faa78b476cc28fe2a50ee882dd758f443813f81007864b7e23a038d`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+It produced a changing non-black 640x400 canvas, `input: ready`, E1L1, and
+accepted Enter/W with no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`.
+
+Two reverse-order candidate/control pairs showed late-window means of
+113.3 vs 92.3 FPS and 81.5 vs 50.3 FPS respectively; the machine was noisy,
+but both pairs favored `-O3`. The canonical bundle was then rebuilt in place
+with the same setting. Its published hashes are JS
+`ec9fc0864c8de9f8242b84a84d2f927c7d3b4778ebfd001ae754afc68ee1a1f3`, WASM
+`b6d779df3faa78b476cc28fe2a50ee882dd758f443813f81007864b7e23a038d`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The canonical URL is now
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-o3-published-20260905`;
+it returned HTTP 200 and its end-to-end run reached E1L1 with `input: ready`,
+changing non-black canvas frames, Enter/W events, and no fatal/JIT errors.
+Preserved untracked build/cache/platform artifacts remain in the dirty Wine
+tree; no sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: `-O3` improves the interpreter/JIT helper code enough to make this
+the better browser default, while the remaining variance is host/browser load
+rather than a correctness or startup regression.
+
 ## 2026-09-05 16:18 IDT: explicit hot-function entries rejected
 
 Observation: executable-miss profiling identified warm clusters at

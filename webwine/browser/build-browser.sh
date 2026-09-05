@@ -3,19 +3,19 @@
 # Reuses build-node.sh's env-agnostic objects; rebuilds only wasm_ipc
 # (-DWEBWINE_MEMFS) and wasm_x86 (-DWEBWINE_BROWSER).  Support objects and the
 # support objects use -O3, while the browser IPC and whole-module link retain
-# the known-good -O1/-O2 combination; the interpreter/generated blocks stay at
-# -O2 for differential-verification compatibility.
-# Prereqs: build-node.sh (OPT=-O3, XOPT=-O2) and assemble-assets.sh have run.
+# the known-good -O1/-O3 combination; the interpreter/generated blocks stay at
+# -O3 for the measured browser throughput configuration.
+# Prereqs: build-node.sh (OPT=-O3, XOPT=-O3) and assemble-assets.sh have run.
 #   WORK=/tmp/webwine-browser ./build-browser.sh   -> $WORK/web/webwine-bw.{js,wasm,data}
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WINE="${WINE:-$HOME/dev/wine}"; BUILD="$WINE/build-wasm4"; WEBW="$WINE/webwine"
 WORK="${WORK:-/tmp/webwine-browser}"
 NODEO="$WORK/nd_O3"; OUT="$WORK/web"; AT="$WORK/assets"
-CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"; XOPT="${XOPT:--O2}"
+CINT="${CINT:--O1}"; LOPT="${LOPT:--O2}"; XOPT="${XOPT:--O3}"
 source ~/dev/emsdk/emsdk_env.sh >/dev/null 2>&1
 mkdir -p "$OUT"; cd "$BUILD"
-[ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O3, XOPT=-O2) first"; exit 1; }
+[ -d "$NODEO/srv" ] || { echo "run build-node.sh (OPT=-O3, XOPT=-O3) first"; exit 1; }
 [ -d "$AT/game" ]   || { echo "run assemble-assets.sh first"; exit 1; }
 # AOT block translation: on when gen_blocks.c exists (build-node.sh GENBLK=1
 # generated it) unless GENBLK is explicitly emptied.  Compiles the JIT into the
