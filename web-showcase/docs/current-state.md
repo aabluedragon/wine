@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-05 13:05 IDT: texture-position native hook rejected
+
+Observation: a skeleton-guarded candidate for `0x00555470`
+(`polymost_setTexturePosSize`) was built and served at
+`http://localhost:9296/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=texture-pos-size-20260905`.
+It logged `native polymost texture-position packing @ 00555470`, reached E1L1,
+rendered changing non-black 640x400 frames, reported `input: ready`, accepted
+synthetic Enter/W, and emitted no `JITBAD`, `FATAL`, or `RuntimeError`.
+Candidate JS/WASM hashes were
+`08d185709d75d1c8b8bb1664e73087ecfe4373692191c1a6d3d975270bb47af18` /
+`d0833526231b42b8179344a7686775c5210ed22a952ab5a9c4db38480497cbb9`.
+
+The matched candidate-bundle control, with
+`WASM_NO_TEXTURE_POS_SIZE=1`, was tested at
+`http://localhost:9296/?WASM_TPUT=1&WASM_NO_TEXTURE_POS_SIZE=1&WW_ARGS=%2Fv1,%2Fl1&build=texture-pos-size-control-20260905`.
+It also passed the render/input gate and reached 678 flips at 24.7s; the
+enabled run reached about 622 flips at 22.6s. The runs do not show a
+reproducible gain, so the hook was reverted and is not published. The
+canonical port 8799 still returned HTTP 200 and its published artifact hashes
+remain unchanged. Preserved untracked build/cache/platform artifacts remain
+in the dirty Wine tree; no sibling checkout was modified.
+
+Hypothesis: this helper's float-packing cost is too small relative to the
+remaining dynamic/JIT workload, and routing its GL call through a temporary
+guest stack frame adds enough overhead to erase any benefit. The next
+optimization should target a larger measured loop or call boundary.
+
 ## 2026-09-05 12:54 IDT: full `fgetzsofslope` native candidate rejected
 
 Observation: a skeleton-guarded native implementation of the complete
