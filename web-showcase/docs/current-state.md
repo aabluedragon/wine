@@ -1,5 +1,34 @@
 # Current browser checkpoint
 
+## 2026-09-05 15:20 IDT: PE import-thunk fast path rejected
+
+Observation: `WASM_IPAGE=1` showed executable-page interpreter residue around
+one-instruction PE import thunks (`ff 25 [absolute32]`). An opt-in candidate
+added an exact flat-data fast path for only that encoding, served from the
+candidate bundle at
+`http://localhost:9422/?WASM_TPUT=1&WASM_FAST_IAT=1&WW_ARGS=%2Fv1,%2Fl1&build=iat-fast-once-20260905`.
+Its candidate hashes were JS
+`a385a84f308b50b0cb7f31facb935bc3bedb925442043c925df29dc10802968f`, WASM
+`ce96889476993dd8e16b349a409a1772536412c6fae50c4ded7b030d3bc67cdf`, and
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+The candidate passed the full gate: changing non-black 640x400 canvas,
+`input: ready`, Enter/W events, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or
+`RuntimeError`. It reached `iat=369570` fast jumps in one run. The first
+candidate/control pair ended at 902/923 frames with first frames at 9.6/9.3s;
+the reverse-order pair ended at 635/652 frames with first frames at 10.1/10.4s
+(candidate/control respectively). Late samples overlapped and the candidate
+was not consistently faster, so the experiment was reverted and is not
+published. The canonical URL remained
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-published-20260905`,
+HTTP 200, with its published artifacts unchanged. Preserved untracked
+build/cache/platform artifacts remain in the dirty Wine tree; no sibling
+checkout was modified; `git diff --check` passes.
+
+Hypothesis: import-thunk dispatch is visible in the miss profile but is too
+small a fraction of the warm render cost to justify a separate interpreter
+branch; the next gain must remove a larger whole-call or renderer boundary.
+
 ## 2026-09-05 15:00 IDT: surface-span experiment rejected
 
 Observation: the existing opt-in `WASM_SURFSPAN=1` path was tested at
