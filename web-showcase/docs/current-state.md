@@ -1,5 +1,29 @@
 # Current browser checkpoint
 
+## 2026-09-05 14:44 IDT: FP-chain native-overlap cache rejected
+
+Observation: the FP hot-chain dispatcher was temporarily changed to precompute
+native-hook overlap in its FP hash table, avoiding a global native-address hash
+probe on each chain transition. The candidate used JS/WASM hashes
+`d475330467c6a8cbf64e828bfeab81625c5979845e5cb099041e56aaa4826211` /
+`4bdd4ea83ce6ab93e0d6ff020326f3f36cbd70da71bc37cdf237839471beaaf8` and was
+served at
+`http://localhost:9310/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fpchain-native-cache-20260905`.
+It passed the full gate: changing non-black 640x400 canvas, `input: ready`,
+Enter/W, E1L1, and no `JITBAD`, `JITBADEIP`, `FATAL`, or `RuntimeError`; the
+30-second run ended at 753 frames with first frame at 12.1s.
+
+The matched canonical control at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fpchain-control-20260905`
+ended at 776 frames with first frame at 11.5s and higher comparable late
+samples. The change was reverted and is not published. Canonical port 8799
+remained HTTP 200; preserved untracked build/cache/platform artifacts remain
+in the dirty Wine tree; no sibling checkout was modified; `git diff --check`
+passes.
+
+Hypothesis: the additional native-overlap byte table does not amortize its
+lookup cost; FP-chain transitions are not the dominant sustained cost.
+
 ## 2026-09-05 14:36 IDT: non-power-of-two single-column mapper experiment rejected
 
 Observation: the existing guarded `WASM_EXPERIMENT_NP2=1` path was tested at
