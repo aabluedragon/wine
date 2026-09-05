@@ -1,5 +1,22 @@
 # Current browser checkpoint
 
+## 2026-09-05 15:02 IDT: audio-disabled throughput test rejected
+
+Observation: the canonical bundle was tested with
+`WASM_NO_AUDIO=1` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_AUDIO=1&WW_ARGS=%2Fv1,%2Fl1&build=noaudio-20260905`.
+It reached E1L1, rendered changing non-black 640x400 frames, reported
+`input: ready`, and accepted Enter/W, but ended at 695 frames in 30 seconds
+with first frame at 9.0s. The run also emitted repeated guest audio errors
+(`Unable to play wind54.voc`/`drip3.voc`). Warm samples remained roughly
+74--86 FPS, so disabling the audio pump is not a performance win and degrades
+behavior. No source or canonical artifact changed; port 8799 remained HTTP
+200. Preserved untracked build/cache/platform artifacts remain in the dirty
+Wine tree; no sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: audio pumping is not the sustained frame bottleneck; the errors
+and altered guest timing make this switch unsuitable for publication.
+
 ## 2026-09-05 14:55 IDT: register-only `0x89` interpreter fast path rejected
 
 Observation: opcode histogram profiling showed `0x89` as the largest
