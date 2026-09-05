@@ -1,5 +1,42 @@
 # Current browser checkpoint
 
+## 2026-09-05 17:25 IDT: bulk msvcrt memset loop promoted
+
+Observation: warm miss profiling found repeated entries at the verified
+msvcrt `movaps` memset loop (`0x3ee39900`–`0x3ee39b8c`). The existing native
+shortcut rejected valid do-while final iterations and reconstructed the fill
+from integer registers rather than guest XMM0. A corrected candidate changed
+the hook to preserve the do-while store semantics and perform one bulk guest
+memory write per span. It was served at
+`http://localhost:9461/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=memset-bulk-20260905`;
+candidate hashes were JS
+`1c21294cd1ff74f0114301b260ae175a123be071e976b3c85f03bb34ed9e1694`, WASM
+`ed55922ca12baa183fe1ccfadbfc5f0782d5b78edc884fbb549ccc1a0bb5f2e8`, and data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
+
+Two reverse-order candidate/control pairs produced late-window means of
+75.1 vs 68.6 FPS and 77.9 vs 53.2 FPS. All four runs rendered changing
+non-black 640x400 frames, reported `input: ready`, reached E1L1, accepted
+Enter/W, and had no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. An
+earlier per-word implementation was rejected after measuring 39.2 vs 52.3
+FPS, so only the bulk-write implementation was retained.
+
+The canonical bundle was rebuilt and tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-callguard-o3-link3-memsetbulk-20260905`.
+It returned HTTP 200, passed the full gate, and measured 77.6 FPS in the final
+run. Published hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`ed55922ca12baa183fe1ccfadbfc5f0782d5b78edc884fbb549ccc1a0bb5f2e8`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Preserved untracked build/cache/platform artifacts remain in the dirty Wine
+tree; no sibling checkout was modified; `git diff --check` passes.
+
+Hypothesis: the remaining msvcrt miss load was dominated by the dispatch and
+per-word write overhead of the old fallback, and bulk guest-memory writes now
+remove that cost without changing the guest loop’s visible stores.
+
 ## 2026-09-05 16:50 IDT: browser link `-O3` promoted
 
 Observation: the published `-O3` interpreter was rebuilt with the final

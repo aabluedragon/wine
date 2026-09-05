@@ -2791,17 +2791,31 @@ static int nat_wcschr( struct x86cpu *c )
  * epilogue so its original return convention and result are preserved. */
 static int nat_memset_loop( struct x86cpu *c )
 {
-    uint32_t cur = c->regs[ESI], end = c->regs[EBX], eax = c->regs[EAX], edx = c->regs[EDX];
-    if (cur >= NAT_GUEST_END || end > NAT_GUEST_END || end < cur || ((end - cur) & 31u)) return 0;
-    while (cur < end)
-    {
-        wr32( cur +  0, eax ); wr32( cur +  4, edx );
-        wr32( cur +  8, eax ); wr32( cur + 12, edx );
-        wr32( cur + 16, eax ); wr32( cur + 20, edx );
-        wr32( cur + 24, eax ); wr32( cur + 28, edx );
-        cur += 32;
-    }
-    c->regs[ESI] = cur;
+    uint32_t cur = c->regs[ESI], end = c->regs[EBX];
+    uint32_t n;
+    uint8_t block[32]; int uniform = 1;
+    /* The guest body is a do-while: it executes both movaps stores before
+     * testing ESI against EBX.  In particular, an aligned final iteration
+     * commonly enters with ESI already past EBX.  XMM0, not EAX/EDX, is the
+     * source operand of movaps; using the integer registers was only correct
+     * for the zero-fill cases that dominated the first measurement. */
+    if (cur > NAT_GUEST_END - 32u || end > NAT_GUEST_END) return 0;
+    memcpy( block, c->xmm[0], 16 );
+    memcpy( block + 16, c->xmm[0], 16 );
+    for (unsigned i = 1; i < sizeof(block); i++)
+        if (block[i] != block[0]) { uniform = 0; break; }
+    n = end > cur ? end - cur : 0;
+    n = (n + 31u) & ~31u;
+    if (!n) n = 32;
+    if (n > NAT_GUEST_END - cur) return 0;
+    /* Keep the guest do-while's one mandatory 32-byte store, including the
+     * final overrun that the verified machine loop intentionally performs. */
+    if (uniform)
+        memset( (void *)(uintptr_t)cur, ((uint8_t *)p)[0], n );
+    else
+        for (uint32_t left = n; left; left -= 32)
+            memcpy( (void *)(uintptr_t)(cur + n - left), block, 32 );
+    c->regs[ESI] = cur + n;
     c->eip = msvcrt_base + 0x49b8eu;
     return 1;
 }
