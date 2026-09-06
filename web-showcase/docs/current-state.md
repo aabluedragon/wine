@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-06 15:57 IDT: bounded UDIV operand trace inconclusive
+
+Observation: a bounded `WASM_TRACE_UDIV32=1` build was run at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_UDIV32=1&WW_ARGS=%2Fv1,%2Fl1&build=trace-udiv32-args2-20260906`.
+The run reached changing 640x400 frames, `input: ready`, Enter/W input, and
+audio, with no runtime/JIT fatal errors. The CDP log-tail transport discarded
+the bounded operand lines before they could be recovered, so this diagnostic
+does not identify a new arithmetic specialization and makes no FPS claim.
+
+The temporary trace code was removed and the canonical bundle rebuilt. The
+clean smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-trace-clean-canonical-20260906`
+reached E1L1, changing 640x400 frames, `input: ready`, keyboard events, and
+audio at 22050Hz/2ch; it ended at 475 frames with first frame at 10.5s and no
+`RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`. The
+canonical source is restored to the verified 32/32 UDIV32 path. Preserved
+untracked build/cache artifacts remain; no sibling checkout was modified.
+
 ## 2026-09-06 15:36 IDT: reject power-of-two wide-division specialization
 
 Candidate observation: the generated helper at `0x00801561` was extended only
