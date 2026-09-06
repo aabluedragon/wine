@@ -305,6 +305,30 @@ audio worklet
 The source tree remains dirty only with this intended profiler change plus
 pre-existing build/cache artifacts; no sibling checkout was modified.
 
+## 2026-09-06 16:36 IDT: polymost loop-condition hook rejected
+
+Observation: the warm JIT-aware profile and exact address counter identified
+`0x0055dfe0` as a render-loop condition, with roughly 200--345 executions per
+frame in matched count runs. Static disassembly of the supplied executable
+confirmed the exact 14-byte skeleton `mov eax,[ebp-0x220]; cmp ebx,eax; jne
+0x0055df10`. A native replacement was built behind `WASM_FAST_POLYCOND=1`
+with skeleton verification and tested against the same freshly built bundle at
+`http://localhost:8799/?WASM_TPUT=1&WASM_FAST_POLYCOND=1&WW_ARGS=%2Fv1,%2Fl1&build=polycond-candidate-valid-20260906`.
+
+The candidate reached E1L1 and rendered, but its warm samples were slower
+than the matched control
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=polycond-control-valid-20260906`:
+candidate roughly 45--67 FPS / 22--35 MIPS versus control roughly 68--82
+FPS / 29--36 MIPS, with a slower first frame. The hook broke more JIT chaining
+than the tiny block saved, so it was rejected and fully removed. The canonical
+bundle was rebuilt and smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-polycond-reject-canonical-20260906`;
+it reached the game, rendered changing frames, accepted Enter/W input, and
+emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. Canonical JS/WASM
+hashes are `ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`
+and `4638fa1249f5c803845a102432224f8b1a072bacc8ce6ff2cec8c52f7d3b9519`;
+data, index, and audio hashes remain unchanged from the preceding entry.
+
 Hypothesis: this removes repeated dispatch overhead from the terminal
 initialized branch while avoiding the correctness risk of implementing the
 stateful initializer itself. The paired samples favor it, though browser host
