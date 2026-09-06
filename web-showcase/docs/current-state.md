@@ -1,5 +1,38 @@
 # Current browser checkpoint
 
+## 2026-09-06 19:28 IDT: post-prefilter hotspot validation and memset rollback A/B
+
+Observation: the post-prefilter 30-second profile at
+`http://localhost:8799/?WASM_TPUT=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=post-udiv-prefilter-profile-20260906`
+reached E1L1 and changing non-black 640x400 frames, with `input: ready`, no
+`RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`, and a late
+sample of 1971 frames / 67.3 FPS. Warm IPAGE was 31.1% in generated code at
+`00800000`, 13.3% in the renderer at `00550000`, and 9.5% in OpenGL at
+`3b780000`. The largest miss addresses included the already-registered msvcrt
+SIMD memset loop at `3ee39b80`; this is a profiler entry count, not proof that
+the native hook was missed.
+
+The module-map run confirmed the exact registration:
+`native msvcrt memset SIMD loop @ 3ee39b80`, alongside the loaded msvcrt image
+and the GL/input hooks. A same-bundle rollback comparison used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=memset-ab-on-20260906`
+versus
+`http://localhost:8799/?WASM_TPUT=1&WASM_NO_MEMSET_LOOP=1&WW_ARGS=%2Fv1,%2Fl1&build=memset-ab-off-20260906`.
+Both reached E1L1, rendered non-black 640x400 frames, and accepted Enter/W;
+the short run was host-noisy and did not establish a reliable gain (the last
+reported samples were 21.6 FPS with the hook and 29.7 FPS without it), so no
+change was promoted. This remains an observation, not a correctness failure.
+
+Canonical served artifacts remain JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`e501d35d25f1bc7bd705834919c7d8d52a208e668b00ff0f5062bbbdb982a9af`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The source tree has no tracked source changes from these tests; preserved
+untracked build/cache/platform artifacts remain, and no sibling checkout was
+modified.
+
 ## 2026-09-06 19:22 IDT: promote generated-UDIV interior dispatch prefilter
 
 Observation: the verified generated UDIV helper at `0x00801561` has one
