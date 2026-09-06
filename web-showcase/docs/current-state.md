@@ -1,5 +1,15 @@
 # Current browser checkpoint
 
+## 2026-09-06 18:37 IDT: post-rejection canonical smoke
+
+The restored canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=canonical-post-udiv-reciprocal-reject-20260906`
+returned a changing non-black 640x400 frame, reached E1L1, reported
+`input: ready`, accepted Enter/W, and produced late samples up to 43.2 FPS.
+No `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED` appeared.
+The served WASM remains
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`.
+
 ## 2026-09-06 18:35 IDT: reciprocal-10M generated-UDIV candidate rejected
 
 Candidate observation: the miss-level trace showed a stable 64/32 division
