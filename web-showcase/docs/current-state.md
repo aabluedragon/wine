@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-06 18:35 IDT: reciprocal-10M generated-UDIV candidate rejected
+
+Candidate observation: the miss-level trace showed a stable 64/32 division
+shape, so a guarded reciprocal-multiply implementation for divisor
+`0x00989680` was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv10m-reciprocal-candidate-20260906`
+against the same bundle with `WASM_NO_DYNAMIC_UDIV10M=1`. The reciprocal was
+validated over one million random numerators in the supported range, and both
+browser runs passed E1L1, changing 640x400 output, input, and the no-fatal/JIT
+error gate. The candidate ended at 1544 frames versus 1582 for control and had
+lower late MIPS, so it is rejected.
+
+The candidate was removed and the canonical bundle rebuilt from the promoted
+TLS-wrapper source. Canonical WASM is
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`.
+Preserved untracked build/cache/platform artifacts remain; no sibling checkout
+was modified.
+
 ## 2026-09-06 18:20 IDT: constant-10M generated-UDIV candidate rejected
 
 The miss-level trace at
