@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-06 18:20 IDT: constant-10M generated-UDIV candidate rejected
+
+The miss-level trace at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_UDIV_MISS=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-miss-trace512-20260906`
+correctly captured the actual helper call boundary. The sampled hot calls use
+a 64-bit numerator, zero high divisor, no remainder pointer, and a stable
+divisor `0x00989680` (10,000,000); the repeated interior misses explain why
+the earlier exact-entry counter saw nothing.
+
+Candidate observation: a guarded constant-divisor path using compile-time
+strength reduction was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv10m-candidate-20260906`
+against the same bundle with `WASM_NO_DYNAMIC_UDIV10M=1`. Both runs passed the
+render/input gate, reached E1L1, and emitted no runtime/JIT fatal errors. The
+first normalized pair was neutral-to-slightly-regressive (candidate about
+43.6 FPS versus control about 43.8 FPS), so the candidate was reverted.
+
+The canonical bundle was rebuilt afterward; WASM is
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`, with the
+promoted TLS-wrapper fast path unchanged. The temporary trace and candidate
+source were removed. Preserved untracked build/cache/platform artifacts
+remain, and no sibling checkout was modified.
+
 ## 2026-09-06 17:56 IDT: generated-UDIV counter probe inconclusive
 
 Observation: an opt-in `WASM_TRACE_UDIV32_STATS=1` build was run at
