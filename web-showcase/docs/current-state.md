@@ -1,5 +1,34 @@
 # Current browser checkpoint
 
+## 2026-09-06 20:15 IDT: division-estimate UDIV candidate rejected
+
+Candidate observation: the warm trace showed the generated helper receiving
+true 64-bit operands with 32-bit quotients and interpreter continuations in
+`0x0032xxxx`. An opt-in path estimated the quotient with a 32-bit high-word
+divide and corrected it with an exact 32x64 product/compare, avoiding the
+general Wasm 64-bit divide. It was tested with
+`http://localhost:9509/?WASM_TPUT=1&WASM_DYNAMIC_UDIV64_EST=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-est-candidate-20260906`
+against the same artifact without the flag.
+
+The candidate failed the correctness gate before the first frame with
+`UNIMPLEMENTED opcode fe at eip=0032fdc9`; the control reached E1L1 and
+rendered changing non-black 640x400 frames. The candidate was removed and no
+performance comparison was made. This confirms that the helper's continuation
+state cannot be replaced by this arithmetic-only shortcut.
+
+The canonical bundle was restored from the verified backup and smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-udiv-est-reject-canonical-20260906`.
+It reached E1L1, rendered changing non-black 640x400 frames, accepted Enter/W,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`; the late sample reached 79.6 FPS. Canonical hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`e501d35d25f1bc7bd705834919c7d8d52a208e668b00ff0f5062bbbdb982a9af`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The source tree has no tracked source changes from the candidate; preserved
+untracked build/cache artifacts remain and no sibling checkout was modified.
+
 ## 2026-09-06 19:56 IDT: generated-arena dynamic-dispatch prefilter rejected
 
 Hypothesis: the warm profile's `00800000` generated-code share might include
