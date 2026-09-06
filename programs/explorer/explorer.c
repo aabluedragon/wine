@@ -382,7 +382,7 @@ static void make_explorer_window(parameters_struct *params)
     IShellFolder *folder;
     IDispatch *dispatch;
     WCHAR *path = NULL;
-    IShellWindows *sw;
+    IShellWindows *sw = NULL;
     ITEMIDLIST *pidl;
     UINT dpix, dpiy;
     DWORD size;
@@ -443,7 +443,7 @@ static void make_explorer_window(parameters_struct *params)
     if(!info)
     {
         ERR( "Could not allocate an explorer_info struct\n" );
-        IShellWindows_Release(sw);
+        if (sw) IShellWindows_Release(sw);
         free(path);
         return;
     }
@@ -453,7 +453,7 @@ static void make_explorer_window(parameters_struct *params)
     {
         ERR( "Could not obtain an instance of IExplorerBrowser\n" );
         free(info);
-        IShellWindows_Release(sw);
+        if (sw) IShellWindows_Release(sw);
         free(path);
         return;
     }
