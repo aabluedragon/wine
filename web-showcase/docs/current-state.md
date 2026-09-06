@@ -1,5 +1,20 @@
 # Current browser checkpoint
 
+## 2026-09-06 15:38 IDT: warm instruction sampler emitted no samples
+
+Observation: the canonical bundle was run with
+`http://localhost:8799/?WASM_TPUT=1&WASM_PROF=1&WW_ARGS=%2Fv1,%2Fl1&build=warm-prof-20260906`.
+It reached E1L1, changing 640x400 frames, `input: ready`, Enter/W input, and
+audio with no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. The diagnostic ended with `PROF TOTAL 0 dropped 0`, so the
+sampler did not produce a usable warm address ranking; its FPS samples are not
+a performance claim.
+
+Decision: no source or artifact change. The existing libdivide cache was also
+already measured and rejected, so the canonical UDIV32 bundle remains the
+verified baseline. Preserved untracked build/cache artifacts remain; no sibling
+checkout was modified.
+
 ## 2026-09-06 15:57 IDT: bounded UDIV operand trace inconclusive
 
 Observation: a bounded `WASM_TRACE_UDIV32=1` build was run at
