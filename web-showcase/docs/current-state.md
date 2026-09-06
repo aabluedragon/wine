@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-06 15:36 IDT: reject power-of-two wide-division specialization
+
+Candidate observation: the generated helper at `0x00801561` was extended only
+for wide numerators with a 32-bit power-of-two divisor, using shifts and masks
+instead of general 64-bit division. The exact same-bundle candidate/control
+pairs passed E1L1, changing 640x400 output, `input: ready`, Enter/W, audio,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. Long runs ended at candidate/control 731/595 frames and,
+in reverse order, 895/798. After normalizing for first-frame time, warm
+throughput was approximately 39.1/39.4 FPS and 38.7/37.8 FPS respectively;
+the result is neutral within browser/host variance and was not promoted.
+
+The specialization was removed and the canonical bundle rebuilt from the
+verified 32/32-only UDIV32 implementation. The canonical smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-pow2-reject-canonical-20260906`
+reached E1L1, changing 640x400 frames, `input: ready`, keyboard events, and
+audio at 22050Hz/2ch without runtime/JIT fatal errors; it ended at 392 frames
+with first frame at 14.7s. Canonical hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`81c88318a982c62a4c0903a9c237fb815e07c1a94d8bc9fe119302a0fad2889b`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Preserved untracked build/cache artifacts remain; no sibling checkout was
+modified.
+
 ## 2026-09-06 15:12 IDT: dynamic divide-wrapper trace is startup-only
 
 Observation: a live dynamic trace was run against
