@@ -1,5 +1,21 @@
 # Current browser checkpoint
 
+## 2026-09-06 17:56 IDT: generated-UDIV counter probe inconclusive
+
+Observation: an opt-in `WASM_TRACE_UDIV32_STATS=1` build was run at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_UDIV32_STATS=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-stats-20260906`.
+It reached E1L1, rendered changing non-black 640x400 WebGL frames, reported
+`input: ready`, accepted Enter/W, and emitted no `RuntimeError`, `JITBAD`,
+`JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`. The counter was attached to the
+exact dynamic-entry probe, but the measured `0x00801561` interior misses occur
+before that probe, so no useful operand distribution was emitted and no new
+division specialization is justified.
+
+The temporary diagnostic was removed and the canonical bundle rebuilt. The
+WASM hash is `9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`;
+the promoted TLS-wrapper implementation remains active. Preserved untracked
+build/cache/platform artifacts remain, and no sibling checkout was modified.
+
 ## 2026-09-06 17:46 IDT: promote cached two-level TLS wrapper fast path
 
 Candidate observation: the generated SDL TLS wrapper at `0x00805b90` was
