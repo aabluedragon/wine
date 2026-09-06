@@ -333,6 +333,28 @@ data is
 audio worklet is
 `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
 
+## 2026-09-06 16:50 IDT: SSE helper forced-inline candidate rejected
+
+Observation: the generated SSE renderer repeatedly calls the small scalar XMM
+helpers `jit_xmm_load`, `jit_xmm_store`, `jit_xmm_binss`, and
+`jit_xmm_cvtsi2ss`. A candidate forced those four helpers inline, preserving
+the existing block chaining and correctness behavior. Candidate WASM hash was
+`7b4f664766e0fa050560dff0f6b04961e97b4abbf0810f193aec7bee6f7e1a21` and it
+was tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=xmm-inline-candidate-20260906`.
+It reached E1L1, rendered, accepted input, and produced no runtime/JIT fatal
+errors, but warm throughput collapsed to roughly 10--33 FPS / 10--22 MIPS,
+versus the canonical run's roughly 40--59 FPS / 22--29 MIPS in the same
+window. The candidate was rejected and the source was restored.
+
+The canonical bundle was rebuilt and smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-xmm-inline-reject-canonical-20260906`.
+It reached E1L1, rendered changing frames, accepted synthetic W input, and
+emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. Canonical JS/WASM
+hashes are
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d` and
+`4638fa1249f5c803845a102432224f8b1a072bacc8ce6ff2cec8c52f7d3b9519`.
+
 Hypothesis: this removes repeated dispatch overhead from the terminal
 initialized branch while avoiding the correctness risk of implementing the
 stateful initializer itself. The paired samples favor it, though browser host
