@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-06 19:03 IDT: post-stackret canonical smoke
+
+The rebuilt canonical URL
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=canonical-post-stackret-reject-20260906`
+returned changing non-black 640x400 frames, reached E1L1, reported
+`input: ready`, accepted Enter/W, and reached 75.6 FPS in the short warm
+window. No `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`
+appeared. Canonical WASM remains
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`.
+
+## 2026-09-06 19:01 IDT: stack-continuation UDIV candidates rejected
+
+The miss trace showed the warm helper returns to `0x0032xxxx`, so two gated
+whole-helper candidates were tested against the canonical rollback: a generic
+unsigned 64/32 path at
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_UDIV32_STACKRET=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-stackret-candidate-20260906`,
+and the same path with reciprocal multiply for divisor `10,000,000` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_DYNAMIC_UDIV32_STACKRET=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-stackret-reciprocal-candidate-20260906`.
+Both passed E1L1, changing 640x400 output, input, and the no-fatal/JIT error
+gate. The generic candidate was slower in the first pair (1041 versus 1227
+frames); the reciprocal candidate was substantially slower (768 versus 914)
+and reduced MIPS. Both were removed; the unusual stack continuation is not a
+safe or profitable native boundary.
+
+The canonical bundle was rebuilt from the promoted TLS-wrapper source and is
+back to WASM
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`.
+Preserved untracked build/cache/platform artifacts remain; no sibling checkout
+was modified.
+
 ## 2026-09-06 18:37 IDT: post-rejection canonical smoke
 
 The restored canonical URL
