@@ -258,6 +258,15 @@ static void prof_sample( uint32_t eip )
     }
     g_prof_dropped++;   /* table pressure: drop rather than evict */
 }
+static void prof_jit_advance( uint64_t n, uint32_t eip )
+{
+    static uint32_t lcg = 12345;
+    if (!g_prof_on) return;
+    if ((uint64_t)g_prof_countdown > n) { g_prof_countdown -= (int)n; return; }
+    lcg = lcg * 1664525u + 1013904223u;
+    g_prof_countdown = 40000 + (int)(((uint64_t)(lcg >> 16) * 50000u) >> 16);
+    prof_sample( eip );
+}
 /* Identify which PE module an address belongs to: scan down for the MZ/PE
  * header (modules are 64K-aligned) and read the export directory's name.  Used
  * only by the profiler dump, so cost does not matter. */
@@ -7659,6 +7668,7 @@ static void run( struct x86cpu *c )
                         fi = fp_hot_gen_idx[nxt];
                     }
                     g_total_insns += fd; g_jit_insns += fd; g_jit_blocks += fb;
+                    prof_jit_advance( fd, c->eip );
                     continue;
                 }
             }
@@ -7725,6 +7735,7 @@ static void run( struct x86cpu *c )
                     idx = nxt;
                 }
                 g_total_insns += jd; g_jit_insns += jd; g_jit_blocks += jb;
+                prof_jit_advance( jd, c->eip );
                 continue;
             }
 #if defined(WEBWINE_GENBLOCKS) && defined(WEBWINE_MSVCRT_AOT)
@@ -7754,6 +7765,7 @@ static void run( struct x86cpu *c )
                         mi = nxt;
                     }
                     g_total_insns += md; g_jit_insns += md; g_jit_blocks += mb;
+                    prof_jit_advance( md, c->eip );
                     continue;
                 }
             }
@@ -7780,6 +7792,7 @@ static void run( struct x86cpu *c )
                         gi = gdi32_gen_idx[gdi32_gen_lookup( ne - (uint32_t)gdi32_slide )];
                     }
                     g_total_insns += gd; g_jit_insns += gd; g_jit_blocks += gb;
+                    prof_jit_advance( gd, c->eip );
                     continue;
                 }
             }

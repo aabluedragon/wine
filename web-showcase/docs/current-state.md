@@ -277,6 +277,34 @@ audio worklet
 Port 8799 returned HTTP 200 with COOP/COEP headers. Preserved untracked
 build/cache/platform artifacts remain; no sibling checkout was modified.
 
+## 2026-09-06 16:07 IDT: JIT-aware profiler repaired and canonical smoke passed
+
+Observation: `WASM_PROF=1` previously sampled only interpreter-loop
+housekeeping, so a mostly chained-JIT run could report `PROF TOTAL 0`. The
+profiler now advances its countdown by translated instruction counts on every
+JIT chain path (main executable, floating-point, MSVCRT, and GDI32), while
+remaining inactive in normal runs. A diagnostic run at
+`http://localhost:8799/?WASM_TPUT=1&WASM_PROF=1&WW_ARGS=%2Fv1,%2Fl1&build=warm-prof-jit-aware-20260906`
+reported `PROF TOTAL 6736 dropped 0`, reached E1L1, rendered changing
+640x400 frames, and reported `input: ready` with audio at 22050Hz/2ch. Its
+warm samples spread across renderer/game addresses; no single new safe
+standalone hook was promoted.
+
+The clean canonical bundle was then smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=jit-prof-clean-canonical-20260906`.
+It reached E1L1, rendered changing non-black 640x400 frames, accepted
+synthetic Enter/W input (`wasm_input: SDL key down/up`), enabled audio at
+22050Hz/2ch, and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or
+`FATAL`. The canonical artifacts are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`4638fa1249f5c803845a102432224f8b1a072bacc8ce6ff2cec8c52f7d3b9519`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The source tree remains dirty only with this intended profiler change plus
+pre-existing build/cache artifacts; no sibling checkout was modified.
+
 Hypothesis: this removes repeated dispatch overhead from the terminal
 initialized branch while avoiding the correctness risk of implementing the
 stateful initializer itself. The paired samples favor it, though browser host
