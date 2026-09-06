@@ -1,5 +1,28 @@
 # Current browser checkpoint
 
+## 2026-09-06 19:56 IDT: generated-arena dynamic-dispatch prefilter rejected
+
+Hypothesis: the warm profile's `00800000` generated-code share might include
+the cost of calling the broad dynamic matcher on ordinary instructions. An
+opt-in `WASM_DYNAMIC_PREFILTER=1` byte-shape filter was tested against the same
+bundle, with every recognized helper shape delegated to the existing matcher
+and all other instructions falling directly through to the interpreter.
+
+Both runs reached E1L1, rendered changing non-black 640x400 frames, accepted
+Enter/W, and produced no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. The candidate ended at 554 frames versus 601 for the
+same-bundle control and had a later first frame (14.5s versus 10.1s). The
+additional byte probes cost more than the avoided matcher calls, so the
+prefilter was removed and is not published.
+
+The canonical artifacts were restored: JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`e501d35d25f1bc7bd705834919c7d8d52a208e668b00ff0f5062bbbdb982a9af`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+No sibling checkout was modified.
+
 ## 2026-09-06 19:46 IDT: exact drawpoly FP continuation candidate rejected
 
 Hypothesis: the frame profile repeatedly showed interior x87/SSE entries at
