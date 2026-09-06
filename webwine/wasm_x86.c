@@ -6920,6 +6920,28 @@ static int jit_step1( struct x86cpu *c, uint32_t at, uint32_t next )
     return c->eip == next && c->running;
 }
 
+/* The three-instruction x87 continuation immediately after the translated
+ * drawpoly block.  The byte guard below keeps this exact-executable shortcut
+ * safe if the bundled game image ever changes. */
+static int fp_extra_55b8fc( struct x86cpu *c )
+{
+    fp_push( c, rdf64( 19346728u + (uint32_t)nd_slide ) );
+    wrf64( c->regs[EBP] - 0x228u, fp_get( c, 0 ) );
+    fp_pop( c );
+    c->eip = 5618047u + (uint32_t)nd_slide; /* 0x0055b97f */
+    return 1;
+}
+
+static int fp_extra_55b8fc_ok( void )
+{
+    uint32_t b = 0x0055b8fcu + (uint32_t)nd_slide;
+    return rd8(b + 0) == 0xdd && rd8(b + 1) == 0x05 &&
+           rd32(b + 2) == 0x01273528u + (uint32_t)nd_slide &&
+           rd8(b + 6) == 0xdd && rd8(b + 7) == 0x9d &&
+           rd32(b + 8) == 0xfffffdd8u && rd8(b + 12) == 0xeb &&
+           b + 14u + (int8_t)rd8(b + 13) == 0x0055b97fu + (uint32_t)nd_slide;
+}
+
 #include "gen_blocks.c"
 #ifdef WEBWINE_GENBLOCKS
 #include "gdi32_gen_blocks.c"
@@ -7701,6 +7723,28 @@ static void run( struct x86cpu *c )
 #if defined(WEBWINE_FP_HOT)
             if (fp_hot_jit)
             {
+                static int fp_extra_on = -1;
+                if (fp_extra_on < 0)
+                {
+                    fp_extra_on = getenv( "WASM_NO_FP_EXTRA_55B8" ) ? 0 : 1;
+                    if (fp_extra_on && !fp_extra_55b8fc_ok())
+                    {
+                        uint32_t b = 0x0055b8fcu + (uint32_t)nd_slide;
+                        fprintf( stderr, "wasm_x86: drawpoly FP continuation differs at %08x:", b );
+                        for (int k = 0; k < 16; k++) fprintf( stderr, " %02x", rd8(b + (uint32_t)k) );
+                        fprintf( stderr, " - left interpreted\n" );
+                        fp_extra_on = 0;
+                    }
+                }
+                if (fp_extra_on && start == 0x0055b8fcu + (uint32_t)nd_slide)
+                {
+                    if (fp_extra_55b8fc( c ))
+                    {
+                        g_total_insns += 3; g_jit_insns += 3; g_jit_blocks++;
+                        prof_jit_advance( 3, c->eip );
+                        continue;
+                    }
+                }
                 uint32_t fva = start - (uint32_t)nd_slide;
                 int fs = (fva >= fp_hot_gen_lo && fva < fp_hot_gen_hi)
                        ? fp_hot_gen_lookup( fva ) : -1;

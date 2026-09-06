@@ -1,5 +1,31 @@
 # Current browser checkpoint
 
+## 2026-09-06 20:47 IDT: promote guarded drawpoly FP continuation
+
+Observation: the exact `0x0055b8fc` drawpoly continuation is now translated
+directly: `fld qword`, `fstp qword [ebp-0x228]`, and the verified short-jump
+continuation. The runtime guard checks the relocated opcode bytes and branch
+target before enabling it; `WASM_NO_FP_EXTRA_55B8=1` remains an opt-out.
+
+The final smoke used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=fp-extra-fixed-20260906`
+with Enter and held W. It reached `E1L1: HOLLYWOOD HOLOCAUST`, rendered
+changing non-black 640x400 frames, reported `input: ready`, and logged both
+`SDL key down vk=0xd` and `SDL key down vk=0x57`. Late `FPSSAMPLE` values
+reached 83.0 FPS. The old `drawpoly FP continuation differs` rejection did not
+appear, and the run had no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED` output.
+
+Published bundle hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`c937b87b0d8342d1ae1892ebf1d748ea91b559ebadcc7a8848073cabdd0875de`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The repository still contains intentional untracked build/cache/platform
+artifacts; only Wine-repository source/docs were changed and no sibling
+checkout was modified.
+
 ## 2026-09-06 20:15 IDT: division-estimate UDIV candidate rejected
 
 Candidate observation: the warm trace showed the generated helper receiving
