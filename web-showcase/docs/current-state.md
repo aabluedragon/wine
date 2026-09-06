@@ -1,5 +1,23 @@
 # Current browser checkpoint
 
+## 2026-09-06 15:12 IDT: dynamic divide-wrapper trace is startup-only
+
+Observation: a live dynamic trace was run against
+`http://localhost:8799/?WASM_TPUT=1&WASM_TRACE_DYNAMIC=1&WW_ARGS=%2Fv1,%2Fl1&build=trace-div-wrapper-20260906`.
+It reached changing 640x400 frames, reported `input: ready`, accepted
+Enter/W, and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. The trace showed the existing `0x00805b90` TLS-wrapper
+interior and `0x0080a800` target during startup, while the warm frame samples
+returned to the normal generated-division/renderer workload. Trace overhead
+reduced the late sample to roughly 14--25 FPS, so it is not a performance
+claim.
+
+Decision: do not add a native `0x008066f0` wrapper hook based on this trace;
+the wrapper is not a demonstrated steady-state frame bottleneck. The
+canonical artifacts and source remain unchanged from the verified UDIV32
+bundle. Preserved untracked build/cache artifacts remain; no sibling checkout
+was modified.
+
 ## 2026-09-06 14:49 IDT: resume profile confirms no safe next hook
 
 Observation: the promoted UDIV32 bundle was profiled end-to-end at
