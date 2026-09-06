@@ -29,6 +29,35 @@ audio worklet
 Port 8799 is serving from `build-wasm4/ww/web` with COOP/COEP. Preserved
 untracked build/cache artifacts remain; no sibling checkout was modified.
 
+## 2026-09-06 15:10 IDT: reject wider generated division fast path
+
+Candidate observation: the guarded generated helper at `0x00801561` was
+expanded from the verified 32/32 case to a native 64-bit numerator divided by
+a 32-bit denominator, retaining the same prologue, executable-return, stack,
+and remainder-pointer checks. Candidate and rollback control both reached
+E1L1, rendered changing 640x400 frames, reported `input: ready`, accepted
+Enter/W, and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. Same-artifact pairs ended at candidate/control 528/435 and
+140/285 frames; late samples were 83.8/69.5 FPS, then 31.8/56.0 FPS in
+reverse order. Aggregate frames were 668 candidate versus 720 control, so
+the wider path was rejected.
+
+The candidate source was removed and the canonical bundle was rebuilt from
+the promoted 32/32-only implementation. The canonical smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-wide-reject-canonical-20260906b`
+reached E1L1, changing 640x400 output, `input: ready`, keyboard events, and
+audio at 22050Hz/2ch, with no runtime/JIT fatal errors. Startup was variable;
+the first frame arrived at 23.0s and the run ended at 395 frames. Canonical
+hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`81c88318a982c62a4c0903a9c237fb815e07c1a94d8bc9fe119302a0fad2889b`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The source is clean apart from preserved untracked build/cache artifacts; no
+sibling checkout was modified.
+
 ## 2026-09-06 23:15 IDT: promote generated 32-bit division fast path
 
 Observation: the generated helper at `0x00801561` was given a narrow native
