@@ -1,5 +1,33 @@
 # Current browser checkpoint
 
+## 2026-09-06 19:22 IDT: promote generated-UDIV interior dispatch prefilter
+
+Observation: the verified generated UDIV helper at `0x00801561` has one
+dynamic entry and a stable interior range `0x00801560..0x008015b5`; no native
+dynamic matcher can succeed at those interior addresses. A guarded prefilter
+now skips only that interior range while preserving the entry hook and first
+checking the exact helper prologue. It is enabled by default with rollback
+switch `WASM_NO_DYNAMIC_UDIV_PREFILTER=1`.
+
+Two same-bundle pairs passed the full browser gate. The first candidate/control
+pair used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=udiv-prefilter-promoted-canonical-20260906`
+versus rollback `WASM_NO_DYNAMIC_UDIV_PREFILTER=1`; it was host-noisy but
+correctness-clean. The reversed pair ended at 1869 candidate versus 1881
+rollback frames, with normalized warm throughput about 52.4 versus 50.6 FPS.
+Both reached E1L1, changing non-black 640x400 frames, `input: ready`, and
+accepted Enter/W with no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`.
+
+Canonical artifacts are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`e501d35d25f1bc7bd705834919c7d8d52a208e668b00ff0f5062bbbdb982a9af`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Preserved untracked build/cache/platform artifacts remain; no sibling checkout
+was modified.
+
 ## 2026-09-06 19:03 IDT: post-stackret canonical smoke
 
 The rebuilt canonical URL

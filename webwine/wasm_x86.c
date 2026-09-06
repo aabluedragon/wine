@@ -7614,8 +7614,32 @@ static void run( struct x86cpu *c )
          * CON arena.  Avoid calling the miss-only helper for static EXE/DLL
          * instructions; this branch is cheaper than a C call on every guest
          * instruction while preserving the helper's own safety checks. */
-        if (c->eip >= 0x00800000u && c->eip < 0x01000000u &&
-            nat_dynamic_jmp( c )) continue;
+        {
+            static int udiv_miss_prefilter = -1;
+            int skip_dynamic = 0;
+            if (udiv_miss_prefilter < 0)
+            {
+                static const uint8_t udiv_head[] = {
+                    0x57,0x56,0x53,0x83,0xec,0x2c,0x8b,0x5c,0x24,0x44,
+                    0x8b,0x4c,0x24,0x40,0x8b,0x44,0x24,0x4c,0x8b,0x74,
+                    0x24
+                };
+                udiv_miss_prefilter = !getenv( "WASM_NO_DYNAMIC_UDIV_PREFILTER" );
+                if (udiv_miss_prefilter)
+                    for (unsigned i = 0; i < sizeof(udiv_head); i++)
+                        if (rd8( 0x00801561u + i ) != udiv_head[i])
+                        { udiv_miss_prefilter = 0; break; }
+            }
+            /* The generated division helper has one dynamic entry at
+             * 0x00801561; its interior is stable but cannot match any of the
+             * miss-only native entry points.  Avoid re-running the full
+             * dynamic matcher for those interior instructions. */
+            if (udiv_miss_prefilter && c->eip >= 0x00801560u &&
+                c->eip < 0x008015b6u && c->eip != 0x00801561u)
+                skip_dynamic = 1;
+            if (!skip_dynamic && c->eip >= 0x00800000u && c->eip < 0x01000000u &&
+                nat_dynamic_jmp( c )) continue;
+        }
         if (g_wgl_swap_addr && start == g_wgl_swap_addr && nat_wglswap( c )) continue;
         /* Internal entries are the four instruction boundaries inside the
          * verified loop.  Match the small contiguous range directly: their
