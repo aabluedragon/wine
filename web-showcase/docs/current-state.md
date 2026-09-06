@@ -1,5 +1,32 @@
 # Current browser checkpoint
 
+## 2026-09-06 19:46 IDT: exact drawpoly FP continuation candidate rejected
+
+Hypothesis: the frame profile repeatedly showed interior x87/SSE entries at
+`0x0055b8fc`/`0x0055b908`, immediately after the shipped FP table's
+`0x0055b882-0x0055b8fc` coverage. The current translator can now translate the
+three-instruction `fld qword` / `fstp qword` continuation at `0x0055b8fc`.
+
+An expanded 394-block candidate was generated and passed a correctness smoke
+when compiled with `XOPT=-O0`: it logged `floating-point hot JIT 394`, reached
+`E1L1: HOLLYWOOD HOLOCAUST`, rendered a real non-black 640x400 frame, and
+accepted Enter/W. The normal optimized (`-O3`, and a reduced-inlining `-O3`)
+build could not complete the generated translation unit, so the candidate has
+no valid optimized FPS comparison and was rejected. It was not served as a
+published artifact.
+
+The canonical files were restored and re-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=post-fp394-restore-canonical-20260906`.
+The run logged `floating-point hot JIT 173`, reached E1L1, produced changing
+non-black 640x400 output, and passed the input gate; no `RuntimeError`,
+`JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED` appeared. Canonical hashes
+are JS `ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`,
+WASM `e501d35d25f1bc7bd705834919c7d8d52a208e668b00ff0f5062bbbdb982a9af`,
+data `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`,
+index `455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`,
+and audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+No sibling checkout was modified.
+
 ## 2026-09-06 19:28 IDT: post-prefilter hotspot validation and memset rollback A/B
 
 Observation: the post-prefilter 30-second profile at
