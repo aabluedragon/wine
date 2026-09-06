@@ -1,5 +1,34 @@
 # Current browser checkpoint
 
+## 2026-09-06 14:49 IDT: resume profile confirms no safe next hook
+
+Observation: the promoted UDIV32 bundle was profiled end-to-end at
+`http://localhost:8799/?WASM_TPUT=1&WASM_MODULES=1&WASM_IPAGE=1&WASM_IPAGE_FRAME=1&WASM_IPAGE_DETAIL=1&WW_ARGS=%2Fv1,%2Fl1&build=resume-profile-20260906`.
+The header-aware `serve.py` server was used, so SharedArrayBuffer and the JIT
+were enabled. The run reached changing 640x400 frames, reported `input: ready`,
+and emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED`. The late diagnostic sample reported `fps=72.6`, but the
+diagnostic flags add overhead and this is not a standalone FPS claim.
+
+The startup miss profile again showed the known `0x3ee39b80` MSVCRT loop and
+the runtime-generated `0x3f923932--0x3f92397f` NTDLL cluster. The latter has
+already failed the isolated relocation-hook experiment and has no stable
+owning function, so no new native hook is justified by this run. The generated
+UDIV32 interior cluster remains measurable after the promoted entry guard, but
+the existing narrow path is the verified improvement; broader division
+shortcuts were slower or unsafe.
+
+Decision: publish no source change from this profile. The canonical artifacts
+remain JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`81c88318a982c62a4c0903a9c237fb815e07c1a94d8bc9fe119302a0fad2889b`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+Port 8799 is serving from `build-wasm4/ww/web` with COOP/COEP. Preserved
+untracked build/cache artifacts remain; no sibling checkout was modified.
+
 ## 2026-09-06 23:15 IDT: promote generated 32-bit division fast path
 
 Observation: the generated helper at `0x00801561` was given a narrow native
