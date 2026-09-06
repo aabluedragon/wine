@@ -3361,6 +3361,25 @@ static int nat_udivmoddi4( struct x86cpu *c )
     return 1;
 }
 
+/* The application image also contains GCC's same five-word cdecl helper in
+ * its generated arena.  It is byte-for-byte the standard __udivmoddi4 ABI;
+ * arm it separately from the Wine/MSVCRT export so the generated address can
+ * be disabled independently without changing the established DLL hook. */
+#define ND_APP_UDIVMODDI4 0x801560u
+static void nat_arm_app_udivmoddi4( void )
+{
+    uint32_t b = ND_APP_UDIVMODDI4 + (uint32_t)nd_slide;
+    static const uint8_t head[] = {
+        0x55,0x57,0x56,0x53,0x83,0xec,0x2c,
+        0x8b,0x5c,0x24,0x44,0x8b,0x4c,0x24,0x40,
+        0x8b,0x44,0x24,0x4c,0x8b,0x74,0x24,0x48
+    };
+    for (unsigned i = 0; i < sizeof(head); i++)
+        if (rd8( b + i ) != head[i])
+        { fprintf( stderr, "wasm_x86: application __udivmoddi4 differs at %08x - left interpreted\n", b ); return; }
+    nat_register( b, NAT_UDIVMODDI4, "application __udivmoddi4" );
+}
+
 /* MSVCRT's tolower/toupper exports have a locale-dependent slow path, but
  * their hot path is an exact unsigned-ASCII range check.  Only take that
  * path when the guest CRT's locale pointer is initialized (the same test the
@@ -7305,6 +7324,7 @@ static void run( struct x86cpu *c )
                               nat_arm_surfspan();
                           g_ld_verify = getenv( "WASM_LIBDIV_VERIFY" ) ? 1 : 0;
                           if (browser_fast_libdiv() && !getenv( "WASM_NO_LIBDIV" )) nat_arm_libdivide();
+                          if (!getenv( "WASM_NO_APP_UDIV_NATIVE" )) nat_arm_app_udivmoddi4();
                           if (!getenv( "WASM_NO_MOUSE" )) nat_arm_mouse();
                           fprintf( stderr, "wasm_x86: exe base=%08x slide=%d\n", ib, nd_slide ); }
             }

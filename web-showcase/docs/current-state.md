@@ -1,5 +1,44 @@
 # Current browser checkpoint
 
+## 2026-09-06 21:22 IDT: promote guarded generated-arena UDIV hook
+
+Observation: the warm profile repeatedly included the generated-arena GCC
+`__udivmoddi4` at `0x00801560`. Its prologue matches the already verified
+Wine/MSVCRT five-word cdecl helper ABI, so the existing exact C implementation
+can service this application-local copy. The new registration is enabled by
+default only after a byte-for-byte prologue guard; `WASM_NO_APP_UDIV_NATIVE=1`
+is the rollback switch. The earlier matrix4f native candidate was removed:
+although it eliminated the `0x00610000` profile bucket, matched 35-second
+runs did not show a repeatable FPS gain.
+
+The reverse-order same-bundle A/B used
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=app-udiv-native-control-reverse-20260906`
+followed by
+`http://localhost:8799/?WASM_TPUT=1&WASM_APP_UDIV_NATIVE=1&WW_ARGS=%2Fv1,%2Fl1&build=app-udiv-native-candidate-reverse-20260906`.
+The control reached E1L1, changing non-black 640x400 frames, and its late
+samples were 73.6–84.3 FPS. The candidate logged
+`native application __udivmoddi4 @ 00801560`, reached E1L1 with the same
+canvas/input result, and its late samples were 89.4–96.8 FPS. Both accepted
+Enter/W and had no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or
+`UNIMPLEMENTED` output. This is a host-noisy A/B, but it agrees with the
+earlier candidate-first run and is sufficient to publish the guarded change.
+
+The repository still contains intentional untracked build/cache/platform
+artifacts; only Wine-repository source/docs are being staged and no sibling
+checkout was modified.
+
+The rebuilt canonical bundle was smoke-tested at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=app-udiv-native-final-20260906`.
+It logged `native application __udivmoddi4 @ 00801560`, reached E1L1,
+accepted Enter/W, and produced changing non-black 640x400 frames; final warm
+samples reached 101.6–106.8 FPS. No `RuntimeError`, `JITBAD`, `JITBADEIP`,
+`FATAL`, or `UNIMPLEMENTED` appeared. Final hashes are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`b6918836ebe3495424ef53d3a49c2a5044d558592a91ad724d65f7c064251322`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+
 ## 2026-09-06 20:47 IDT: promote guarded drawpoly FP continuation
 
 Observation: the exact `0x0055b8fc` drawpoly continuation is now translated
