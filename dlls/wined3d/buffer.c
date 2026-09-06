@@ -1173,12 +1173,22 @@ static BOOL wined3d_buffer_vk_create_buffer_object(struct wined3d_buffer_vk *buf
 {
     struct wined3d_resource *resource = &buffer_vk->b.resource;
     struct wined3d_bo_vk *bo_vk;
+    uint32_t bind_flags = resource->bind_flags;
+
+    /* MoltenVK does not expose VK_EXT_transform_feedback.  A stream-output
+     * buffer is still a perfectly usable storage/vertex buffer in that case;
+     * only the transform-feedback operations themselves are unavailable.
+     * Do not make otherwise valid buffer allocation fail for clients such as
+     * ANGLE which create these buffers as part of their normal D3D11 setup.
+     */
+    if (!context_vk->vk_info->supported[WINED3D_VK_EXT_TRANSFORM_FEEDBACK])
+        bind_flags &= ~WINED3D_BIND_STREAM_OUTPUT;
 
     if (!(bo_vk = malloc(sizeof(*bo_vk))))
         return FALSE;
 
     if (!(wined3d_context_vk_create_bo(context_vk, resource->size,
-            vk_buffer_usage_from_bind_flags(resource->bind_flags),
+            vk_buffer_usage_from_bind_flags(bind_flags),
             vk_memory_type_from_access_flags(resource->access, resource->usage), bo_vk)))
     {
         WARN("Failed to create Vulkan buffer.\n");
@@ -1267,17 +1277,8 @@ HRESULT wined3d_buffer_vk_init(struct wined3d_buffer_vk *buffer_vk, struct wined
         const struct wined3d_buffer_desc *desc, const struct wined3d_sub_resource_data *data,
         void *parent, const struct wined3d_parent_ops *parent_ops)
 {
-    const struct wined3d_vk_info *vk_info = &wined3d_adapter_vk(device->adapter)->vk_info;
-
     TRACE("buffer_vk %p, device %p, desc %p, data %p, parent %p, parent_ops %p.\n",
             buffer_vk, device, desc, data, parent, parent_ops);
-
-    if ((desc->bind_flags & WINED3D_BIND_STREAM_OUTPUT)
-            && !vk_info->supported[WINED3D_VK_EXT_TRANSFORM_FEEDBACK])
-    {
-        WARN("The Vulkan implementation does not support transform feedback.\n");
-        return WINED3DERR_INVALIDCALL;
-    }
 
     if (desc->access & WINED3D_RESOURCE_ACCESS_GPU)
         buffer_vk->b.flags |= WINED3D_BUFFER_USE_BO;

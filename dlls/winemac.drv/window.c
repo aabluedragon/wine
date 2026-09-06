@@ -1189,12 +1189,6 @@ BOOL macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface 
             return FALSE;
         }
 
-        if (root != hwnd)
-        {
-            FIXME("Cross-process child window Metal swapchains are not implemented\n");
-            return FALSE;
-        }
-
         if (!NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI))) return FALSE;
         surface->metal_swapchain = macdrv_create_offscreen_swapchain(hwnd, cgrect_from_rect(rect));
     }
@@ -1569,7 +1563,24 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if ((data = get_win_data(hwnd)))
         {
             TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
-            if (data->cocoa_window) macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
+            if (data->cocoa_window)
+                macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
+            else
+            {
+                HWND root = NtUserGetAncestor(hwnd, GA_ROOT);
+                struct macdrv_win_data *root_data;
+
+                /* A cross-process child HWND may not have a Cocoa window of
+                 * its own.  Its rendered layer still needs to be hosted by
+                 * the root Wine window, otherwise Vulkan presents into an
+                 * unattached CAContext and the visible window stays black. */
+                if (root && root != hwnd && (root_data = get_win_data(root)))
+                {
+                    if (root_data->cocoa_window)
+                        macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp);
+                    release_win_data(root_data);
+                }
+            }
             release_win_data(data);
         }
         return 0;
