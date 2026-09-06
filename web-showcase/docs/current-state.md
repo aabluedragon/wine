@@ -327,7 +327,11 @@ it reached the game, rendered changing frames, accepted Enter/W input, and
 emitted no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. Canonical JS/WASM
 hashes are `ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`
 and `4638fa1249f5c803845a102432224f8b1a072bacc8ce6ff2cec8c52f7d3b9519`;
-data, index, and audio hashes remain unchanged from the preceding entry.
+data is
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index is
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet is
+`a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
 
 Hypothesis: this removes repeated dispatch overhead from the terminal
 initialized branch while avoiding the correctness risk of implementing the
