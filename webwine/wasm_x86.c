@@ -4729,6 +4729,7 @@ static int nat_pthread_getspecific( struct x86cpu *c )
 static int nat_dynamic_tls_wrapper( struct x86cpu *c )
 {
     static int checked, skeleton_ok;
+    static int v2_enabled = -1;
     uint32_t b = c->eip;
     uint32_t sp = c->regs[ESP], frame = rd32( sp + 4u ), requested;
     uint32_t teb = c->fs_base, tlskey, obj = 0, count, value, lock;
@@ -4758,6 +4759,8 @@ static int nat_dynamic_tls_wrapper( struct x86cpu *c )
                  skeleton_ok ? "native path armed" : "skeleton differs; interpreted", b );
     }
     if (!skeleton_ok) return 0;
+    if (v2_enabled < 0)
+        v2_enabled = !getenv( "WASM_NO_DYNAMIC_TLSWRAP_V2" );
 
     if (!frame || frame >= NAT_GUEST_END - 0x0cu) return 0;
     requested = rd32( frame + 8u );
@@ -4775,6 +4778,34 @@ static int nat_dynamic_tls_wrapper( struct x86cpu *c )
     if (!obj || obj >= NAT_GUEST_END - 0x3cu) return 0;
     lock = __atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST );
     if (lock != 0xffffffffu) return 0;
+
+    /* The v2 fast path mirrors the guest's two-level operation: pthread_getspecific
+     * first resolves the engine's private key to a per-thread slot array, then
+     * the wrapper indexes that array by its one-based requested slot.  Cache the
+     * rollback decision so the hot call path has no getenv cost. */
+    if (v2_enabled)
+    {
+        uint32_t key = rd32( 0x01acd098u + (uint32_t)nd_slide );
+        uint32_t pcount = rd32( obj + 0x28u ), flags = rd32( obj + 0x30u );
+        uint32_t values = rd32( obj + 0x2cu ), specific = 0;
+        if (key < pcount && flags && values && key < NAT_GUEST_END - flags &&
+            values < NAT_GUEST_END - 4u && key <= (NAT_GUEST_END - values) / 4u &&
+            rd8( flags + key ) != 0)
+            specific = rd32( values + key * 4u );
+        if (__atomic_load_n( (uint32_t *)(uintptr_t)(obj + 0x38u), __ATOMIC_SEQ_CST ) != lock)
+            return 0;
+        if (!(rd8( obj + 0x20u ) & 0x0cu) &&
+            rd32( ND_PTHREAD_CANCEL_FLAG + (uint32_t)nd_slide ))
+            return 0;
+        if (!specific || specific >= NAT_GUEST_END - 4u) return 0;
+        obj = specific;
+        count = rd32( obj );
+        if (requested >= count || requested > (NAT_GUEST_END - obj) / 4u)
+            return 0;
+        value = rd32( obj + requested * 4u );
+        if (!value) return 0;
+        return nat_ret_eax( c, sp, value );
+    }
     count = rd32( obj );
     if (requested > count || requested > (NAT_GUEST_END - obj - 4u) / 4u) return 0;
     value = rd32( obj + requested * 4u );

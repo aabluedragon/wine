@@ -1,5 +1,35 @@
 # Current browser checkpoint
 
+## 2026-09-06 17:46 IDT: promote cached two-level TLS wrapper fast path
+
+Candidate observation: the generated SDL TLS wrapper at `0x00805b90` was
+extended to mirror its actual two-level operation: resolve the engine's private
+pthread key to the per-thread slot array, then index that array. The environment
+decision is cached once per process. The matched candidate used
+`WASM_TLS_WRAPPER_V2=1` at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TLS_WRAPPER_V2=1&WW_ARGS=%2Fv1,%2Fl1&build=tls-v2-cached-candidate-20260906`;
+the control used the same rebuilt bundle without the flag. A second pair was
+run in reverse order. Aggregate frame counts were candidate/control 4295/3876
+(about 10.8% higher for the candidate); both orders reached E1L1, changing
+non-black 640x400 WebGL frames, `input: ready`, synthetic Enter/W input, and
+had no `RuntimeError`, `JITBAD`, `JITBADEIP`, `FATAL`, or `UNIMPLEMENTED`.
+
+The path is now enabled by default with rollback switch
+`WASM_NO_DYNAMIC_TLSWRAP_V2=1`. The canonical smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=tls-v2-promoted-canonical-20260906`
+reported `dynamic TLS wrapper native path armed @ 00805b90`, reached E1L1,
+reported `input: ready`, accepted Enter/W, and produced late samples of about
+92--108 FPS with changing frames and no runtime/JIT fatal errors. Canonical
+artifacts are JS
+`ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`9d0ebc88102c3afde8f69754868d8828c6672e1e916b710ef044f09a65ad3586`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The implementation source is the only tracked working-tree change before
+commit; preserved untracked build/cache/platform artifacts remain, and no
+sibling checkout was modified.
+
 ## 2026-09-06 15:38 IDT: warm instruction sampler emitted no samples
 
 Observation: the canonical bundle was run with
