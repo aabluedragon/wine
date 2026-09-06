@@ -195,6 +195,34 @@ Canonical JS/WASM/data hashes are
 `16a6275c1ee154d950dcffcc935413dd81acb5397a2a91473c3f145c48d17740`, and
 `b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`.
 No sibling checkout was modified.
+## 2026-09-06 17:29 IDT: TLS-wrapper v2 candidate rejected
+
+Candidate observation: a gated two-level native shortcut for the generated SDL
+TLS wrapper at `0x00805b90` was built and tested at
+`http://localhost:8799/?WASM_TPUT=1&WASM_TLS_WRAPPER_V2=1&WW_ARGS=%2Fv1,%2Fl1&build=tls-v2-candidate-20260906`.
+The matched control used the same rebuilt bundle without the flag at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=tls-v2-control-20260906`.
+Both runs reached E1L1, rendered changing non-black 640x400 frames through the
+WebGL path, reported `input: ready`, accepted synthetic Enter/W input, and had
+no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`. The candidate's late
+samples were approximately 93--103 FPS; control samples were approximately
+96--106 FPS. This is neutral-to-slightly-regressive rather than a measurable
+improvement, so the candidate and its TLS failure diagnostics were reverted.
+
+The canonical bundle was rebuilt afterward and is served on port 8799 with
+JS `ee344b3c9721f75425a54ed625df657430bcb85a9eb19c3c17485acfd7c3733d`, WASM
+`4638fa1249f5c803845a102432224f8b1a072bacc8ce6ff2cec8c52f7d3b9519`, data
+`b6e7c288b2cc5f9e5a83a153561d4d385f8eb073e538258ac7ebf65d947e4b63`, index
+`455e20ff86b48a6c3e880dd5558bc54c2f749845b2fee6ee7fa343407bd9bcc6`, and
+audio worklet `a294aaa599e2505e4069dbdb67de5ace0debeb5ac4ef72a721107ec74f2b1519`.
+The final smoke at
+`http://localhost:8799/?WASM_TPUT=1&WW_ARGS=%2Fv1,%2Fl1&build=canonical-final-20260906`
+returned HTTP 200 with COOP/COEP, reached E1L1, reported `input: ready`,
+accepted Enter/W, and produced changing frames (late samples 57--68 FPS in
+that short run) with no `RuntimeError`, `JITBAD`, `JITBADEIP`, or `FATAL`.
+Implementation source is clean; this documentation entry is the only tracked
+working-tree change. Preserved untracked build/cache/platform artifacts remain,
+and no sibling checkout was modified.
 
 ## 2026-09-05 22:39 IDT: reject corrected initialized-helper fast path
 
