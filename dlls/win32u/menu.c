@@ -3126,11 +3126,14 @@ static BOOL show_popup( HWND owner, HMENU hmenu, UINT id, UINT flags,
         top_popup_hmenu = hmenu;
     }
 
-    /* Expose the popup before painting it.  A hidden popup has no visible
-     * region on macOS, so painting it while hidden can leave its backing
-     * layer black until the first hover invalidation. */
+    /* Prime the popup before exposing it, then repaint after showing it.  The
+     * macOS driver can otherwise present the new window between creation and
+     * the first surface flush, leaving a black popup until hover invalidates
+     * it again. */
     NtUserSetWindowPos( menu->hWnd, HWND_TOPMOST, x, y, menu->Width, menu->Height,
-                        SWP_SHOWWINDOW | SWP_NOACTIVATE );
+                        SWP_NOACTIVATE );
+    NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
+    NtUserShowWindow( menu->hWnd, SW_SHOWNOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
     return TRUE;
 }
