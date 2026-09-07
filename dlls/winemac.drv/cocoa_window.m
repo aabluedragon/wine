@@ -741,9 +741,20 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         host.contentsScale = retina_on ? 2.0 : 1.0;
         host.frame = CGRectIsNull(frame) ? self.layer.bounds : cgrect_mac_from_win(frame);
         host.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        host.hidden = YES;
 
         [self.layer addSublayer:host];
         [_caLayerHosts setObject:host forKey:@(contextId)];
+
+        /* CALayerHost can briefly sample its remote context before CEF has
+         * committed the first frame.  Do not expose that uninitialized frame
+         * as a black popup; let the main run loop deliver the first remote
+         * transaction, then reveal the host without blocking the UI thread. */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                        dispatch_get_main_queue(), ^{
+            if ([_caLayerHosts objectForKey:@(contextId)] == host)
+                host.hidden = NO;
+        });
 
         [(WineWindow*)self.window windowDidDrawContent];
     }
