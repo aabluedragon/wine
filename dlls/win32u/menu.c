@@ -26,6 +26,7 @@
 #define OEMRESOURCE
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
+#include "win32u_private.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 
@@ -3133,8 +3134,10 @@ static BOOL show_popup( HWND owner, HMENU hmenu, UINT id, UINT flags,
     NtUserSetWindowPos( menu->hWnd, HWND_TOPMOST, x, y, menu->Width, menu->Height,
                         SWP_NOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
+    flush_window_surfaces( FALSE );
     NtUserShowWindow( menu->hWnd, SW_SHOWNOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
+    flush_window_surfaces( FALSE );
     return TRUE;
 }
 
