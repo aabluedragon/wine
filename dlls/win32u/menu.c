@@ -3126,10 +3126,13 @@ static BOOL show_popup( HWND owner, HMENU hmenu, UINT id, UINT flags,
         top_popup_hmenu = hmenu;
     }
 
-    /* Display the window */
+    /* Paint the popup before exposing it.  In particular, winemac presents a
+     * newly ordered window's backing layer immediately; showing it first can
+     * therefore expose the unpainted (black) layer for one compositor frame. */
     NtUserSetWindowPos( menu->hWnd, HWND_TOPMOST, x, y, menu->Width, menu->Height,
-                        SWP_SHOWWINDOW | SWP_NOACTIVATE );
+                        SWP_NOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_UPDATENOW | RDW_ALLCHILDREN );
+    NtUserShowWindow( menu->hWnd, SW_SHOWNOACTIVATE );
     return TRUE;
 }
 
