@@ -693,6 +693,48 @@ static BOOL addrinfo_in_list( const struct WS_addrinfo *list, const struct WS_ad
     return FALSE;
 }
 
+/* macOS commonly returns IPv6 addresses before IPv4 addresses even when the
+ * IPv6 route is not usable.  A number of Windows clients, including Steam's
+ * bootstrap browser, try the returned list serially and can therefore spend
+ * minutes waiting for an IPv6 connect timeout before trying IPv4.  Keep both
+ * families available, but make the reliable IPv4 candidate win the first
+ * connection attempt for an AF_UNSPEC lookup. */
+static void prefer_ipv4_addresses( struct addrinfo **list )
+{
+    struct addrinfo *ipv4 = NULL, *ipv4_tail = NULL, *ipv6 = NULL, *ipv6_tail = NULL, *other = NULL, *other_tail = NULL;
+    struct addrinfo *current, *next;
+
+    for (current = *list; current; current = next)
+    {
+        next = current->ai_next;
+        current->ai_next = NULL;
+
+        if (current->ai_family == AF_INET)
+        {
+            if (ipv4_tail) ipv4_tail->ai_next = current;
+            else ipv4 = current;
+            ipv4_tail = current;
+        }
+        else if (current->ai_family == AF_INET6)
+        {
+            if (ipv6_tail) ipv6_tail->ai_next = current;
+            else ipv6 = current;
+            ipv6_tail = current;
+        }
+        else
+        {
+            if (other_tail) other_tail->ai_next = current;
+            else other = current;
+            other_tail = current;
+        }
+    }
+
+    if (ipv4_tail) ipv4_tail->ai_next = ipv6 ? ipv6 : other;
+    else if (ipv6_tail) ipv6_tail->ai_next = other;
+
+    *list = ipv4 ? ipv4 : (ipv6 ? ipv6 : other);
+}
+
 static NTSTATUS unix_getaddrinfo( void *args )
 {
 #ifdef HAVE_GETADDRINFO
@@ -753,6 +795,9 @@ static NTSTATUS unix_getaddrinfo( void *args )
     ret = getaddrinfo( params->node, service, hints ? &unix_hints : NULL, &unix_info );
     if (ret)
         return addrinfo_err_from_unix( ret );
+
+    if (hints && hints->ai_family == AF_UNSPEC)
+        prefer_ipv4_addresses( &unix_info );
 
     for (src = unix_info; src != NULL; src = src->ai_next)
     {

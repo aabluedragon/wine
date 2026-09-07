@@ -1047,6 +1047,14 @@ static void free_connect_req( void *private )
 {
     struct connect_req *req = private;
 
+    /* macOS can leave a nonblocking connect pending for much longer than
+     * Windows does.  If the request timed out or was cancelled, abort the
+     * native connect before allowing the socket to be reused. */
+    if (req->iosb->status != STATUS_SUCCESS && req->sock->state == SOCK_CONNECTING)
+    {
+        shutdown( get_unix_fd( req->sock->fd ), SHUT_RDWR );
+        req->sock->state = SOCK_UNCONNECTED;
+    }
     req->sock->connect_req = NULL;
     release_object( req->async );
     release_object( req->iosb );
@@ -2811,6 +2819,8 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
         req->send_cursor = 0;
 
         async_set_completion_callback( async, free_connect_req, req );
+        if (params->synchronous)
+            async_set_timeout( async, -15 * TICKS_PER_SEC, STATUS_IO_TIMEOUT );
         sock->connect_req = req;
         queue_async( &sock->connect_q, async );
         sock_reselect( sock );
