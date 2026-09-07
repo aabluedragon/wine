@@ -406,7 +406,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     - (void) wine_setBackingSize:(const int*)newBackingSize;
 
     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
-    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId;
+    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId frame:(CGRect)frame;
     - (void) removeCALayerHostView:(CAContextID)contextId;
 
 @end
@@ -723,7 +723,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         return _metalView;
     }
 
-    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId
+    - (void) addCALayerHostViewWithContextId:(CAContextID)contextId frame:(CGRect)frame
     {
         if (!_caLayerHosts)
             _caLayerHosts = [[NSMutableDictionary alloc] init];
@@ -734,7 +734,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         [host setContextId:contextId];
         host.magnificationFilter = kCAFilterNearest;
         host.contentsScale = retina_on ? 2.0 : 1.0;
-        host.frame = self.layer.bounds;
+        host.frame = CGRectIsNull(frame) ? self.layer.bounds : cgrect_mac_from_win(frame);
         host.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
 
         [self.layer addSublayer:host];
@@ -4250,7 +4250,7 @@ void macdrv_destroy_swapchain(macdrv_metal_swapchain swapchain)
     [(id<WineMetalSwapChain>)swapchain release];
 }
 
-void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id)
+void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id, CGRect frame)
 {
 @autoreleasepool
 {
@@ -4260,7 +4260,7 @@ void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int conte
         NSView* content_view = [window contentView];
 
         if ([content_view isKindOfClass:[WineContentView class]])
-            [(WineContentView*)content_view addCALayerHostViewWithContextId:context_id];
+            [(WineContentView*)content_view addCALayerHostViewWithContextId:context_id frame:frame];
     });
 }
 }

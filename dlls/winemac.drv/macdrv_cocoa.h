@@ -533,7 +533,7 @@ extern macdrv_metal_swapchain macdrv_create_view_swapchain(macdrv_view v);
 extern macdrv_metal_swapchain macdrv_create_offscreen_swapchain(void* hwnd, CGRect bounds);
 extern macdrv_metal_layer macdrv_swapchain_get_layer(macdrv_metal_swapchain swapchain);
 extern void macdrv_destroy_swapchain(macdrv_metal_swapchain swapchain);
-extern void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id);
+extern void macdrv_window_create_ca_layer_host_view(macdrv_window w, unsigned int context_id, CGRect frame);
 extern void macdrv_window_release_ca_layer_host_view(macdrv_window w, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);

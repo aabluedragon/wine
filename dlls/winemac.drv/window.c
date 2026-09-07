@@ -1564,11 +1564,13 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             TRACE("WM_MACDRV_CREATE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
             if (data->cocoa_window)
-                macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
+                macdrv_window_create_ca_layer_host_view(data->cocoa_window, (unsigned int)lp, CGRectNull);
             else
             {
                 HWND root = NtUserGetAncestor(hwnd, GA_ROOT);
                 struct macdrv_win_data *root_data;
+                RECT client;
+                POINT points[2];
 
                 /* A cross-process child HWND may not have a Cocoa window of
                  * its own.  Its rendered layer still needs to be hosted by
@@ -1577,7 +1579,19 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (root && root != hwnd && (root_data = get_win_data(root)))
                 {
                     if (root_data->cocoa_window)
-                        macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp);
+                    {
+                        if (NtUserGetClientRect(hwnd, &client, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)))
+                        {
+                            points[0].x = client.left;
+                            points[0].y = client.top;
+                            points[1].x = client.right;
+                            points[1].y = client.bottom;
+                            NtUserMapWindowPoints(hwnd, root, points, 2, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
+                            macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp,
+                                    CGRectMake(points[0].x, points[0].y,
+                                    points[1].x - points[0].x, points[1].y - points[0].y));
+                        }
+                    }
                     release_win_data(root_data);
                 }
             }
@@ -1588,7 +1602,20 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if ((data = get_win_data(hwnd)))
         {
             TRACE("WM_MACDRV_RELEASE_REMOTE_LAYER context_id %u\n", (unsigned int)lp);
-            if (data->cocoa_window) macdrv_window_release_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
+            if (data->cocoa_window)
+                macdrv_window_release_ca_layer_host_view(data->cocoa_window, (unsigned int)lp);
+            else
+            {
+                HWND root = NtUserGetAncestor(hwnd, GA_ROOT);
+                struct macdrv_win_data *root_data;
+
+                if (root && root != hwnd && (root_data = get_win_data(root)))
+                {
+                    if (root_data->cocoa_window)
+                        macdrv_window_release_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp);
+                    release_win_data(root_data);
+                }
+            }
             release_win_data(data);
         }
         return 0;
