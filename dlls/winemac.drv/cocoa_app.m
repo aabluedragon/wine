@@ -2006,7 +2006,11 @@ static NSString* WineLocalizedString(unsigned int stringID)
         NSString *configDir, *prefix;
         NSDictionary *userInfo;
 
-        if ([NSApp isActive]) return;  /* Nothing to do. */
+        /* NSApp can report itself active while another macOS application is
+         * actually frontmost (notably when a Wine child created a window
+         * asynchronously).  Do not use that state as a fast path: a visible
+         * Wine window must be able to bring the Wine application forward. */
+        if ([NSApp isActive] && !ignore) return;
 
         if (!ignore ||
             ![NSApplication instancesRespondToSelector:@selector(yieldActivationToApplication:)])
@@ -2014,6 +2018,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
             /* Either we don't need to force activation, or the OS is old enough
                that this is our only option. */
             [NSApp activateIgnoringOtherApps:ignore];
+            if (ignore)
+                [[NSRunningApplication currentApplication]
+                    activateWithOptions:(NSApplicationActivateAllWindows |
+                                         NSApplicationActivateIgnoringOtherApps)];
             return;
         }
 
@@ -2034,7 +2042,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
               deliverImmediately:YES];
 
         /* This is racy. See the note in otherWineAppWillActivate:. */
-        [NSApp activate];
+        [NSApp activateIgnoringOtherApps:YES];
+        [[NSRunningApplication currentApplication]
+            activateWithOptions:(NSApplicationActivateAllWindows |
+                                 NSApplicationActivateIgnoringOtherApps)];
      }
 
     static BOOL InputSourceShouldBeIgnored(TISInputSourceRef inputSource)

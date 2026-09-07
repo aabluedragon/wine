@@ -632,17 +632,20 @@ static void show_window(struct macdrv_win_data *data)
     macdrv_window prev_window = NULL;
     macdrv_window next_window = NULL;
     BOOL activate = FALSE;
-    DWORD style, ex_style;
+    DWORD style;
     GUITHREADINFO info;
 
     style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
-    ex_style = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
-
     /* A foreground Win32 window must also become the foreground Cocoa
      * application.  Without this, a launch or restore issued with a stale
      * NOACTIVATE flag can leave Steam running behind the current macOS app. */
-    activate = data->hwnd == NtUserGetForegroundWindow() &&
-               !(style & WS_CHILD) && !(ex_style & WS_EX_NOACTIVATE);
+    /* Steam's CEF output windows are tool windows, but they are still the
+     * user-facing application windows that must activate Wine.  Leave only
+     * tiny helper/tool windows passive; otherwise Steam can create a valid
+     * on-screen window behind the current macOS application. */
+    activate = !(style & WS_CHILD) &&
+               data->rects.window.right - data->rects.window.left >= 100 &&
+               data->rects.window.bottom - data->rects.window.top >= 100;
 
     /* find window that this one must be after */
     prev = NtUserGetWindowRelative(data->hwnd, GW_HWNDPREV);
@@ -664,6 +667,8 @@ static void show_window(struct macdrv_win_data *data)
     if (!prev_window)
         activate |= activate_on_focus_time && (NtGetTickCount() - activate_on_focus_time < 2000);
     macdrv_order_cocoa_window(data->cocoa_window, prev_window, next_window, activate);
+    if (activate)
+        macdrv_give_cocoa_window_focus(data->cocoa_window, TRUE);
     data->on_screen = TRUE;
 
     info.cbSize = sizeof(info);
