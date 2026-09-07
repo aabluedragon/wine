@@ -732,6 +732,11 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
         CALayerHost* host = [CALayerHost layer];
         [host setContextId:contextId];
+        /* A remote CEF surface may take a compositor transaction or two to
+         * publish its first frame.  Keep the old/parent surface visible while
+         * that happens instead of exposing CALayerHost's default black fill. */
+        host.opaque = NO;
+        host.backgroundColor = nil;
         host.magnificationFilter = kCAFilterNearest;
         host.contentsScale = retina_on ? 2.0 : 1.0;
         host.frame = CGRectIsNull(frame) ? self.layer.bounds : cgrect_mac_from_win(frame);
@@ -4183,7 +4188,9 @@ void macdrv_view_release_metal_view(macdrv_metal_view v)
     offscreen_layer.device = (id<MTLDevice>)device;
     offscreen_layer.framebufferOnly = YES;
     offscreen_layer.magnificationFilter = kCAFilterNearest;
-    offscreen_layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+    /* Do not flash an uninitialized remote surface as an opaque black panel
+     * before the first Metal drawable is committed. */
+    offscreen_layer.backgroundColor = nil;
     offscreen_layer.contentsScale = retina_on ? 2.0 : 1.0;
     [offscreen_layer setBounds:cgrect_mac_from_win(bounds)];
     [offscreen_layer setAnchorPoint:CGPointMake(0, 0)];
