@@ -1580,17 +1580,23 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 {
                     if (root_data->cocoa_window)
                     {
-                        if (NtUserGetClientRect(hwnd, &client, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)))
+                        if (NtUserGetClientRect(hwnd, &client, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI)) &&
+                            client.right > client.left && client.bottom > client.top)
                         {
                             points[0].x = client.left;
                             points[0].y = client.top;
                             points[1].x = client.right;
                             points[1].y = client.bottom;
                             NtUserMapWindowPoints(hwnd, root, points, 2, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
-                            macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp,
-                                    CGRectMake(points[0].x, points[0].y,
-                                    points[1].x - points[0].x, points[1].y - points[0].y));
+                            if (points[1].x > points[0].x && points[1].y > points[0].y)
+                                macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp,
+                                        CGRectMake(points[0].x, points[0].y,
+                                        points[1].x - points[0].x, points[1].y - points[0].y));
+                            else
+                                macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp, CGRectNull);
                         }
+                        else
+                            macdrv_window_create_ca_layer_host_view(root_data->cocoa_window, (unsigned int)lp, CGRectNull);
                     }
                     release_win_data(root_data);
                 }
