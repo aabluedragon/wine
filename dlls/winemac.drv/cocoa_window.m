@@ -1786,6 +1786,8 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     - (void) orderBelow:(WineWindow*)prev orAbove:(WineWindow*)next activate:(BOOL)activate
     {
         WineApplicationController* controller = [WineApplicationController sharedController];
+        if ([self isMiniaturized])
+            [self deminiaturize:nil];
         if (![self isMiniaturized])
         {
             BOOL needAdjustWindowLevels = FALSE;

@@ -632,7 +632,17 @@ static void show_window(struct macdrv_win_data *data)
     macdrv_window prev_window = NULL;
     macdrv_window next_window = NULL;
     BOOL activate = FALSE;
+    DWORD style, ex_style;
     GUITHREADINFO info;
+
+    style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
+    ex_style = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
+
+    /* A foreground Win32 window must also become the foreground Cocoa
+     * application.  Without this, a launch or restore issued with a stale
+     * NOACTIVATE flag can leave Steam running behind the current macOS app. */
+    activate = data->hwnd == NtUserGetForegroundWindow() &&
+               !(style & WS_CHILD) && !(ex_style & WS_EX_NOACTIVATE);
 
     /* find window that this one must be after */
     prev = NtUserGetWindowRelative(data->hwnd, GW_HWNDPREV);
@@ -652,7 +662,7 @@ static void show_window(struct macdrv_win_data *data)
           data->hwnd, data->cocoa_window, prev, prev_window, next, next_window);
 
     if (!prev_window)
-        activate = activate_on_focus_time && (NtGetTickCount() - activate_on_focus_time < 2000);
+        activate |= activate_on_focus_time && (NtGetTickCount() - activate_on_focus_time < 2000);
     macdrv_order_cocoa_window(data->cocoa_window, prev_window, next_window, activate);
     data->on_screen = TRUE;
 
@@ -1694,17 +1704,45 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
                              const struct window_rects *new_rects, struct window_surface *surface)
 {
     BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
+    BOOL normalize_position = FALSE;
     struct macdrv_thread_data *thread_data;
     struct macdrv_win_data *data;
+    struct window_rects normalized_rects = *new_rects;
+    RECT desktop_rect;
     unsigned int new_style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
     struct window_rects old_rects;
+
+    /* Chromium uses a large sentinel position while creating system windows.
+     * Clamping that value to 16000 still leaves the window off every macOS
+     * display, so a shown, non-trivial window becomes effectively invisible.
+     * Keep tiny hidden CEF helper windows at their requested coordinates. */
+    desktop_rect = rect_from_cgrect(macdrv_get_desktop_rect());
+    if ((new_style & WS_VISIBLE) && !(new_style & WS_MINIMIZE) &&
+        normalized_rects.window.right - normalized_rects.window.left > 2 &&
+        normalized_rects.window.bottom - normalized_rects.window.top > 2 &&
+        (normalized_rects.window.left > 16000 || normalized_rects.window.top > 16000 ||
+         normalized_rects.window.right < -16000 || normalized_rects.window.bottom < -16000))
+    {
+        int width = normalized_rects.window.right - normalized_rects.window.left;
+        int height = normalized_rects.window.bottom - normalized_rects.window.top;
+        int x = desktop_rect.left + (desktop_rect.right - desktop_rect.left - width) / 2;
+        int y = desktop_rect.top + (desktop_rect.bottom - desktop_rect.top - height) / 2;
+        int dx = x - normalized_rects.window.left;
+        int dy = y - normalized_rects.window.top;
+
+        OffsetRect(&normalized_rects.window, dx, dy);
+        OffsetRect(&normalized_rects.visible, dx, dy);
+        OffsetRect(&normalized_rects.client, dx, dy);
+        normalize_position = TRUE;
+        TRACE("normalizing off-screen window %p to %s\n", hwnd, wine_dbgstr_rect(&normalized_rects.window));
+    }
 
     if (!(data = get_win_data(hwnd))) return;
 
     thread_data = macdrv_thread_data();
 
     old_rects = data->rects;
-    data->rects = *new_rects;
+    data->rects = normalized_rects;
 
     TRACE("win %p/%p new_rects %s style %08x flags %08x surface %p\n", hwnd, data->cocoa_window,
           debugstr_window_rects(new_rects), new_style, swp_flags, surface);
@@ -1751,6 +1789,9 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
 
 done:
     release_win_data(data);
+
+    if (normalize_position)
+        NtUserSetRawWindowPos(hwnd, normalized_rects.window, SWP_NOZORDER | SWP_NOACTIVATE, TRUE);
 }
 
 
