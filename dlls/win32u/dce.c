@@ -1079,6 +1079,25 @@ done:
     pthread_mutex_unlock( &surfaces_lock );
 }
 
+/* Flush one surface without synchronously presenting unrelated windows. */
+void flush_window_surface( HWND hwnd )
+{
+    struct window_surface *surface = NULL;
+    WND *win;
+
+    if (!(win = get_win_ptr( hwnd ))) return;
+    if (win != WND_DESKTOP && win != WND_OTHER_PROCESS && win->surface)
+    {
+        surface = win->surface;
+        window_surface_add_ref( surface );
+    }
+    release_win_ptr( win );
+    if (!surface) return;
+
+    window_surface_flush( surface );
+    window_surface_release( surface );
+}
+
 /***********************************************************************
  *           dump_rdw_flags
  */

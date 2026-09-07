@@ -3134,11 +3134,11 @@ static BOOL show_popup( HWND owner, HMENU hmenu, UINT id, UINT flags,
     NtUserSetWindowPos( menu->hWnd, HWND_TOPMOST, x, y, menu->Width, menu->Height,
                         SWP_NOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
-    flush_window_surfaces( TRUE );
+    flush_window_surface( menu->hWnd );
     NtUserShowWindow( menu->hWnd, SW_SHOWNOACTIVATE );
     NtUserRedrawWindow( menu->hWnd, NULL, 0, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN );
     send_message( menu->hWnd, WM_PAINT, 0, 0 );
-    flush_window_surfaces( TRUE );
+    flush_window_surface( menu->hWnd );
     return TRUE;
 }
 
