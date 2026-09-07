@@ -407,6 +407,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
     - (void) addCALayerHostViewWithContextId:(CAContextID)contextId frame:(CGRect)frame;
+    - (BOOL) hasCALayerHosts;
     - (void) removeCALayerHostView:(CAContextID)contextId;
 
 @end
@@ -757,6 +758,11 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         });
 
         [(WineWindow*)self.window windowDidDrawContent];
+    }
+
+    - (BOOL) hasCALayerHosts
+    {
+        return _caLayerHosts.count != 0;
     }
 
     - (void) removeCALayerHostView:(CAContextID)contextId
@@ -2190,7 +2196,8 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     {
         WineContentView *view = self.contentView;
         return self.contentView.layer.mask || [view hasShapeImage] || self.usePerPixelAlpha ||
-                (gl_surface_mode == GL_SURFACE_BEHIND && [view hasGLDescendant]);
+                (gl_surface_mode == GL_SURFACE_BEHIND && [view hasGLDescendant]) ||
+                [view hasCALayerHosts];
     }
 
     - (void) checkTransparency
