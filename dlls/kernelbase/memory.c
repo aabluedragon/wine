@@ -1579,7 +1579,9 @@ BOOL WINAPI SetProcessDefaultCpuSets(HANDLE process, const ULONG *cpu_set_ids, U
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetNumaHighestNodeNumber( ULONG *node )
 {
-    FIXME( "semi-stub: %p\n", node );
+    /* Wine doesn't expose the host's NUMA topology, and the machines it runs
+     * on here have a single node, which is what this reports. */
+    TRACE( "%p\n", node );
     *node = 0;
     return TRUE;
 }

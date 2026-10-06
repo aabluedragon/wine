@@ -65,7 +65,13 @@ static inline void msvcrt_uninitialize_mlock( int locknum )
  */
 void msvcrt_init_mt_locks(void)
 {
+  static BOOL initialised;
   int i;
+
+  /* this can now be reached from the first use of the runtime as well as from
+   * DllMain, and the table must only be reset once */
+  if (initialised) return;
+  initialised = TRUE;
 
   TRACE( "initializing mtlocks\n" );
 

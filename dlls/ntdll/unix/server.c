@@ -1472,6 +1472,8 @@ static int server_connect(void)
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 #include <servers/bootstrap.h>
 
 /* send our task port to the server */
@@ -1752,8 +1754,8 @@ void server_init_process_done(void)
         chdir( "/" );
     close( initial_cwd );
 
-#ifdef __APPLE__
-    send_server_task_port();
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    send_server_task_port();  /* no bootstrap namespace to register in on iOS */
 #endif
 
     /* Install signal handlers; this cannot be done earlier, since we cannot

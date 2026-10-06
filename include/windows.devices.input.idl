@@ -30,10 +30,13 @@ namespace Windows.Devices.Input {
     typedef enum PointerDeviceType PointerDeviceType;
     typedef struct PointerDeviceUsage PointerDeviceUsage;
 
+    interface IPenDevice;
+    interface IPenDeviceStatics;
     interface IPointerDevice;
     interface IPointerDevice2;
     interface IPointerDeviceStatics;
 
+    runtimeclass PenDevice;
     runtimeclass PointerDevice;
 
     declare {
@@ -111,5 +114,36 @@ namespace Windows.Devices.Input {
     {
         [default] interface Windows.Devices.Input.IPointerDevice;
         [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Devices.Input.IPointerDevice2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.Devices.Input.PenDevice),
+        uuid(31856eba-a738-5a8c-b8f6-f97ef68d18ef)
+    ]
+    interface IPenDevice : IInspectable
+    {
+        [propget] HRESULT PenId([out, retval] GUID *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.Devices.Input.PenDevice),
+        uuid(9dfbbe01-0966-5180-bcb4-b85060e39479)
+    ]
+    interface IPenDeviceStatics : IInspectable
+    {
+        HRESULT GetFromPointerId([in] UINT32 pointer_id, [out, retval] Windows.Devices.Input.PenDevice **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(agile),
+        static(Windows.Devices.Input.IPenDeviceStatics, Windows.Foundation.UniversalApiContract, 6.0),
+        threading(both)
+    ]
+    runtimeclass PenDevice
+    {
+        [default] interface Windows.Devices.Input.IPenDevice;
     }
 }

@@ -606,8 +606,33 @@ static void grab_locinfo(pthreadlocinfo locinfo)
     InterlockedIncrement(&locinfo->lc_time_curr->refcount);
 }
 
+/* The loader can attach a module that uses the C runtime before it attaches
+ * the runtime itself - a cycle through the imports is enough - so the first
+ * call can arrive before DllMain has set any of this up. Bring it up here,
+ * and only from the outermost call, since doing so comes back through the
+ * runtime itself. */
+BOOL msvcrt_ensure_locale(void)
+{
+    static LONG initialising;
+
+    if (MSVCRT_locale) return TRUE;
+    if (InterlockedCompareExchange( &initialising, 1, 0 )) return FALSE;
+    msvcrt_init_heap();
+    msvcrt_init_mt_locks();
+    msvcrt_init_locale();
+    InterlockedExchange( &initialising, 0 );
+    return MSVCRT_locale != NULL;
+}
+
 static void update_thread_locale(thread_data_t *data)
 {
+    if(!msvcrt_ensure_locale()) return;
+    if(!data->locinfo)
+    {
+        data->locinfo = MSVCRT_locale->locinfo;
+        data->mbcinfo = MSVCRT_locale->mbcinfo;
+    }
+
     if((data->locale_flags & LOCALE_FREE) && ((data->locale_flags & LOCALE_THREAD) ||
                 (data->locinfo == MSVCRT_locale->locinfo && data->mbcinfo == MSVCRT_locale->mbcinfo)))
         return;
@@ -2131,6 +2156,8 @@ int CDECL _configthreadlocale(int type)
 BOOL msvcrt_init_locale(void)
 {
     int i;
+
+    if (MSVCRT_locale) return TRUE;
 
     _lock_locales();
     MSVCRT_locale = _create_locale(0, "C");

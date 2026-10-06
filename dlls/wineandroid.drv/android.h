@@ -121,6 +121,7 @@ extern void ANDROID_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_h
                                       const struct window_rects *new_rects, struct window_surface *surface );
 extern ANativeWindow *get_client_window( HWND hwnd );
 extern BOOL has_client_surface( HWND hwnd );
+extern void update_gl_drawable( HWND hwnd );
 
 extern unsigned int screen_width;
 extern unsigned int screen_height;

@@ -27,9 +27,16 @@
 
 #include "unixlib.h"
 
+/* One IAudioSessionEvents an application asked to be told about changes on. */
+struct session_notification {
+    struct list entry;
+    IAudioSessionEvents *events;
+};
+
 struct audio_session {
     GUID guid;
     struct list clients;
+    struct list notifications;
 
     IMMDevice *device;
 

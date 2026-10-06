@@ -3990,6 +3990,9 @@ static void output_module( struct makefile *make, unsigned int arch )
     output_filename( winegcc );
     output( "\n" );
     output_winegcc_command( make, link_arch );
+    /* Without debug flags there is nothing to keep, and asking lld for DWARF it
+     * cannot read is worse than asking for nothing at all. */
+    if (!debug_flags[link_arch].count) output_filename( "-s" );
     if (arch) output_filename( "-Wl,--wine-builtin" );
     if (!make->is_exe) output_filename( "-shared" );
     if (spec_file)

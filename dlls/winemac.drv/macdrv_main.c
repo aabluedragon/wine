@@ -43,6 +43,7 @@ C_ASSERT(NUM_EVENT_TYPES <= sizeof(macdrv_event_mask) * 8);
 
 int topmost_float_inactive = TOPMOST_FLOAT_INACTIVE_NONFULLSCREEN;
 bool capture_displays_for_fullscreen = false;
+bool native_fullscreen = false;
 BOOL allow_vsync = TRUE;
 BOOL allow_set_gamma = TRUE;
 bool left_option_is_alt = false;
@@ -320,6 +321,9 @@ static void setup_options(void)
 
     if (!get_config_key(hkey, appkey, "CaptureDisplaysForFullscreen", buffer, sizeof(buffer)))
         capture_displays_for_fullscreen = IS_OPTION_TRUE(buffer[0]);
+
+    if (!get_config_key(hkey, appkey, "NativeFullscreen", buffer, sizeof(buffer)))
+        native_fullscreen = IS_OPTION_TRUE(buffer[0]);
 
     if (!get_config_key(hkey, appkey, "AllowVerticalSync", buffer, sizeof(buffer)))
         allow_vsync = IS_OPTION_TRUE(buffer[0]);

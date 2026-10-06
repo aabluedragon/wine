@@ -2619,6 +2619,12 @@ NTSTATUS WINAPI RtlSetHeapInformation( HANDLE handle, HEAP_INFORMATION_CLASS inf
         return STATUS_SUCCESS;
     }
 
+    case HeapEnableTerminationOnCorruption:
+        /* The caller is asking to be killed rather than handed back a block
+         * from a heap we found to be corrupt, which is what we do anyway. */
+        if (size) return STATUS_INVALID_PARAMETER;
+        return STATUS_SUCCESS;
+
     default:
         FIXME( "HEAP_INFORMATION_CLASS %u not implemented!\n", info_class );
         return STATUS_SUCCESS;

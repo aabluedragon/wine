@@ -888,12 +888,16 @@ bool wg_video_format_is_rgb(enum wg_video_format format)
     return false;
 }
 
+static BOOL unix_lib_available;
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(instance);
-        __wine_init_unix_call();
+        unix_lib_available = !__wine_init_unix_call();
+        if (!unix_lib_available)
+            WARN("The GStreamer support library is not present.\n");
     }
     return TRUE;
 }
@@ -1038,6 +1042,11 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void **out)
 
 static BOOL CALLBACK init_gstreamer_proc(INIT_ONCE *once, void *param, void **ctx)
 {
+    /* Without the unix library there is no GStreamer to initialise, and every
+     * class we would hand out would fail the moment it was used. */
+    if (!unix_lib_available)
+        return FALSE;
+
     struct wg_init_gstreamer_params params =
     {
         .trace_on = TRACE_ON(mfplat) || TRACE_ON(quartz) || TRACE_ON(wmvcore),

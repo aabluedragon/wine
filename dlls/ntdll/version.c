@@ -208,6 +208,16 @@ static const struct { WCHAR name[12]; WINDOWS_VERSION ver; } version_names[] =
     { L"win11", WIN11 },
 };
 
+/* Applications that refuse to start when they are told about a Windows version
+ * that did not exist yet when they were released. They typically compare the
+ * major version returned by GetVersionEx() against a hardcoded value and bail
+ * out when it is larger, so there is nothing they could be told other than an
+ * older version. Explicit configuration still wins over this list. */
+static const struct { const WCHAR *exe; DWORD ver; } app_versions[] =
+{
+    { L"dkii.exe", WINXP },      /* Dungeon Keeper 2 refuses to run on 6.0 and above */
+};
+
 
 /* initialized to null so that we crash if we try to retrieve the version too early at startup */
 static const RTL_OSVERSIONINFOEXW *current_version;
@@ -467,6 +477,28 @@ static BOOL parse_win_version( HANDLE hkey )
 
 
 /**********************************************************************
+ *         get_app_version
+ *
+ * Look up the application in the list of programs that need an older
+ * Windows version to start at all.
+ */
+static BOOL get_app_version( const WCHAR *appname )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(app_versions); i++)
+    {
+        if (wcsicmp( app_versions[i].exe, appname )) continue;
+        current_version = &VersionData[app_versions[i].ver];
+        TRACE( "using version %ld.%ld for %s\n", current_version->dwMajorVersion,
+               current_version->dwMinorVersion, debugstr_w(appname) );
+        return TRUE;
+    }
+    return FALSE;
+}
+
+
+/**********************************************************************
  *         version_init
  */
 void version_init(void)
@@ -482,6 +514,9 @@ void version_init(void)
 
     current_version = &VersionData[WIN10];
 
+    if ((p = wcsrchr( appname, '/' ))) appname = p + 1;
+    if ((p = wcsrchr( appname, '\\' ))) appname = p + 1;
+
     RtlOpenCurrentUser( KEY_ALL_ACCESS, &root );
     InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, root, NULL );
     RtlInitUnicodeString( &nameW, L"Software\\Wine" );
@@ -492,9 +527,6 @@ void version_init(void)
     if (!config_key) goto done;
 
     /* open AppDefaults\\appname key */
-
-    if ((p = wcsrchr( appname, '/' ))) appname = p + 1;
-    if ((p = wcsrchr( appname, '\\' ))) appname = p + 1;
 
     wcscpy( appversion, L"AppDefaults\\" );
     wcscat( appversion, appname );
@@ -517,6 +549,8 @@ void version_init(void)
     NtClose( config_key );
 
 done:
+    if (!got_win_ver) got_win_ver = get_app_version( appname );
+
     if (!got_win_ver)
     {
         static RTL_OSVERSIONINFOEXW registry_version;

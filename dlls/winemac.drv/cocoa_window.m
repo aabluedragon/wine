@@ -418,6 +418,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 @property (readwrite, nonatomic) BOOL noForeground;
 @property (readwrite, nonatomic) BOOL preventsAppActivation;
 @property (readwrite, nonatomic) BOOL floating;
+@property (readwrite, nonatomic) BOOL wineFullscreen;
 @property (readwrite, nonatomic) BOOL drawnSinceShown;
 @property (readwrite, nonatomic) BOOL closing;
 @property (readwrite, getter=isFakingClose, nonatomic) BOOL fakingClose;
@@ -1054,6 +1055,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     static WineWindow* causing_becomeKeyWindow;
 
     @synthesize disabled, noForeground, preventsAppActivation, floating, fullscreen, fakingClose, closing, latentParentWindow, hwnd, queue;
+    @synthesize wineFullscreen;
     @synthesize drawnSinceShown;
     @synthesize shapeChangedSinceLastDraw;
     @synthesize usePerPixelAlpha;
@@ -1206,7 +1208,8 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         NSUInteger style = [self styleMask];
 
         if (behavior & NSWindowCollectionBehaviorParticipatesInCycle &&
-            style & NSWindowStyleMaskResizable && !(style & NSWindowStyleMaskUtilityWindow) && !maximized &&
+            ((style & NSWindowStyleMaskResizable) || (native_fullscreen && [self coversItsScreen])) &&
+            !(style & NSWindowStyleMaskUtilityWindow) && !maximized &&
             !(self.parentWindow || self.latentParentWindow))
         {
             behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
@@ -1898,6 +1901,10 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
             if (![self isExcludedFromWindowsMenu])
                 [NSApp addWindowsItem:self title:[self title] filename:NO];
+
+            /* A window that already covered the screen before it was shown
+               couldn't be handed to macOS' full screen mode back then. */
+            [self enterNativeFullScreenLater];
         }
     }
 
@@ -1960,10 +1967,62 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                                forWindow:self];
     }
 
+    /* Whether this window is a candidate for macOS' own full screen mode. Games
+       ask for a window the size of the screen, but a window that wine has placed
+       below the menu bar falls a little short of covering it, so don't insist. */
+    - (BOOL) coversItsScreen
+    {
+        NSRect screenFrame, contentRect;
+
+        if (![self screen]) return FALSE;
+        screenFrame = [[self screen] frame];
+        contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+
+        return NSWidth(contentRect) >= NSWidth(screenFrame) * 0.9 &&
+               NSHeight(contentRect) >= NSHeight(screenFrame) * 0.9;
+    }
+
+    /* Hand a window that covers the screen to macOS' own full screen mode, so
+       that it gets a Space of its own and leaves the desktop free to work on. */
+    - (void) enterNativeFullScreen
+    {
+        NSRect screenFrame;
+
+        if (!native_fullscreen || enteringFullScreen || exitingFullScreen) return;
+        if ([self styleMask] & NSWindowStyleMaskFullScreen) return;
+        if (![self isVisible] || ![self coversItsScreen]) return;
+
+        /* Take the whole screen, not just the part below the menu bar: the game
+           has already sized its rendering to the full screen, and a client area
+           that falls short of it puts everything it draws out of place. */
+        screenFrame = [[self screen] frame];
+        if (!NSEqualRects([self frame], screenFrame))
+            [self setFrameAndWineFrame:screenFrame];
+
+        /* AppKit only takes resizable windows full screen, and games are
+           generally borderless, so let this one be resized meanwhile. */
+        if (!([self styleMask] & NSWindowStyleMaskResizable))
+            [self setStyleMask:([self styleMask] | NSWindowStyleMaskResizable)];
+
+        [self adjustFullScreenBehavior:[self collectionBehavior]];
+        if ([self collectionBehavior] & NSWindowCollectionBehaviorFullScreenPrimary)
+            [super toggleFullScreen:nil];
+    }
+
+    - (void) enterNativeFullScreenLater
+    {
+        if (!native_fullscreen) return;
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(enterNativeFullScreen) object:nil];
+        [self performSelector:@selector(enterNativeFullScreen) withObject:nil afterDelay:0.0];
+    }
+
     - (void) updateFullscreen
     {
         NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
         BOOL nowFullscreen = !([self styleMask] & NSWindowStyleMaskFullScreen) && screen_covered_by_rect(contentRect, [NSScreen screens]);
+
+        if (nowFullscreen)
+            [self enterNativeFullScreenLater];
 
         if (nowFullscreen != fullscreen)
         {
@@ -2507,10 +2566,14 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     {
         // If a window is sized to completely cover a screen, then it's in
         // full-screen mode.  In that case, we don't allow NSWindow to constrain
-        // it.
+        // it.  The same goes for a window Wine considers fullscreen but which
+        // doesn't cover a screen, which happens when Wine reports a display
+        // mode the display can't actually be set to: pushing such a window
+        // below the menu bar would leave what it presents clipped, since the
+        // rect it presents into is positioned against the display.
         NSArray* screens = [NSScreen screens];
         NSRect contentRect = [self contentRectForFrameRect:frameRect];
-        if (!screen_covered_by_rect(contentRect, screens) &&
+        if (!wineFullscreen && !screen_covered_by_rect(contentRect, screens) &&
             frame_intersects_screens(frameRect, screens))
             frameRect = [super constrainFrameRect:frameRect toScreen:screen];
         return frameRect;
@@ -2995,6 +3058,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         if (causing_becomeKeyWindow == self) return;
 
         [controller windowGotFocus:self];
+        [self enterNativeFullScreenLater];
     }
 
     - (void) windowDidChangeOcclusionState:(NSNotification*)notification
@@ -3568,11 +3632,12 @@ void macdrv_hide_cocoa_window(macdrv_window w)
  *
  * Move a Cocoa window.
  */
-void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame)
+void macdrv_set_cocoa_window_frame(macdrv_window w, const CGRect* new_frame, int fullscreen)
 {
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
+        window.wineFullscreen = !!fullscreen;
         [window setFrameFromWine:NSRectFromCGRect(cgrect_mac_from_win(*new_frame))];
     });
 }

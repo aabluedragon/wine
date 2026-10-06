@@ -277,7 +277,9 @@ DEFINE_IINSPECTABLE( uisettings2, IUISettings2, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUBLE *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
+    /* The accessibility setting that enlarges text everywhere. There is no
+     * such setting here, which is what a factor of one means. */
+    TRACE( "iface %p, value %p\n", iface, value );
     *value = 1.0;
     return S_OK;
 }
@@ -285,7 +287,8 @@ static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUB
 static HRESULT WINAPI uisettings2_add_TextScaleFactorChanged( IUISettings2 *iface, ITypedEventHandler_UISettings_IInspectable *handler,
         EventRegistrationToken *cookie )
 {
-    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+    /* Nothing changes the text scale, so the handler has nothing to hear. */
+    TRACE( "iface %p, handler %p, cookie %p\n", iface, handler, cookie );
     *cookie = dummy_cookie;
     return S_OK;
 }

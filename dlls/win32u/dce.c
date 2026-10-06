@@ -140,6 +140,206 @@ static void create_offscreen_window_surface( HWND hwnd, const RECT *surface_rect
     if (previous) window_surface_release( previous );
 }
 
+/*******************************************************************
+ * Foreign window surface, for top-level windows of other processes.
+ *
+ * Drawing is captured into a DIB like for the off-screen surface, but
+ * flushing copies the pixels into a shared memory section and notifies the
+ * window's owner process, which blits them into the real window surface.
+ * This makes cross-process window rendering (e.g. Chromium's out-of-process
+ * viz compositor) visible on drivers without server-side drawables.
+ */
+
+struct foreign_surface_header
+{
+    LONG lock;          /* interlocked guard for the dirty rect */
+    LONG pending;       /* an update message is queued to the owner */
+    RECT dirty;         /* accumulated dirty rect, reset when consumed */
+    UINT width;         /* surface dimensions, for sanity checking */
+    UINT height;
+};
+
+#define FOREIGN_SURFACE_BITS_OFFSET 64
+C_ASSERT( sizeof(struct foreign_surface_header) <= FOREIGN_SURFACE_BITS_OFFSET );
+
+struct foreign_window_surface
+{
+    struct window_surface header;
+    struct list cache_entry;  /* entry in foreign_surfaces, protected by foreign_surfaces_lock */
+    HANDLE section;           /* shared section handle in this process */
+    HANDLE owner_section;     /* section handle duplicated into the owner process */
+    struct foreign_surface_header *shared;
+    SIZE_T shared_size;
+};
+
+static struct list foreign_surfaces = LIST_INIT( foreign_surfaces );
+static pthread_mutex_t foreign_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void foreign_header_lock( struct foreign_surface_header *hdr )
+{
+    while (InterlockedCompareExchange( &hdr->lock, 1, 0 )) YieldProcessor();
+}
+
+static void foreign_header_unlock( struct foreign_surface_header *hdr )
+{
+    InterlockedExchange( &hdr->lock, 0 );
+}
+
+static void copy_surface_rows( char *dst, const char *src, UINT stride, const RECT *rect )
+{
+    UINT offset = rect->top * stride + rect->left * 4, row_size = (rect->right - rect->left) * 4;
+    int y;
+
+    for (y = rect->top; y < rect->bottom; y++, offset += stride)
+        memcpy( dst + offset, src + offset, row_size );
+}
+
+static struct foreign_window_surface *get_foreign_surface( struct window_surface *surface )
+{
+    return CONTAINING_RECORD( surface, struct foreign_window_surface, header );
+}
+
+static void foreign_window_surface_set_clip( struct window_surface *surface, const RECT *rects, UINT count )
+{
+}
+
+static BOOL foreign_window_surface_flush( struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
+                                          const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
+                                          const BITMAPINFO *shape_info, const void *shape_bits )
+{
+    struct foreign_window_surface *surface = get_foreign_surface( window_surface );
+    struct foreign_surface_header *hdr = surface->shared;
+    UINT stride = color_info->bmiHeader.biSizeImage / abs( color_info->bmiHeader.biHeight );
+    RECT clipped, bounds = {0, 0, hdr->width, hdr->height};
+
+    if (!intersect_rect( &clipped, dirty, &bounds )) return TRUE;
+
+    copy_surface_rows( (char *)hdr + FOREIGN_SURFACE_BITS_OFFSET, color_bits, stride, &clipped );
+
+    foreign_header_lock( hdr );
+    add_bounds_rect( &hdr->dirty, &clipped );
+    foreign_header_unlock( hdr );
+
+    /* coalesce notifications: skip the post if the owner hasn't consumed the previous one yet */
+    if (!InterlockedExchange( &hdr->pending, 1 ))
+        NtUserPostMessage( window_surface->hwnd, WM_WINE_UPDATEFOREIGNSURFACE,
+                           (WPARAM)surface->owner_section, 0 );
+    return TRUE;
+}
+
+static void foreign_window_surface_destroy( struct window_surface *window_surface )
+{
+    struct foreign_window_surface *surface = get_foreign_surface( window_surface );
+
+    if (surface->shared) NtUnmapViewOfSection( GetCurrentProcess(), surface->shared );
+    if (surface->section) NtClose( surface->section );
+    /* the owner closes owner_section when it sees a new section for the window */
+}
+
+static const struct window_surface_funcs foreign_window_surface_funcs =
+{
+    foreign_window_surface_set_clip,
+    foreign_window_surface_flush,
+    foreign_window_surface_destroy
+};
+
+static struct window_surface *get_foreign_window_surface( HWND hwnd, const RECT *top_rect )
+{
+    char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
+    BITMAPINFO *info = (BITMAPINFO *)buffer;
+    struct foreign_window_surface *surface, *found = NULL, *stale = NULL;
+    struct window_surface *window_surface;
+    RECT rect = {0, 0, top_rect->right - top_rect->left, top_rect->bottom - top_rect->top};
+    OBJECT_ATTRIBUTES attr = { sizeof(attr) };
+    HANDLE section = 0, owner_section = 0, process;
+    LARGE_INTEGER section_size;
+    SIZE_T view_size = 0;
+    void *bits = NULL;
+    CLIENT_ID cid = { 0 };
+    DWORD pid = 0;
+
+    if (rect.right <= 0 || rect.bottom <= 0) return NULL;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    LIST_FOR_EACH_ENTRY( surface, &foreign_surfaces, struct foreign_window_surface, cache_entry )
+    {
+        if (surface->header.hwnd != hwnd) continue;
+        if (EqualRect( &surface->header.rect, &rect )) found = surface;
+        else stale = surface;
+        break;
+    }
+    if (found) window_surface_add_ref( &found->header );
+    else if (stale) list_remove( &stale->cache_entry );
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+
+    if (found) return &found->header;
+    if (stale)
+    {
+        register_window_surface( &stale->header, NULL );
+        window_surface_release( &stale->header );
+    }
+
+    if (!get_window_thread( hwnd, &pid ) || !pid) return NULL;
+
+    memset( info, 0, sizeof(*info) );
+    info->bmiHeader.biSize        = sizeof(info->bmiHeader);
+    info->bmiHeader.biWidth       = rect.right;
+    info->bmiHeader.biHeight      = -rect.bottom; /* top-down */
+    info->bmiHeader.biPlanes      = 1;
+    info->bmiHeader.biBitCount    = 32;
+    info->bmiHeader.biSizeImage   = get_dib_image_size( info );
+    info->bmiHeader.biCompression = BI_RGB;
+
+    section_size.QuadPart = FOREIGN_SURFACE_BITS_OFFSET + info->bmiHeader.biSizeImage;
+    if (NtCreateSection( &section, SECTION_MAP_READ | SECTION_MAP_WRITE, NULL, &section_size,
+                         PAGE_READWRITE, SEC_COMMIT, 0 ))
+        return NULL;
+    if (NtMapViewOfSection( section, GetCurrentProcess(), &bits, 0, 0, NULL, &view_size,
+                            ViewShare, 0, PAGE_READWRITE ))
+        goto failed;
+
+    cid.UniqueProcess = UlongToHandle( pid );
+    if (NtOpenProcess( &process, PROCESS_DUP_HANDLE, &attr, &cid )) goto failed;
+    if (NtDuplicateObject( GetCurrentProcess(), section, process, &owner_section, 0, 0, DUPLICATE_SAME_ACCESS ))
+    {
+        NtClose( process );
+        goto failed;
+    }
+    NtClose( process );
+
+    if (!(window_surface = window_surface_create( sizeof(*surface), &foreign_window_surface_funcs,
+                                                  hwnd, &rect, info, 0 )))
+        goto failed;
+
+    surface = get_foreign_surface( window_surface );
+    /* renderers drawing cross-process (e.g. Chromium's viz compositor) usually don't
+     * pump messages on the drawing thread, so present every frame as it completes */
+    window_surface->eager_flush = TRUE;
+    surface->section = section;
+    surface->owner_section = owner_section;
+    surface->shared = bits;
+    surface->shared_size = view_size;
+    reset_bounds( &surface->shared->dirty );
+    surface->shared->width = rect.right;
+    surface->shared->height = rect.bottom;
+
+    register_window_surface( NULL, window_surface );
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    window_surface_add_ref( window_surface );  /* cache reference */
+    list_add_tail( &foreign_surfaces, &surface->cache_entry );
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+
+    TRACE( "created foreign surface %p for hwnd %p rect %s owner pid %04x\n",
+           surface, hwnd, wine_dbgstr_rect( &rect ), (UINT)pid );
+    return window_surface;
+
+failed:
+    if (bits) NtUnmapViewOfSection( GetCurrentProcess(), bits );
+    if (section) NtClose( section );
+    return NULL;
+}
+
 struct scaled_surface
 {
     struct window_surface header;
@@ -729,6 +929,117 @@ void window_surface_set_shape( struct window_surface *surface, HRGN shape_region
     window_surface_flush( surface );
 }
 
+/* owner-side cached mappings of foreign surface sections */
+struct foreign_surface_mapping
+{
+    struct list entry;
+    HWND hwnd;
+    HANDLE section;
+    struct foreign_surface_header *shared;
+    SIZE_T size;
+};
+
+static struct list foreign_mappings = LIST_INIT( foreign_mappings );
+
+static struct foreign_surface_mapping *get_foreign_surface_mapping( HWND hwnd, HANDLE section )
+{
+    struct foreign_surface_mapping *mapping;
+    SIZE_T view_size = 0;
+    void *bits = NULL;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    LIST_FOR_EACH_ENTRY( mapping, &foreign_mappings, struct foreign_surface_mapping, entry )
+    {
+        if (mapping->hwnd != hwnd) continue;
+        if (mapping->section == section)
+        {
+            pthread_mutex_unlock( &foreign_surfaces_lock );
+            return mapping;
+        }
+        /* the surface was recreated (e.g. resized): drop the stale mapping */
+        NtUnmapViewOfSection( GetCurrentProcess(), mapping->shared );
+        NtClose( mapping->section );
+        list_remove( &mapping->entry );
+        free( mapping );
+        break;
+    }
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+
+    if (NtMapViewOfSection( section, GetCurrentProcess(), &bits, 0, 0, NULL, &view_size,
+                            ViewShare, 0, PAGE_READWRITE ))
+        return NULL;
+    if (view_size <= FOREIGN_SURFACE_BITS_OFFSET || !(mapping = malloc( sizeof(*mapping) )))
+    {
+        NtUnmapViewOfSection( GetCurrentProcess(), bits );
+        return NULL;
+    }
+    mapping->hwnd = hwnd;
+    mapping->section = section;
+    mapping->shared = bits;
+    mapping->size = view_size;
+
+    pthread_mutex_lock( &foreign_surfaces_lock );
+    list_add_tail( &foreign_mappings, &mapping->entry );
+    pthread_mutex_unlock( &foreign_surfaces_lock );
+    return mapping;
+}
+
+/***********************************************************************
+ *           update_foreign_window_surface
+ *
+ * Handle WM_WINE_UPDATEFOREIGNSURFACE: blit pixels that another process
+ * has rendered into a shared section into the real window surface.
+ */
+LRESULT update_foreign_window_surface( HWND hwnd, HANDLE section )
+{
+    char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
+    BITMAPINFO *info = (BITMAPINFO *)buffer;
+    struct foreign_surface_mapping *mapping;
+    struct foreign_surface_header *hdr;
+    struct window_surface *surface = NULL;
+    RECT dirty, bounds;
+    void *color_bits;
+    WND *win;
+
+    if (!(mapping = get_foreign_surface_mapping( hwnd, section ))) return 0;
+    hdr = mapping->shared;
+
+    /* allow the renderer to queue the next notification from here on */
+    InterlockedExchange( &hdr->pending, 0 );
+
+    foreign_header_lock( hdr );
+    dirty = hdr->dirty;
+    reset_bounds( &hdr->dirty );
+    foreign_header_unlock( hdr );
+    if (IsRectEmpty( &dirty )) return 0;  /* already consumed by a coalesced update */
+
+    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return 0;
+    if ((surface = win->surface)) window_surface_add_ref( surface );
+    release_win_ptr( win );
+    if (!surface) return 0;
+
+    if (surface != &dummy_surface)
+    {
+        window_surface_lock( surface );
+        if ((color_bits = window_surface_get_color( surface, info )))
+        {
+            UINT stride = info->bmiHeader.biSizeImage / abs( info->bmiHeader.biHeight );
+            SetRect( &bounds, 0, 0, hdr->width, hdr->height );
+            if (info->bmiHeader.biWidth == hdr->width && abs( info->bmiHeader.biHeight ) == hdr->height &&
+                (SIZE_T)FOREIGN_SURFACE_BITS_OFFSET + info->bmiHeader.biSizeImage <= mapping->size &&
+                intersect_rect( &dirty, &dirty, &bounds ))
+            {
+                copy_surface_rows( color_bits, (char *)hdr + FOREIGN_SURFACE_BITS_OFFSET, stride, &dirty );
+                add_bounds_rect( &surface->bounds, &dirty );
+            }
+        }
+        window_surface_unlock( surface );
+        window_surface_flush( surface );
+    }
+    window_surface_release( surface );
+    return 0;
+}
+
 /*******************************************************************
  *           register_window_surface
  *
@@ -874,6 +1185,8 @@ static void update_visible_region( struct dce *dce )
             if (surface) window_surface_add_ref( surface );
             release_win_ptr( win );
         }
+        else if (win == WND_OTHER_PROCESS)
+            surface = get_foreign_window_surface( top_win, &top_rect );
     }
 
     if (!surface) SetRectEmpty( &top_rect );
@@ -1603,6 +1916,39 @@ static HRGN send_ncpaint( HWND hwnd, HWND *child, UINT *flags )
 }
 
 /***********************************************************************
+ *           invalidate_erased_children
+ *
+ * A window that doesn't clip its children paints over them when it erases its
+ * background, and the children have to be repainted on top of it. They are
+ * usually invalid already, in which case their area has been subtracted from
+ * this window's update region and they aren't touched at all, but a child that
+ * repainted itself outside of the normal paint order is not, and would be left
+ * erased until something else invalidates it.
+ */
+static void invalidate_erased_children( HWND hwnd, const RECT *erased )
+{
+    HWND *children;
+    unsigned int i;
+
+    if (get_window_long( hwnd, GWL_STYLE ) & WS_CLIPCHILDREN) return;
+    if (IsRectEmpty( erased )) return;
+    if (!(children = list_window_children( hwnd ))) return;
+
+    for (i = 0; children[i]; i++)
+    {
+        struct window_rects rects;
+        RECT rect;
+
+        if (!(get_window_long( children[i], GWL_STYLE ) & WS_VISIBLE)) continue;
+        if (!get_window_rects( children[i], COORDS_PARENT, &rects, get_thread_dpi() )) continue;
+        if (!intersect_rect( &rect, &rects.window, erased )) continue;
+        NtUserRedrawWindow( children[i], NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN );
+    }
+
+    free( children );
+}
+
+/***********************************************************************
  *           send_erase
  *
  * Send a WM_ERASEBKGND message if needed, and optionally return the DC for painting.
@@ -1630,7 +1976,10 @@ static BOOL send_erase( HWND hwnd, UINT flags, HRGN client_rgn,
             {
                 /* don't erase if the clip box is empty */
                 if (type != NULLREGION)
+                {
                     need_erase = !send_message( hwnd, WM_ERASEBKGND, (WPARAM)hdc, 0 );
+                    invalidate_erased_children( hwnd, clip_rect );
+                }
             }
             if (!hdc_ret) release_dc( hwnd, hdc, TRUE );
         }

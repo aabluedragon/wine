@@ -2642,6 +2642,9 @@ static NTSTATUS read_directory_data_getattrlist( struct dir_data *data, const ch
         return STATUS_NO_SUCH_FILE;
     /* If unix_name named a symlink, the above may have succeeded even if the symlink is broken.
        Check that with another call without FSOPT_NOFOLLOW.  We don't ask for any attributes. */
+#ifndef VLNK
+#define VLNK 5  /* not declared by the iOS SDK, but getattrlist still returns it */
+#endif
     if (buffer.type == VLNK)
     {
         u_int32_t dummy;
@@ -6971,7 +6974,6 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
                             IO_STATUS_BLOCK *io_status, LARGE_INTEGER *offset,
                             LARGE_INTEGER *count, ULONG *key, BOOLEAN dont_wait, BOOLEAN exclusive )
 {
-    static int warn;
     unsigned int ret;
     HANDLE handle;
     BOOLEAN async;
@@ -6981,7 +6983,6 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
         FIXME("Unimplemented yet parameter\n");
         return STATUS_NOT_IMPLEMENTED;
     }
-    if (apc_user && !warn++) FIXME("I/O completion on lock not implemented yet\n");
 
     for (;;)
     {
@@ -6999,7 +7000,14 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
         SERVER_END_REQ;
         if (ret != STATUS_PENDING)
         {
-            if (!ret && event) NtSetEvent( event, NULL );
+            if (!ret)
+            {
+                if (event) NtSetEvent( event, NULL );
+                /* The lock was taken without ever blocking, but a caller that
+                 * asked for one asynchronously is waiting on its completion
+                 * port for the news. */
+                if (apc_user) add_completion( file, (ULONG_PTR)apc_user, ret, 0, FALSE );
+            }
             return ret;
         }
         if (async)
@@ -7244,7 +7252,7 @@ NTSTATUS get_device_info( int fd, FILE_FS_DEVICE_INFORMATION *info )
             info->DeviceType = FILE_DEVICE_TAPE;
             break;
         }
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__APPLE__)
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || (defined(__APPLE__) && !TARGET_OS_IPHONE)
         {
             int d_type;
             if (ioctl(fd, FIODTYPE, &d_type) == 0)

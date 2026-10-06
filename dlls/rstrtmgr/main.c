@@ -63,9 +63,31 @@ DWORD WINAPI RmRegisterResources(DWORD dwSessionHandle, UINT nFiles, LPCWSTR rgs
  */
 DWORD WINAPI RmStartSession(DWORD *sessionhandle, DWORD flags, WCHAR sessionkey[])
 {
+    static const WCHAR hex[] = L"0123456789abcdef";
+    static LONG session_count;
+    ULONGLONG key[2];
+    const BYTE *bytes;
+    UINT i;
+
     FIXME("%p, %ld, %p stub!\n", sessionhandle, flags, sessionkey);
-    if (sessionhandle)
-        *sessionhandle = 0xdeadbeef;
+
+    if (!sessionhandle || !sessionkey) return ERROR_INVALID_PARAMETER;
+
+    /* The caller passes an uninitialized CCH_RM_SESSION_KEY + 1 buffer that has to be
+     * filled with a null terminated key. Applications use it as a string right away
+     * (Inno Setup based installers do), so leaving it untouched makes them read past
+     * the buffer and corrupt their stack. */
+    key[0] = (ULONGLONG)GetCurrentProcessId() << 32 | GetTickCount();
+    key[1] = (ULONGLONG)InterlockedIncrement( &session_count ) << 32 | GetCurrentThreadId();
+    bytes = (const BYTE *)key;
+    for (i = 0; i < sizeof(key); i++)
+    {
+        sessionkey[2 * i] = hex[bytes[i] >> 4];
+        sessionkey[2 * i + 1] = hex[bytes[i] & 0xf];
+    }
+    sessionkey[CCH_RM_SESSION_KEY] = 0;
+
+    *sessionhandle = 0xdeadbeef;
     return ERROR_SUCCESS;
 }
 

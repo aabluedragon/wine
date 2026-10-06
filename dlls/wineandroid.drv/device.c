@@ -418,7 +418,11 @@ static struct native_win_data *create_native_win_data( HWND hwnd, BOOL opengl )
     if (!(data = calloc( 1, sizeof(*data) ))) return NULL;
     data->hwnd = hwnd;
     data->opengl = opengl;
-    if (!opengl) data->api = NATIVE_WINDOW_API_CPU;
+    /* opengl windows are presented from the CPU too: their frames are read
+     * back from a pbuffer and copied in, since a cross-process EGL window
+     * surface is not possible on current Android. Without a default here the
+     * producer is never connected and every dequeue fails with NO_INIT. */
+    data->api = NATIVE_WINDOW_API_CPU;
     data->buffer_format = PF_BGRA_8888;
     data_map[idx] = data;
     for (i = 0; i < NB_CACHED_BUFFERS; i++) data->buffer_lru[i] = -1;

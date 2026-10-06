@@ -1177,7 +1177,13 @@ LRESULT ANDROID_WindowMessage( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
                 release_win_data( data );
             }
 
-            detach_client_surfaces( hwnd );
+            /* The Java side has just handed us a new client surface. Drop the
+             * cached drawable so a fresh EGL surface is created against it.
+             * Do not detach the client surfaces here - win32u does that when a
+             * window is going away, and doing it on every refresh tears down
+             * the surface we were just given, so only the first frame ever
+             * reaches the screen. */
+            update_gl_drawable( hwnd );
         }
         else
         {

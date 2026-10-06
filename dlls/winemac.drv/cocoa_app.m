@@ -872,42 +872,51 @@ static NSString* WineLocalizedString(unsigned int stringID)
             if ([originalDisplayModes count] || displaysCapturedForFullscreen ||
                 !active || CGCaptureAllDisplays() == CGDisplayNoErr)
             {
-                if (active)
-                {
-                    // If we get here, we have the displays captured.  If we don't
-                    // know the original mode of the display, the current mode must
-                    // be the original.  We should re-query the current mode since
-                    // another process could have changed it between when we last
-                    // checked and when we captured the displays.
-                    if (!originalMode)
-                        originalMode = currentMode = CGDisplayCopyDisplayMode(displayID);
+                // If we are active, we have the displays captured.  If we don't
+                // know the original mode of the display, the current mode must
+                // be the original.  We should re-query the current mode since
+                // another process could have changed it between when we last
+                // checked and when we captured the displays.
+                //
+                // Only the active application can capture the displays, but the
+                // mode can be changed without capturing them.  Do that rather
+                // than deferring the change until we are activated: an
+                // application that sets a mode and then looks at the result
+                // gets the mode it asked for, and Wine's idea of the display
+                // size stays in sync with the real one.  Wine positions
+                // fullscreen windows against its idea of the display, so
+                // letting the two disagree leaves the window misplaced.
+                if (!originalMode)
+                    originalMode = currentMode = CGDisplayCopyDisplayMode(displayID);
 
-                    if (originalMode)
+                if (originalMode)
+                {
+                    for (id modeObject in modes)
                     {
-                        for (id modeObject in modes)
+                        mode = (CGDisplayModeRef)modeObject;
+                        if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
                         {
-                            mode = (CGDisplayModeRef)modeObject;
-                            if (CGDisplaySetDisplayMode(displayID, mode, NULL) == CGDisplayNoErr)
-                            {
-                                ret = TRUE;
-                                break;
-                            }
+                            ret = TRUE;
+                            break;
                         }
                     }
-                    if (ret && !(currentMode && [self mode:mode matchesMode:currentMode]))
-                        [originalDisplayModes setObject:(id)originalMode forKey:displayIDKey];
-                    else if (![originalDisplayModes count])
-                    {
-                        CGRestorePermanentDisplayConfiguration();
-                        if (!displaysCapturedForFullscreen)
-                            CGReleaseAllDisplays();
-                    }
-
-                    if (currentMode)
-                        CGDisplayModeRelease(currentMode);
                 }
-                else
+                if (ret && !(currentMode && [self mode:mode matchesMode:currentMode]))
+                    [originalDisplayModes setObject:(id)originalMode forKey:displayIDKey];
+                else if (![originalDisplayModes count] && active)
                 {
+                    CGRestorePermanentDisplayConfiguration();
+                    if (!displaysCapturedForFullscreen)
+                        CGReleaseAllDisplays();
+                }
+
+                if (currentMode)
+                    CGDisplayModeRelease(currentMode);
+
+                if (!ret && !active)
+                {
+                    // The mode couldn't be set now; remember it and try again
+                    // when we are activated.
                     [latentDisplayModes setObject:(id)mode forKey:displayIDKey];
                     ret = TRUE;
                 }

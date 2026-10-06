@@ -2105,8 +2105,17 @@ int WINAPI WSALookupServiceBeginA( WSAQUERYSETA *query, DWORD flags, HANDLE *loo
  */
 int WINAPI WSALookupServiceBeginW( WSAQUERYSETW *query, DWORD flags, HANDLE *lookup )
 {
-    FIXME( "(%p %#lx %p) Stub!\n", query, flags, lookup );
-    SetLastError( WSA_NOT_ENOUGH_MEMORY );
+    /* Service lookup goes through a namespace provider - Bluetooth SDP, NLA,
+     * a directory service - and none is registered here for a query to reach,
+     * which is what having no such service says. */
+    TRACE( "(%p %#lx %p)\n", query, flags, lookup );
+
+    if (!query || !lookup)
+    {
+        SetLastError( WSAEFAULT );
+        return -1;
+    }
+    SetLastError( WSASERVICE_NOT_FOUND );
     return -1;
 }
 

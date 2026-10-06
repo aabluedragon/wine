@@ -108,7 +108,12 @@ static NTSTATUS bluetooth_init ( void *params )
 
     dbus_connection = bluez_dbus_init();
     if (!dbus_connection)
-        return STATUS_INTERNAL_ERROR;
+    {
+        /* There is no BlueZ to talk to; the host has no Bluetooth we can
+         * expose, which isn't a failure on our part. */
+        WARN( "No D-Bus connection, Bluetooth is unavailable.\n" );
+        return STATUS_NOT_SUPPORTED;
+    }
 
     status = bluez_auth_agent_start( dbus_connection, &bluetooth_auth_agent );
     if (status)

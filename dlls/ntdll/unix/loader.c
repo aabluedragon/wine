@@ -382,8 +382,14 @@ static void set_config_dir(void)
 static void init_paths(void)
 {
     Dl_info info;
+    const char *unix_dir = getenv( "WINEUNIXDIR" );
 
-    if (!dladdr( init_paths, &info ) || !(ntdll_dir = realpath_dirname( info.dli_fname )))
+    /* dladdr() reports where ntdll.so really lives, which on some platforms is
+     * not where the wine tree points at it from: an Android app may only
+     * execute files out of its native library directory, so the tree is built
+     * from symlinks into that one flat directory. Let the tree be named. */
+    if (unix_dir && unix_dir[0] == '/') ntdll_dir = strdup( unix_dir );
+    else if (!dladdr( init_paths, &info ) || !(ntdll_dir = realpath_dirname( info.dli_fname )))
         fatal_error( "cannot get path to ntdll.so\n" );
 
     if ((build_dir = remove_tail( ntdll_dir, "/dlls/ntdll" )))
@@ -395,7 +401,8 @@ static void init_paths(void)
     {
         if (!(dll_dir = remove_tail( ntdll_dir, get_so_dir(current_machine) ))) dll_dir = ntdll_dir;
         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
-        data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
+        if (!(data_dir = getenv( "WINEDATADIR" )) || data_dir[0] != '/')
+            data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
         wineloader = build_path( ntdll_dir, "wine" );
     }
 
@@ -1914,6 +1921,7 @@ static void apple_main_thread(void)
 
     if (!pthread_main_np()) return;
 
+#if !TARGET_OS_IPHONE
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     /* Multi-processing Services can get confused about the main thread if the
@@ -1926,6 +1934,7 @@ static void apple_main_thread(void)
      * center scheduled on this thread's run loop.  In theory, it's scheduled
      * in the first thread to ask for it. */
     CFNotificationCenterGetDistributedCenter();
+#endif  /* neither exists on iOS */
 
     /* We use this run loop source for two purposes.  First, a run loop exits
      * if it has no more sources scheduled.  So, we need at least one source
@@ -2033,7 +2042,7 @@ static void reexec_loader( int argc, char *argv[], char *extra_arg )
     if (machine == IMAGE_FILE_MACHINE_AMD64) machine = IMAGE_FILE_MACHINE_I386;
 
     loader_exec( new_argv, machine );
-    fatal_error( "could not exec the wine loader\n" );
+    fatal_error( "could not exec the wine loader %s: %s\n", wineloader, strerror(errno) );
 }
 
 /***********************************************************************

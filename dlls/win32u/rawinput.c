@@ -691,7 +691,12 @@ BOOL WINAPI NtUserRegisterRawInputDevices( const RAWINPUTDEVICE *devices, UINT d
             return FALSE;
         }
 
-        if (devices[i].dwFlags & ~(RIDEV_REMOVE|RIDEV_NOLEGACY|RIDEV_INPUTSINK|RIDEV_DEVNOTIFY))
+        /* RIDEV_CAPTUREMOUSE only matters alongside RIDEV_NOLEGACY, which
+         * already stops the clicks it governs from being delivered, and
+         * RIDEV_NOHOTKEYS (the same bit, for keyboards) suppresses shell
+         * hotkeys we don't implement. Neither leaves anything for us to do. */
+        if (devices[i].dwFlags & ~(RIDEV_REMOVE|RIDEV_NOLEGACY|RIDEV_INPUTSINK|RIDEV_DEVNOTIFY
+                                   |RIDEV_CAPTUREMOUSE|RIDEV_NOHOTKEYS))
             FIXME( "Unhandled flags %#x for device %u.\n", devices[i].dwFlags, i );
     }
 

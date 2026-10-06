@@ -45,8 +45,20 @@
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <mach/thread_act.h>
+#if TARGET_OS_IPHONE
+/* The iOS SDK ships neither <mach/mach_vm.h> nor the bootstrap header, but a
+ * simulator process is an ordinary macOS process and has both underneath. */
+typedef char name_t[128];
+extern kern_return_t mach_vm_read_overwrite( vm_map_t, mach_vm_address_t, mach_vm_size_t,
+                                             mach_vm_address_t, mach_vm_size_t * );
+extern kern_return_t mach_vm_write( vm_map_t, mach_vm_address_t, vm_offset_t, mach_msg_type_number_t );
+extern kern_return_t mach_vm_region( vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t,
+                                     vm_region_info_t, mach_msg_type_number_t *, mach_port_t * );
+extern kern_return_t mach_vm_protect( vm_map_t, mach_vm_address_t, mach_vm_size_t, boolean_t, vm_prot_t );
+#else
 #include <mach/mach_vm.h>
 #include <servers/bootstrap.h>
+#endif
 
 static mach_port_t server_mach_port;
 

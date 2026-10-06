@@ -26,7 +26,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
 /* Index to TLS */
-DWORD msvcrt_tls_index;
+DWORD msvcrt_tls_index = TLS_OUT_OF_INDEXES;
 
 static const char* msvcrt_get_reason(DWORD reason)
 {
@@ -40,8 +40,10 @@ static const char* msvcrt_get_reason(DWORD reason)
   return "UNKNOWN";
 }
 
-static inline BOOL msvcrt_init_tls(void)
+BOOL msvcrt_init_tls(void)
 {
+  if (msvcrt_tls_index != TLS_OUT_OF_INDEXES) return TRUE;
+
   msvcrt_tls_index = TlsAlloc();
 
   if (msvcrt_tls_index == TLS_OUT_OF_INDEXES)

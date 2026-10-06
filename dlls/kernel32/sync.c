@@ -42,7 +42,12 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
 
-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+/* Windows puts this at a fixed address; a platform whose kernel refuses to
+ * map there can move it, and every user of it has to follow. */
+#ifndef WINE_USER_SHARED_DATA_ADDR
+#define WINE_USER_SHARED_DATA_ADDR 0x7ffe0000
+#endif
+static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_USER_SHARED_DATA_ADDR;
 
 
 static void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,

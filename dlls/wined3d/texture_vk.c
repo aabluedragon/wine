@@ -816,6 +816,13 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     resource = &texture_vk->t.resource;
     format_vk = wined3d_format_vk(resource->format);
 
+    if (!format_vk->vk_format)
+    {
+        WARN("Format %s has no Vulkan equivalent, not allocating an image.\n",
+                debug_d3dformat(format_vk->f.id));
+        return FALSE;
+    }
+
     if (wined3d_format_is_typeless(&format_vk->f) || texture_vk->t.swapchain
             || (texture_vk->t.resource.bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
             || (format_vk->f.attrs & WINED3D_FORMAT_ATTR_PLANAR))
@@ -866,6 +873,13 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
         texture_vk->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     else if (resource->bind_flags & WINED3D_BIND_DECODER_OUTPUT)
         texture_vk->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    else if (!resource->bind_flags)
+    {
+        /* A texture without bind flags can only ever be the source or the
+         * destination of a transfer; ddraw creates those for surfaces that are
+         * only ever mapped and blitted. */
+        texture_vk->layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
     else
     {
         FIXME("unexpected bind flags %s, using VK_IMAGE_LAYOUT_GENERAL\n", wined3d_debug_bind_flags(resource->bind_flags));
@@ -1522,7 +1536,18 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
 
     if (!(src_resource->access & WINED3D_RESOURCE_ACCESS_GPU))
     {
-        TRACE("Source resource does not have GPU access.\n");
+        TRACE("Source resource does not have GPU access, format %s -> %s.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
+        return false;
+    }
+
+    if (!wined3d_format_vk(src_format)->vk_format || !wined3d_format_vk(dst_format)->vk_format)
+    {
+        /* Formats without a Vulkan equivalent, e.g. the palettised formats
+         * used by older DirectDraw applications, are handled by the CPU
+         * blitter. */
+        TRACE("Format %s -> %s has no Vulkan equivalent.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
         return false;
     }
 

@@ -95,6 +95,20 @@ static const GLubyte *(*pglGetString)(GLenum name);
 static PFN_glGetIntegerv pglGetIntegerv;
 static void (*pglReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height,
                              GLenum format, GLenum type, void *pixels);
+/* used by the sampler object emulation */
+static void (*pglTexParameteri)(GLenum target, GLenum pname, GLint param);
+static void (*pglBindTexture)(GLenum target, GLuint texture);
+static void (*pglActiveTexture)(GLenum texture);
+static BOOL emulate_sampler_objects;
+/* used by the buffer respecification workaround */
+static PFN_glBufferSubData pglBufferSubData;
+static PFN_glBufferData pglBufferData;
+static PFN_glGetBufferParameteriv pglGetBufferParameteriv;
+static PFN_glMapBuffer pglMapBuffer;
+static PFN_glUnmapBuffer pglUnmapBuffer;
+static PFN_glBufferParameteriAPPLE pglBufferParameteriAPPLE;
+static PFN_glFlushMappedBufferRangeAPPLE pglFlushMappedBufferRangeAPPLE;
+static BOOL use_apple_buffer_range;
 
 
 struct color_mode {
@@ -1241,6 +1255,8 @@ static BOOL init_gl_info(void)
 {
     static const char legacy_extensions[] = " WGL_EXT_extensions_string";
     static const char legacy_ext_swap_control[] = " WGL_EXT_swap_control";
+    /* Emulated below, see macdrv_glBindSampler and friends. */
+    static const char emulated_sampler_objects[] = " GL_ARB_sampler_objects";
 
     CGLContextObj context;
     CGLContextObj old_context = CGLGetCurrentContext();
@@ -1252,11 +1268,19 @@ static BOOL init_gl_info(void)
     length = strlen(str) + sizeof(legacy_extensions);
     if (allow_vsync)
         length += strlen(legacy_ext_swap_control);
+    emulate_sampler_objects = !gluCheckExtension((GLubyte*)"GL_ARB_sampler_objects", (GLubyte*)str);
+    use_apple_buffer_range = gluCheckExtension((GLubyte*)"GL_APPLE_flush_buffer_range", (GLubyte*)str) &&
+                             (pglBufferParameteriAPPLE = dlsym(opengl_handle, "glBufferParameteriAPPLE")) &&
+                             (pglFlushMappedBufferRangeAPPLE = dlsym(opengl_handle, "glFlushMappedBufferRangeAPPLE"));
+    if (emulate_sampler_objects)
+        length += strlen(emulated_sampler_objects);
     gl_info.glExtensions = malloc(length);
     strcpy(gl_info.glExtensions, str);
     strcat(gl_info.glExtensions, legacy_extensions);
     if (allow_vsync)
         strcat(gl_info.glExtensions, legacy_ext_swap_control);
+    if (emulate_sampler_objects)
+        strcat(gl_info.glExtensions, emulated_sampler_objects);
 
     pglGetIntegerv(GL_MAX_VIEWPORT_DIMS, gl_info.max_viewport_dims);
 
@@ -2011,6 +2035,354 @@ static const GLubyte *macdrv_glGetString(GLenum name)
 
 
 /**********************************************************************
+ *              macdrv_glGetStringi
+ *
+ * Emulate glGetStringi on legacy (GL 2.1) contexts.  Apple's GL-on-Metal
+ * driver answers GL_NUM_EXTENSIONS even on 2.1 contexts, so applications
+ * take the GL3 extension-enumeration path and then crash calling the
+ * missing glGetStringi.  Tokenize the classic extension string instead.
+ */
+static char **extension_tokens;
+static unsigned int extension_token_count;
+static pthread_once_t extension_tokens_once = PTHREAD_ONCE_INIT;
+
+static void init_extension_tokens(void)
+{
+    const char *str = (const char *)macdrv_glGetString(GL_EXTENSIONS);
+    char *copy, *tok, *saveptr = NULL;
+    unsigned int capacity = 64, count = 0;
+    char **list;
+
+    if (!str) return;
+    if (!(copy = strdup(str))) return;
+    if (!(list = malloc(capacity * sizeof(*list)))) return;
+
+    for (tok = strtok_r(copy, " ", &saveptr); tok; tok = strtok_r(NULL, " ", &saveptr))
+    {
+        if (count == capacity)
+        {
+            char **new_list = realloc(list, (capacity *= 2) * sizeof(*list));
+            if (!new_list) break;
+            list = new_list;
+        }
+        list[count++] = tok;
+    }
+    extension_token_count = count;
+    extension_tokens = list;
+}
+
+static const GLubyte *macdrv_glGetStringi(GLenum name, GLuint index)
+{
+    static const GLubyte *(*host_glGetStringi)(GLenum, GLuint);
+
+    if (name != GL_EXTENSIONS)
+    {
+        if (!host_glGetStringi) host_glGetStringi = dlsym(opengl_handle, "glGetStringi");
+        return host_glGetStringi ? host_glGetStringi(name, index) : NULL;
+    }
+    pthread_once(&extension_tokens_once, init_extension_tokens);
+    if (!extension_tokens) return (const GLubyte *)"";
+    /* never return NULL for extension queries: legacy contexts may report a
+     * GL_NUM_EXTENSIONS that differs slightly from the classic string's token
+     * count, and applications rarely null-check the result */
+    if (index >= extension_token_count) return (const GLubyte *)"";
+    return (const GLubyte *)extension_tokens[index];
+}
+
+
+/**********************************************************************
+ *              macdrv_glBufferSubData
+ *
+ * Apple's GL-on-Metal driver has no buffer renaming: updating a buffer that
+ * the GPU may still be reading synchronizes with it first, which costs on the
+ * order of 250us per call and reduces engines that refill a vertex buffer
+ * before each draw (the Build engine's polymost renderer, and many other
+ * older GL renderers) to a handful of frames per second.
+ *
+ * When the update replaces the buffer's entire contents, respecify the storage
+ * instead. That has the same result, but lets the driver orphan the old
+ * storage and write into a fresh one without waiting, which is what drivers
+ * with buffer renaming do internally. Partial updates have to keep the rest of
+ * the buffer, so they go through an unsynchronized mapping instead.
+ */
+static void macdrv_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data)
+{
+    GLint buffer_size = 0;
+
+    if (size <= 0 || !data)
+    {
+        pglBufferSubData(target, offset, size, data);
+        return;
+    }
+
+    pglGetBufferParameteriv(target, GL_BUFFER_SIZE, &buffer_size);
+
+    if (!offset && buffer_size == size)
+    {
+        GLint usage = GL_DYNAMIC_DRAW;
+
+        pglGetBufferParameteriv(target, GL_BUFFER_USAGE, &usage);
+        pglBufferData(target, size, data, usage);
+        return;
+    }
+
+    /* Write through an unsynchronized mapping, flushing just the range that
+     * changed. This is the streaming update path Apple documents, and
+     * applications that rewrite part of a buffer before drawing from it are
+     * precisely the ones managing their own ring of ranges. */
+    if (use_apple_buffer_range && offset >= 0 && offset + size <= buffer_size)
+    {
+        void *ptr;
+
+        pglBufferParameteriAPPLE(target, GL_BUFFER_SERIALIZED_MODIFY_APPLE, GL_FALSE);
+        pglBufferParameteriAPPLE(target, GL_BUFFER_FLUSHING_UNMAP_APPLE, GL_FALSE);
+        if ((ptr = pglMapBuffer(target, GL_WRITE_ONLY)))
+        {
+            memcpy((char *)ptr + offset, data, size);
+            pglFlushMappedBufferRangeAPPLE(target, offset, size);
+            if (pglUnmapBuffer(target)) return;
+            /* the contents were lost, upload them the normal way below */
+        }
+    }
+
+    pglBufferSubData(target, offset, size, data);
+}
+
+
+/**********************************************************************
+ *              Sampler object emulation
+ *
+ * Apple's GL-on-Metal driver only implements sampler objects on core
+ * profile contexts, but compatibility contexts on macOS top out at GL 2.1.
+ * Applications commonly assume sampler objects are always present, because
+ * every Windows driver exposes them on compatibility contexts too, and skip
+ * loading the entry points when the extension is missing while still calling
+ * them (NetDuke32 and other Build engine ports crash this way).
+ *
+ * Emulate them the way the state was managed before GL 3.3: keep the sampler
+ * parameters on our side and push them onto the texture bound to the unit the
+ * sampler is bound to, re-applying them whenever that binding changes.
+ */
+
+#define MAX_SAMPLER_TEXTURE_UNITS 32
+
+struct emulated_sampler
+{
+    GLuint id;
+    BOOL used;
+    struct { GLenum pname; GLint value; } params[16];
+    unsigned int param_count;
+};
+
+static struct emulated_sampler *emulated_samplers;
+static unsigned int emulated_sampler_count;
+static GLuint emulated_sampler_bindings[MAX_SAMPLER_TEXTURE_UNITS];
+static GLenum emulated_sampler_active_unit = GL_TEXTURE0;
+static pthread_mutex_t emulated_sampler_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* caller must hold emulated_sampler_mutex */
+static struct emulated_sampler *find_emulated_sampler(GLuint id)
+{
+    unsigned int i;
+
+    if (!id) return NULL;
+    for (i = 0; i < emulated_sampler_count; i++)
+        if (emulated_samplers[i].used && emulated_samplers[i].id == id)
+            return &emulated_samplers[i];
+    return NULL;
+}
+
+/* caller must hold emulated_sampler_mutex; applies to the texture bound to the current unit */
+static void apply_emulated_sampler(const struct emulated_sampler *sampler)
+{
+    unsigned int i;
+
+    for (i = 0; i < sampler->param_count; i++)
+        pglTexParameteri(GL_TEXTURE_2D, sampler->params[i].pname, sampler->params[i].value);
+}
+
+static void macdrv_glGenSamplers(GLsizei count, GLuint *samplers)
+{
+    static GLuint next_id = 1;
+    GLsizei i;
+
+    TRACE("count %d, samplers %p\n", count, samplers);
+
+    if (count < 0 || !samplers) return;
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    for (i = 0; i < count; i++)
+    {
+        struct emulated_sampler *sampler = NULL;
+        unsigned int j;
+
+        for (j = 0; j < emulated_sampler_count; j++)
+            if (!emulated_samplers[j].used) { sampler = &emulated_samplers[j]; break; }
+
+        if (!sampler)
+        {
+            struct emulated_sampler *new_samplers;
+            unsigned int new_count = emulated_sampler_count ? emulated_sampler_count * 2 : 16;
+
+            if (!(new_samplers = realloc(emulated_samplers, new_count * sizeof(*new_samplers))))
+            {
+                samplers[i] = 0;
+                continue;
+            }
+            memset(new_samplers + emulated_sampler_count, 0,
+                   (new_count - emulated_sampler_count) * sizeof(*new_samplers));
+            emulated_samplers = new_samplers;
+            sampler = &emulated_samplers[emulated_sampler_count];
+            emulated_sampler_count = new_count;
+        }
+
+        memset(sampler, 0, sizeof(*sampler));
+        sampler->id = next_id++;
+        sampler->used = TRUE;
+        samplers[i] = sampler->id;
+    }
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+static void macdrv_glDeleteSamplers(GLsizei count, const GLuint *samplers)
+{
+    GLsizei i;
+    unsigned int unit;
+
+    TRACE("count %d, samplers %p\n", count, samplers);
+
+    if (count < 0 || !samplers) return;
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    for (i = 0; i < count; i++)
+    {
+        struct emulated_sampler *sampler = find_emulated_sampler(samplers[i]);
+
+        if (!sampler) continue;
+        for (unit = 0; unit < MAX_SAMPLER_TEXTURE_UNITS; unit++)
+            if (emulated_sampler_bindings[unit] == sampler->id)
+                emulated_sampler_bindings[unit] = 0;
+        sampler->used = FALSE;
+    }
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+static GLboolean macdrv_glIsSampler(GLuint sampler)
+{
+    GLboolean ret;
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    ret = find_emulated_sampler(sampler) != NULL;
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+
+    TRACE("sampler %u -> %d\n", sampler, ret);
+    return ret;
+}
+
+static void macdrv_glSamplerParameteri(GLuint sampler, GLenum pname, GLint param)
+{
+    struct emulated_sampler *object;
+    unsigned int i;
+
+    TRACE("sampler %u, pname %#x, param %d\n", sampler, pname, param);
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    if (!(object = find_emulated_sampler(sampler)))
+    {
+        pthread_mutex_unlock(&emulated_sampler_mutex);
+        RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+        return;
+    }
+
+    for (i = 0; i < object->param_count; i++)
+        if (object->params[i].pname == pname) break;
+
+    if (i == object->param_count)
+    {
+        if (i == ARRAY_SIZE(object->params))
+        {
+            FIXME("too many sampler parameters, dropping %#x\n", pname);
+            pthread_mutex_unlock(&emulated_sampler_mutex);
+            return;
+        }
+        object->params[i].pname = pname;
+        object->param_count++;
+    }
+    object->params[i].value = param;
+
+    /* if the sampler is currently bound, the change takes effect immediately */
+    for (i = 0; i < MAX_SAMPLER_TEXTURE_UNITS; i++)
+    {
+        if (emulated_sampler_bindings[i] != sampler) continue;
+        if (GL_TEXTURE0 + i == emulated_sampler_active_unit)
+            pglTexParameteri(GL_TEXTURE_2D, pname, param);
+    }
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+static void macdrv_glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param)
+{
+    macdrv_glSamplerParameteri(sampler, pname, (GLint)param);
+}
+
+static void macdrv_glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint *params)
+{
+    if (params) macdrv_glSamplerParameteri(sampler, pname, params[0]);
+}
+
+static void macdrv_glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *params)
+{
+    if (params) macdrv_glSamplerParameteri(sampler, pname, (GLint)params[0]);
+}
+
+static void macdrv_glBindSampler(GLuint unit, GLuint sampler)
+{
+    struct emulated_sampler *object;
+
+    TRACE("unit %u, sampler %u\n", unit, sampler);
+
+    if (unit >= MAX_SAMPLER_TEXTURE_UNITS)
+    {
+        FIXME("texture unit %u out of range\n", unit);
+        return;
+    }
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    emulated_sampler_bindings[unit] = sampler;
+    if ((object = find_emulated_sampler(sampler)) && GL_TEXTURE0 + unit == emulated_sampler_active_unit)
+        apply_emulated_sampler(object);
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+/* Sampler state lives on the texture in the emulation, so it has to be pushed
+ * again whenever a different texture is bound to a unit holding a sampler. */
+static void macdrv_glBindTexture(GLenum target, GLuint texture)
+{
+    struct emulated_sampler *object;
+    unsigned int unit;
+
+    pglBindTexture(target, texture);
+
+    if (target != GL_TEXTURE_2D) return;
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    unit = emulated_sampler_active_unit - GL_TEXTURE0;
+    if (unit < MAX_SAMPLER_TEXTURE_UNITS && (object = find_emulated_sampler(emulated_sampler_bindings[unit])))
+        apply_emulated_sampler(object);
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+static void macdrv_glActiveTexture(GLenum texture)
+{
+    pglActiveTexture(texture);
+
+    pthread_mutex_lock(&emulated_sampler_mutex);
+    emulated_sampler_active_unit = texture;
+    pthread_mutex_unlock(&emulated_sampler_mutex);
+}
+
+
+/**********************************************************************
  *              macdrv_glReadPixels
  *
  * Hook into glReadPixels as part of the implementation of
@@ -2096,6 +2468,18 @@ static BOOL macdrv_context_create(int format, void *share, const int *attrib_lis
 
             case WGL_CONTEXT_LAYER_PLANE_ARB:
                 WARN("WGL_CONTEXT_LAYER_PLANE_ARB attribute ignored\n");
+                break;
+
+            case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
+                /* Only a hint that the app won't rely on error checking, we can
+                 * always keep checking errors as usual. */
+                WARN("WGL_CONTEXT_OPENGL_NO_ERROR_ARB attribute ignored\n");
+                break;
+
+            case WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB:
+                /* macOS contexts don't implement robustness; the robust access
+                 * flag is already ignored above, so ignore this too. */
+                WARN("WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB attribute ignored\n");
                 break;
 
             case WGL_CONTEXT_FLAGS_ARB:
@@ -2524,6 +2908,17 @@ static void macdrv_init_extensions(struct opengl_funcs *funcs, BOOLEAN extension
     if (gluCheckExtension((GLubyte*)"GL_ARB_multisample", (GLubyte*)gl_info.glExtensions))
         extensions[WGL_ARB_multisample] = 1;
 
+    /* Legacy (GL 2.1) contexts: expose ARB_vertex_array_object backed by the
+     * functionally equivalent APPLE extension; the ARB-named entry points are
+     * aliased to the APPLE ones in macdrv_get_proc_address. */
+    if (gluCheckExtension((GLubyte*)"GL_APPLE_vertex_array_object", (GLubyte*)gl_info.glExtensions))
+        extensions[GL_ARB_vertex_array_object] = 1;
+
+    /* Legacy (GL 2.1) contexts: sampler objects are emulated on top of texture
+     * parameters, see macdrv_glBindSampler. */
+    if (emulate_sampler_objects)
+        extensions[GL_ARB_sampler_objects] = 1;
+
     if (gluCheckExtension((GLubyte*)"GL_ARB_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
         extensions[WGL_ARB_framebuffer_sRGB] = 1;
 
@@ -2586,6 +2981,14 @@ UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, co
     LOAD_FUNCPTR(glGetString);
     LOAD_FUNCPTR(glReadPixels);
     LOAD_FUNCPTR(glCopyColorTable);
+    LOAD_FUNCPTR(glTexParameteri);
+    LOAD_FUNCPTR(glBindTexture);
+    LOAD_FUNCPTR(glActiveTexture);
+    LOAD_FUNCPTR(glBufferSubData);
+    LOAD_FUNCPTR(glBufferData);
+    LOAD_FUNCPTR(glGetBufferParameteriv);
+    LOAD_FUNCPTR(glMapBuffer);
+    LOAD_FUNCPTR(glUnmapBuffer);
 
     if (!init_gl_info())
         goto failed;
@@ -2707,16 +3110,46 @@ static void *macdrv_get_proc_address(const char *name)
     /* redirect some standard OpenGL functions */
     if (!strcmp(name, "glCopyPixels")) return macdrv_glCopyPixels;
     if (!strcmp(name, "glGetString")) return macdrv_glGetString;
+    if (!strcmp(name, "glGetStringi")) return macdrv_glGetStringi;
     if (!strcmp(name, "glReadPixels")) return macdrv_glReadPixels;
+    if (!strcmp(name, "glBufferSubData")) return macdrv_glBufferSubData;
+
+    /* sampler object emulation, and the texture state hooks it needs */
+    if (!emulate_sampler_objects) { /* nothing to do, the driver implements them */ }
+    else if (!strcmp(name, "glGenSamplers")) return macdrv_glGenSamplers;
+    else if (!strcmp(name, "glDeleteSamplers")) return macdrv_glDeleteSamplers;
+    else if (!strcmp(name, "glIsSampler")) return macdrv_glIsSampler;
+    else if (!strcmp(name, "glBindSampler")) return macdrv_glBindSampler;
+    else if (!strcmp(name, "glSamplerParameteri")) return macdrv_glSamplerParameteri;
+    else if (!strcmp(name, "glSamplerParameterf")) return macdrv_glSamplerParameterf;
+    else if (!strcmp(name, "glSamplerParameteriv")) return macdrv_glSamplerParameteriv;
+    else if (!strcmp(name, "glSamplerParameterfv")) return macdrv_glSamplerParameterfv;
+    else if (!strcmp(name, "glBindTexture")) return macdrv_glBindTexture;
+    else if (!strcmp(name, "glActiveTexture")) return macdrv_glActiveTexture;
 
     /* redirect some OpenGL extension functions */
     if (!strcmp(name, "glCopyColorTable")) return macdrv_glCopyColorTable;
-    return dlsym(opengl_handle, name);
+
+    {
+        void *ret = dlsym(opengl_handle, name);
+        if (ret) return ret;
+    }
+
+    /* Legacy (GL 2.1) context fallbacks: Apple's GL-on-Metal driver answers
+     * GL3 queries like GL_NUM_EXTENSIONS on 2.1 contexts, luring applications
+     * onto GL3 code paths whose entry points don't exist there.  Provide the
+     * commonly needed ones instead of letting apps crash on NULL calls. */
+    if (!strcmp(name, "glGenVertexArrays")) return dlsym(opengl_handle, "glGenVertexArraysAPPLE");
+    if (!strcmp(name, "glBindVertexArray")) return dlsym(opengl_handle, "glBindVertexArrayAPPLE");
+    if (!strcmp(name, "glDeleteVertexArrays")) return dlsym(opengl_handle, "glDeleteVertexArraysAPPLE");
+    if (!strcmp(name, "glIsVertexArray")) return dlsym(opengl_handle, "glIsVertexArrayAPPLE");
+    return NULL;
 }
 
 static BOOL macdrv_surface_swap(struct opengl_drawable *base)
 {
     struct macdrv_context *context = NtCurrentTeb()->glReserved2;
+
 
     TRACE("%s context %p/%p/%p\n", debugstr_opengl_drawable(base), context, (context ? context->context : NULL),
           (context ? context->cglcontext : NULL));

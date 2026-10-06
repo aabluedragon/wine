@@ -321,4 +321,16 @@
                        "bx r0" )
 #endif
 
+
+#if defined(__aarch64__) || defined(__arm64ec__)
+/* Apple reserves x18 for the operating system and its kernel clears it on
+ * every exception return - a preempted thread loses it - so the TEB cannot
+ * live in the register the Windows ARM64 ABI puts it in. */
+# ifdef WINE_TEB_X28
+#  define __ASM_TEB_REG "x28"
+# else
+#  define __ASM_TEB_REG "x18"
+# endif
+#endif
+
 #endif  /* __WINE_WINE_ASM_H */

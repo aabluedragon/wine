@@ -64,6 +64,10 @@
 
 #ifdef __APPLE__
 #include <mach/mach.h>
+#include <mach/thread_act.h>
+# if !TARGET_OS_IPHONE
+#include <libproc.h>
+# endif
 #endif
 #ifdef __FreeBSD__
 #include <sys/thr.h>
@@ -2024,6 +2028,43 @@ BOOL get_thread_times(int unix_pid, int unix_tid, LARGE_INTEGER *kernel_time, LA
     }
     procstat_close(pstat);
     return ret;
+#elif defined(__APPLE__)
+#if !TARGET_OS_IPHONE
+    struct proc_taskinfo info;
+#endif
+
+    if (unix_tid != -1)
+    {
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        struct thread_basic_info tbi;
+        mach_port_t self;
+
+        /* The Unix tid is a Mach port name, which is only meaningful inside
+         * the task that owns it, and only while the name is still allocated.
+         * That is guaranteed for the calling thread's own port. */
+        self = mach_thread_self();
+        mach_port_deallocate( mach_task_self(), self );
+        if (unix_pid != getpid() || unix_tid != (int)self) return FALSE;
+
+        if (thread_info( self, THREAD_BASIC_INFO, (thread_info_t)&tbi, &count )) return FALSE;
+        kernel_time->QuadPart = (ULONGLONG)tbi.system_time.seconds * 10000000
+                + (ULONGLONG)tbi.system_time.microseconds * 10;
+        user_time->QuadPart = (ULONGLONG)tbi.user_time.seconds * 10000000
+                + (ULONGLONG)tbi.user_time.microseconds * 10;
+        return TRUE;
+    }
+
+#if TARGET_OS_IPHONE
+    /* libproc, and with it the whole-process times, is not in the iOS SDK. */
+    return FALSE;
+#else
+    if (proc_pidinfo( unix_pid, PROC_PIDTASKINFO, 0, &info, sizeof(info) ) != sizeof(info))
+        return FALSE;
+    /* Mach reports these in nanoseconds. */
+    kernel_time->QuadPart = info.pti_total_system / 100;
+    user_time->QuadPart = info.pti_total_user / 100;
+    return TRUE;
+#endif
 #else
     static int once;
     if (!once++) FIXME("not implemented on this platform\n");
@@ -2084,8 +2125,12 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
 
     if (HandleToULong( info.ClientId.UniqueThread ) != GetCurrentThreadId())
     {
+        /* macOS has no way to name a thread other than the calling one:
+         * pthread_setname_np() takes no thread argument. Thread names are only
+         * used by debuggers and Activity Monitor, so there is nothing else to
+         * do here. */
         static int once;
-        if (!once++) FIXME("setting other thread name not supported\n");
+        if (!once++) WARN("Can't name a thread other than the current one.\n");
         return;
     }
 
@@ -2648,7 +2693,9 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
     case ThreadPowerThrottlingState:
         if (length != sizeof(THREAD_POWER_THROTTLING_STATE)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!data) return STATUS_ACCESS_VIOLATION;
-        FIXME( "ThreadPowerThrottling stub!\n" );
+        /* Asks the scheduler to favour battery life over speed for this
+         * thread. macOS decides that for us from its own energy policy. */
+        WARN( "ignoring the power throttling request\n" );
         return STATUS_SUCCESS;
 
     case ThreadIdealProcessor:
@@ -2691,6 +2738,14 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         return STATUS_NOT_SUPPORTED;
 #endif
     }
+
+    case ThreadPagePriority:
+        /* A hint to the memory manager about which pages to trim first. We
+         * leave the paging decisions to the host kernel, so accept and drop
+         * it rather than failing a call that only ever tunes performance. */
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        TRACE( "ignoring page priority %u\n", *(const ULONG *)data );
+        return STATUS_SUCCESS;
 
     case ThreadBasicInformation:
     case ThreadTimes:

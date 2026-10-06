@@ -111,8 +111,11 @@ static HRESULT WINAPI update_manager_UnregisterWaitHandleCallback(IDirectManipul
 static HRESULT WINAPI update_manager_Update(IDirectManipulationUpdateManager *iface, IDirectManipulationFrameInfoProvider *provider)
 {
     struct directupdatemanager *This = impl_from_IDirectManipulationUpdateManager(iface);
-    FIXME("%p, %p\n", This, provider);
-    return E_NOTIMPL;
+
+    /* Advances every viewport to the next frame. None of them is moving, so
+     * they are all already where this frame wants them. */
+    TRACE("%p, %p\n", This, provider);
+    return S_OK;
 }
 
 struct IDirectManipulationUpdateManagerVtbl updatemanagerVtbl =
@@ -384,10 +387,17 @@ static const IDirectManipulationContentVtbl contentVtbl =
     content_SyncContentTransform
 };
 
+/* A viewport is the region a manipulation - a pan, a zoom - is applied to.
+ * Nothing feeds manipulations into one here: the gestures that would drive it
+ * are delivered by the host to its own applications, not to us as the pointer
+ * input this is built on. So a viewport can be configured and listened to, and
+ * simply never moves. */
 struct directviewport
 {
     IDirectManipulationViewport2 IDirectManipulationViewport2_iface;
     LONG ref;
+    LONG next_cookie;
+    RECT rect;
 };
 
 static inline struct directviewport *impl_from_IDirectManipulationViewport2(IDirectManipulationViewport2 *iface)
@@ -440,15 +450,17 @@ static ULONG WINAPI viewport_Release(IDirectManipulationViewport2 *iface)
 static HRESULT WINAPI viewport_Enable(IDirectManipulationViewport2 *iface)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p\n", This);
-    return E_NOTIMPL;
+
+    /* Whether the viewport reacts to contacts, of which it gets none. */
+    TRACE("%p\n", This);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_Disable(IDirectManipulationViewport2 *iface)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p\n", This);
-    return E_NOTIMPL;
+    TRACE("%p\n", This);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_SetContact(IDirectManipulationViewport2 *iface, UINT32 id)
@@ -503,7 +515,11 @@ static HRESULT WINAPI viewport_GetViewportRect(IDirectManipulationViewport2 *ifa
 static HRESULT WINAPI viewport_SetViewportRect(IDirectManipulationViewport2 *iface, const RECT *viewport)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %p\n", This, viewport);
+
+    TRACE("%p, %s\n", This, wine_dbgstr_rect(viewport));
+
+    if (!viewport) return E_POINTER;
+    This->rect = *viewport;
     return S_OK;
 }
 
@@ -573,7 +589,7 @@ static HRESULT WINAPI viewport_RemoveContent(IDirectManipulationViewport2 *iface
 static HRESULT WINAPI viewport_SetViewportOptions(IDirectManipulationViewport2 *iface, DIRECTMANIPULATION_VIEWPORT_OPTIONS options)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %d\n", This, options);
+    TRACE("%p, %d\n", This, options);
     return S_OK;
 }
 
@@ -594,7 +610,7 @@ static HRESULT WINAPI viewport_RemoveConfiguration(IDirectManipulationViewport2 
 static HRESULT WINAPI viewport_ActivateConfiguration(IDirectManipulationViewport2 *iface, DIRECTMANIPULATION_CONFIGURATION configuration)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %d\n", This, configuration);
+    TRACE("%p, %d\n", This, configuration);
     return S_OK;
 }
 
@@ -616,15 +632,21 @@ static HRESULT WINAPI viewport_AddEventHandler(IDirectManipulationViewport2 *ifa
                     IDirectManipulationViewportEventHandler *eventHandler, DWORD *cookie)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %p, %p, %p\n", This, window, eventHandler, cookie);
-    return E_NOTIMPL;
+
+    TRACE("%p, %p, %p, %p\n", This, window, eventHandler, cookie);
+
+    if (!cookie) return E_POINTER;
+    /* The handler is told when a manipulation starts, runs and ends, none of
+     * which ever happens, so there is nothing to hold on to it for. */
+    *cookie = InterlockedIncrement(&This->next_cookie);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_RemoveEventHandler(IDirectManipulationViewport2 *iface, DWORD cookie)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %ld\n", This, cookie);
-    return E_NOTIMPL;
+    TRACE("%p, %ld\n", This, cookie);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_SetInputMode(IDirectManipulationViewport2 *iface, DIRECTMANIPULATION_INPUT_MODE mode)
@@ -644,15 +666,17 @@ static HRESULT WINAPI viewport_SetUpdateMode(IDirectManipulationViewport2 *iface
 static HRESULT WINAPI viewport_Stop(IDirectManipulationViewport2 *iface)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p\n", This);
-    return E_NOTIMPL;
+
+    /* Bringing a manipulation that isn't running to a halt is done already. */
+    TRACE("%p\n", This);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_Abandon(IDirectManipulationViewport2 *iface)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p\n", This);
-    return E_NOTIMPL;
+    TRACE("%p\n", This);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_AddBehavior(IDirectManipulationViewport2 *iface, IUnknown *behavior, DWORD *cookie)
@@ -665,8 +689,8 @@ static HRESULT WINAPI viewport_AddBehavior(IDirectManipulationViewport2 *iface, 
 static HRESULT WINAPI viewport_RemoveBehavior(IDirectManipulationViewport2 *iface, DWORD cookie)
 {
     struct directviewport *This = impl_from_IDirectManipulationViewport2(iface);
-    FIXME("%p, %ld\n", This, cookie);
-    return E_NOTIMPL;
+    TRACE("%p, %ld\n", This, cookie);
+    return S_OK;
 }
 
 static HRESULT WINAPI viewport_RemoveAllBehaviors(IDirectManipulationViewport2 *iface)
@@ -773,15 +797,19 @@ static ULONG WINAPI direct_manip_Release(IDirectManipulationManager2 *iface)
 static HRESULT WINAPI direct_manip_Activate(IDirectManipulationManager2 *iface, HWND window)
 {
     struct directmanipulation *This = impl_from_IDirectManipulationManager2(iface);
-    FIXME("%p, %p\n", This, window);
-    return E_NOTIMPL;
+
+    /* Starts tracking the window for the manipulations we never generate. */
+    TRACE("%p, %p\n", This, window);
+    return S_OK;
 }
 
 static HRESULT WINAPI direct_manip_Deactivate(IDirectManipulationManager2 *iface, HWND window)
 {
     struct directmanipulation *This = impl_from_IDirectManipulationManager2(iface);
-    FIXME("%p, %p\n", This, window);
-    return E_NOTIMPL;
+
+    /* Stops the window being tracked for manipulations, which it wasn't. */
+    TRACE("%p, %p\n", This, window);
+    return S_OK;
 }
 
 static HRESULT WINAPI direct_manip_RegisterHitTestTarget(IDirectManipulationManager2 *iface, HWND window,

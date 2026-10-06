@@ -45,6 +45,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(android);
 
+#ifndef min
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#endif
+
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
 static const struct opengl_drawable_funcs android_drawable_funcs;
@@ -53,6 +57,9 @@ struct gl_drawable
 {
     struct opengl_drawable base;
     ANativeWindow  *window;
+    UINT            width;      /* pbuffer size */
+    UINT            height;
+    void           *readback;   /* scratch buffer for presenting frames */
 };
 
 static struct gl_drawable *impl_from_opengl_drawable( struct opengl_drawable *base )
@@ -70,6 +77,7 @@ static EGLConfig egl_config_for_format(int format)
 static void android_drawable_destroy( struct opengl_drawable *base )
 {
     struct gl_drawable *gl = impl_from_opengl_drawable( base );
+    free( gl->readback );
     release_ioctl_window( gl->window );
 }
 
@@ -81,41 +89,54 @@ void update_gl_drawable( HWND hwnd )
     NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE );
 }
 
+static EGLSurface create_pbuffer_surface( EGLConfig config, int width, int height )
+{
+    const int attribs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+    return funcs->p_eglCreatePbufferSurface( egl->display, config, attribs );
+}
+
+/* Rendering always goes to a pbuffer here. The EGL implementation on current
+ * Android releases refuses our proxied ANativeWindow as a native window - its
+ * buffers live in another process - so an EGL window surface cannot work.
+ * Instead every frame is read back and copied into one of the window's own
+ * gralloc buffers through the same LOCK/UNLOCK_AND_POST path that the software
+ * window surfaces already present through. */
 static BOOL android_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
     struct gl_drawable *gl;
+    EGLConfig config = egl_config_for_format( format );
+    int w = 0, h = 0;
 
     TRACE( "hwnd %p, format %d, drawable %p\n", client->hwnd, format, drawable );
 
     if (*drawable)
     {
-        EGLint pf;
-
-        FIXME( "Updating drawable %s, multiple surfaces not implemented\n", debugstr_opengl_drawable( *drawable ) );
-
         gl = impl_from_opengl_drawable( *drawable );
-        funcs->p_eglGetConfigAttrib( egl->display, egl_config_for_format(format), EGL_NATIVE_VISUAL_ID, &pf );
-        gl->window->perform( gl->window, NATIVE_WINDOW_SET_BUFFERS_FORMAT, pf );
         gl->base.format = format;
-
         TRACE( "Updated drawable %s\n", debugstr_opengl_drawable( *drawable ) );
         return TRUE;
     }
-    else
+
+    if (!(gl = opengl_drawable_create( sizeof(*gl), &android_drawable_funcs, format, client ))) return FALSE;
+    gl->window = get_client_window( client->hwnd );
+
+    if (gl->window->query( gl->window, NATIVE_WINDOW_WIDTH, &w ) || w <= 0) w = 0;
+    if (gl->window->query( gl->window, NATIVE_WINDOW_HEIGHT, &h ) || h <= 0) h = 0;
+    if (!w || !h) w = h = 1;  /* the Java side has not created the view yet, resized at swap time */
+
+    if (!(gl->base.surface = create_pbuffer_surface( config, w, h )))
     {
-        static const int attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-        EGLConfig config = egl_config_for_format( format );
-
-        if (!(gl = opengl_drawable_create( sizeof(*gl), &android_drawable_funcs, format, client ))) return FALSE;
-        gl->window = get_client_window( client->hwnd );
-
-        if (!has_client_surface( client->hwnd )) gl->base.surface = funcs->p_eglCreatePbufferSurface( egl->display, config, attribs );
-        else gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, config, gl->window, NULL );
-
-        TRACE( "Created drawable %s with client window %p\n", debugstr_opengl_drawable( &gl->base ), gl->window );
-        *drawable = &gl->base;
-        return TRUE;
+        WARN( "Failed to create a %dx%d pbuffer for hwnd %p\n", w, h, client->hwnd );
+        opengl_drawable_release( &gl->base );
+        return FALSE;
     }
+    gl->width = w;
+    gl->height = h;
+
+    TRACE( "Created drawable %s %ux%u with client window %p\n",
+           debugstr_opengl_drawable( &gl->base ), gl->width, gl->height, gl->window );
+    *drawable = &gl->base;
+    return TRUE;
 }
 
 static void android_init_egl_platform( struct egl_platform *platform )
@@ -132,23 +153,109 @@ static void *android_get_proc_address( const char *name )
     return funcs->p_eglGetProcAddress( name );
 }
 
+/* resize the pbuffer to track the window, keeping it current if it was */
+static void android_drawable_resize( struct gl_drawable *gl, int width, int height )
+{
+    EGLSurface surface;
+
+    if (!(surface = create_pbuffer_surface( egl_config_for_format( gl->base.format ), width, height )))
+    {
+        WARN( "Failed to resize pbuffer to %dx%d for hwnd %p\n", width, height, gl->base.client->hwnd );
+        return;
+    }
+
+    if (funcs->p_eglGetCurrentSurface( EGL_DRAW ) == gl->base.surface ||
+        funcs->p_eglGetCurrentSurface( EGL_READ ) == gl->base.surface)
+        funcs->p_eglMakeCurrent( egl->display, surface, surface, funcs->p_eglGetCurrentContext() );
+
+    funcs->p_eglDestroySurface( egl->display, gl->base.surface );
+    gl->base.surface = surface;
+    gl->width = width;
+    gl->height = height;
+    free( gl->readback );
+    gl->readback = NULL;
+    TRACE( "Resized drawable %s to %dx%d\n", debugstr_opengl_drawable( &gl->base ), width, height );
+}
+
+/* copy the rendered frame into one of the window's gralloc buffers */
+static void android_drawable_present( struct gl_drawable *gl )
+{
+    ANativeWindow_Buffer buffer;
+    ARect rc;
+    GLint fbo = 0, pbo = 0, align = 4;
+    UINT width = gl->width, height = gl->height, copy_w, copy_h, x, y;
+    int ret;
+
+    if (!gl->readback && !(gl->readback = malloc( (size_t)width * height * 4 ))) return;
+
+    /* the application's pixel-path state must not leak into the readback */
+    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &fbo );
+    funcs->p_glGetIntegerv( GL_PIXEL_PACK_BUFFER_BINDING, &pbo );
+    funcs->p_glGetIntegerv( GL_PACK_ALIGNMENT, &align );
+    if (fbo) funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
+    if (pbo) funcs->p_glBindBuffer( GL_PIXEL_PACK_BUFFER, 0 );
+    if (align != 4) funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, 4 );
+
+    while (funcs->p_glGetError() != GL_NO_ERROR) /* drain */;
+    funcs->p_glReadPixels( 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, gl->readback );
+    if (TRACE_ON(android))
+    {
+        GLenum err = funcs->p_glGetError();
+        GLint rb = 0, db = 0;
+        funcs->p_glGetIntegerv( GL_READ_BUFFER, &rb );
+        funcs->p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &db );
+        if (err) TRACE( "glReadPixels error %#x read_buffer %#x draw_fbo %d\n", err, rb, db );
+    }
+
+    if (align != 4) funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, align );
+    if (pbo) funcs->p_glBindBuffer( GL_PIXEL_PACK_BUFFER, pbo );
+    if (fbo) funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, fbo );
+
+    rc.left = rc.top = 0;
+    rc.right = width;
+    rc.bottom = height;
+    if ((ret = gl->window->perform( gl->window, NATIVE_WINDOW_LOCK, &buffer, &rc )))
+    {
+        WARN( "Failed to lock hwnd %p window buffer, error %d\n", gl->base.client->hwnd, ret );
+        return;
+    }
+
+    copy_w = min( width, (UINT)buffer.width );
+    copy_h = min( height, (UINT)buffer.height );
+    for (y = 0; y < copy_h; y++)
+    {
+        /* GL rows are bottom-up; the window buffer is top-down */
+        const unsigned int *src = (const unsigned int *)gl->readback + (size_t)(height - 1 - y) * width;
+        unsigned int *dst = (unsigned int *)buffer.bits + (size_t)y * buffer.stride;
+        for (x = 0; x < copy_w; x++)
+        {
+            unsigned int px = src[x];  /* 0xAABBGGRR from GL_RGBA */
+            /* the window buffer is BGRA and composited opaque */
+            dst[x] = 0xff000000 | ((px & 0x000000ff) << 16) | (px & 0x0000ff00) | ((px & 0x00ff0000) >> 16);
+        }
+    }
+    gl->window->perform( gl->window, NATIVE_WINDOW_UNLOCK_AND_POST );
+}
+
 static BOOL android_drawable_swap( struct opengl_drawable *base )
 {
     struct gl_drawable *gl = impl_from_opengl_drawable( base );
+    int w = 0, h = 0;
 
     TRACE( "drawable %s surface %p\n", debugstr_opengl_drawable( base ), gl->base.surface );
 
-    funcs->p_eglSwapBuffers( egl->display, gl->base.surface );
+    if (!gl->window->query( gl->window, NATIVE_WINDOW_WIDTH, &w ) &&
+        !gl->window->query( gl->window, NATIVE_WINDOW_HEIGHT, &h ) &&
+        w > 0 && h > 0 && ((UINT)w != gl->width || (UINT)h != gl->height))
+        android_drawable_resize( gl, w, h );
+
+    android_drawable_present( gl );
     return TRUE;
 }
 
 static void android_drawable_flush( struct opengl_drawable *base, UINT flags )
 {
-    struct gl_drawable *gl = impl_from_opengl_drawable( base );
-
-    TRACE( "drawable %s, surface %p, flags %#x\n", debugstr_opengl_drawable( base ), gl->base.surface, flags );
-
-    if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval( egl->display, abs( base->interval ) );
+    TRACE( "drawable %s, flags %#x\n", debugstr_opengl_drawable( base ), flags );
 }
 
 static void android_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )

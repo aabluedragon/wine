@@ -722,7 +722,9 @@ static HRESULT WINAPI ThreadMgr_ActivateEx(ITfThreadMgrEx *iface, TfClientId *id
     if (!id)
         return E_INVALIDARG;
 
-    if (flags)
+    /* TF_TMAE_UIELEMENTENABLEDONLY restricts activation to the text services
+     * that support UI elements; we activate none either way. */
+    if (flags & ~TF_TMAE_UIELEMENTENABLEDONLY)
         FIXME("Unimplemented flags %#lx\n", flags);
 
     if (!processId)

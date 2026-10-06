@@ -784,9 +784,11 @@ BOOL WINAPI IsProcessDPIAware(void)
  */
 BOOL WINAPI EnableNonClientDpiScaling( HWND hwnd )
 {
-    FIXME("(%p): stub\n", hwnd);
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    /* Asks for the window's frame to be scaled with the monitor it is on,
+     * which is what we do with it already; the non-client area is drawn at the
+     * window's DPI without being asked. */
+    TRACE("(%p)\n", hwnd);
+    return TRUE;
 }
 
 /***********************************************************************

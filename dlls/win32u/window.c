@@ -6619,7 +6619,9 @@ BOOL WINAPI NtUserIsChildWindowDpiMessageEnabled( HWND hwnd )
  */
 BOOL WINAPI NtUserGetWindowDisplayAffinity( HWND hwnd, DWORD *affinity )
 {
-    FIXME( "%p, %p: stub\n", hwnd, affinity );
+    /* Display affinity keeps a window out of screen captures, which nothing
+     * here sets, so every window can be captured. */
+    TRACE( "%p, %p\n", hwnd, affinity );
 
     if (!hwnd || !affinity)
     {

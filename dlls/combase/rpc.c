@@ -497,7 +497,9 @@ static HRESULT create_server(REFCLSID rclsid, HANDLE *process)
     }
     if (FAILED(hr))
     {
-        ERR("class %s not registered\n", debugstr_guid(rclsid));
+        /* Nothing registered a local server for it, which is the answer to
+         * "can you start one", not a failure to do so. */
+        WARN("class %s has no local server registered\n", debugstr_guid(rclsid));
         return hr;
     }
 

@@ -2141,6 +2141,9 @@ static enum wined3d_display_driver guess_display_driver(enum wined3d_pci_vendor 
         case HW_VENDOR_AMD:    return DRIVER_AMD_RX;
         case HW_VENDOR_INTEL:  return DRIVER_INTEL_HD4000;
         case HW_VENDOR_NVIDIA: return DRIVER_NVIDIA_GEFORCE8;
+        /* Apple's GPUs have no Windows driver to imitate, and Vulkan tells us
+         * everything we need about them anyway. */
+        case HW_VENDOR_APPLE:  return DRIVER_WINE;
         default:               return DRIVER_WINE;
     }
 }
@@ -2185,8 +2188,15 @@ static bool adapter_vk_init_driver_info(struct wined3d_adapter_vk *adapter_vk,
 
     if (!gpu_description)
     {
-        FIXME("Failed to retrieve GPU description for device %s %04x:%04x.\n",
-                debugstr_a(properties->deviceName), properties->vendorID, properties->deviceID);
+        /* Not knowing the device isn't a problem in itself: Vulkan reports its
+         * name and how much memory it has, which is all the description is
+         * used for. Only say something when it doesn't even tell us that. */
+        if (!properties->deviceName[0] || !vram_bytes)
+            FIXME("Failed to retrieve GPU description for device %s %04x:%04x.\n",
+                    debugstr_a(properties->deviceName), properties->vendorID, properties->deviceID);
+        else
+            TRACE("No GPU description for device %s %04x:%04x, using the Vulkan properties.\n",
+                    debugstr_a(properties->deviceName), properties->vendorID, properties->deviceID);
 
         description.vendor = properties->vendorID;
         description.device = properties->deviceID;

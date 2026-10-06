@@ -38,6 +38,7 @@
 #include "winbase.h"
 #include "winreg.h"
 #include "android.h"
+#include "unixlib.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 
@@ -399,7 +400,7 @@ static void load_android_libs(void)
 #undef DECL_FUNCPTR
 #undef LOAD_FUNCPTR
 
-NTSTATUS __wine_unix_lib_init(void)
+NTSTATUS android_init( void *args )
 {
     pthread_mutexattr_t attr;
 

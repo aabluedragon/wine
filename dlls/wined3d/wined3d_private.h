@@ -2080,6 +2080,7 @@ enum wined3d_pci_vendor
 {
     HW_VENDOR_SOFTWARE              = 0x0000,
     HW_VENDOR_AMD                   = 0x1002,
+    HW_VENDOR_APPLE                 = 0x106b,
     HW_VENDOR_NVIDIA                = 0x10de,
     HW_VENDOR_VMWARE                = 0x15ad,
     HW_VENDOR_REDHAT                = 0x1af4,
@@ -3094,6 +3095,9 @@ struct wined3d_device
     struct wined3d_cs *cs;
 
     struct wined3d_buffer *push_constants[WINED3D_PUSH_CONSTANTS_COUNT];
+    /* CPU copy of the fixed-function constant buffers, so that a change to a
+     * single constant can be uploaded as a whole-buffer update. */
+    void *push_constants_shadow[WINED3D_PUSH_CONSTANTS_COUNT];
 
     /* Context management */
     struct wined3d_context **contexts;
@@ -4648,6 +4652,7 @@ void wined3d_format_get_float_color_key(const struct wined3d_format *format,
 BOOL wined3d_format_is_depth_view(enum wined3d_format_id resource_format_id,
         enum wined3d_format_id view_format_id);
 uint32_t wined3d_format_pack(const struct wined3d_format *format, const struct wined3d_uvec4 *value);
+BOOL wined3d_format_is_srgb(enum wined3d_format_id format);
 BOOL wined3d_formats_are_srgb_variants(enum wined3d_format_id format1,
         enum wined3d_format_id format2);
 

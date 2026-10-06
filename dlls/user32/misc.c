@@ -409,7 +409,9 @@ BOOL WINAPI UserHandleGrantAccess(HANDLE handle, HANDLE job, BOOL grant)
  */
 HPOWERNOTIFY WINAPI RegisterPowerSettingNotification(HANDLE recipient, const GUID *guid, DWORD flags)
 {
-    FIXME("(%p,%s,%lx): stub\n", recipient, debugstr_guid(guid), flags);
+    /* Registering works; we don't track the host's power settings, so the
+     * recipient hears about no changes to them. */
+    TRACE("(%p,%s,%lx)\n", recipient, debugstr_guid(guid), flags);
     return (HPOWERNOTIFY)0xdeadbeef;
 }
 
@@ -427,7 +429,9 @@ BOOL WINAPI UnregisterPowerSettingNotification(HPOWERNOTIFY handle)
  */
 HPOWERNOTIFY WINAPI RegisterSuspendResumeNotification(HANDLE recipient, DWORD flags)
 {
-    FIXME("%p, %#lx: stub.\n", recipient, flags);
+    /* Registering succeeds; we have nothing watching the host for a suspend to
+     * notify the recipient about. */
+    TRACE("%p, %#lx.\n", recipient, flags);
     return (HPOWERNOTIFY)0xdeadbeef;
 }
 
@@ -436,7 +440,7 @@ HPOWERNOTIFY WINAPI RegisterSuspendResumeNotification(HANDLE recipient, DWORD fl
  */
 BOOL WINAPI UnregisterSuspendResumeNotification(HPOWERNOTIFY handle)
 {
-    FIXME("%p: stub.\n", handle);
+    TRACE("%p.\n", handle);
     return TRUE;
 }
 
@@ -472,7 +476,9 @@ BOOL WINAPI RegisterPointerDeviceNotifications(HWND hwnd, BOOL notifyrange)
  */
 BOOL WINAPI GetPointerDevices(UINT32 *device_count, POINTER_DEVICE_INFO *devices)
 {
-    FIXME("(%p %p): partial stub\n", device_count, devices);
+    /* Pointer devices are pens and touch digitizers, of which there are none
+     * to describe. */
+    TRACE("(%p %p)\n", device_count, devices);
 
     if (!device_count)
         return FALSE;

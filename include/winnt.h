@@ -1050,6 +1050,7 @@ NTSYSAPI WORD         WINAPI RtlQueryDepthSList(PSLIST_HEADER);
 
 typedef enum _HEAP_INFORMATION_CLASS {
     HeapCompatibilityInformation,
+    HeapEnableTerminationOnCorruption,
 } HEAP_INFORMATION_CLASS;
 
 /* Processor feature flags.  */
@@ -1148,6 +1149,7 @@ typedef enum _HEAP_INFORMATION_CLASS {
 #define ES_SYSTEM_REQUIRED    0x00000001
 #define ES_DISPLAY_REQUIRED   0x00000002
 #define ES_USER_PRESENT       0x00000004
+#define ES_AWAYMODE_REQUIRED  0x00000040
 #define ES_CONTINUOUS         0x80000000
 
 #include <excpt.h>
@@ -2597,7 +2599,11 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
     return (struct _TEB *)__readfsdword( 0x18 );
 }
 #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(__GNUC__)
+#ifdef WINE_TEB_X28  /* see __ASM_TEB_REG in wine/asm.h */
+register struct _TEB *__wine_current_teb __asm__("x28");
+#else
 register struct _TEB *__wine_current_teb __asm__("x18");
+#endif
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 {
     return __wine_current_teb;
@@ -2605,7 +2611,11 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(_MSC_VER)
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
 {
+#ifdef WINE_TEB_X28  /* see __ASM_TEB_REG in wine/asm.h */
+    return (struct _TEB *)__getReg(28);
+#else
     return (struct _TEB *)__getReg(18);
+#endif
 }
 #elif defined(__x86_64__) && defined(__GNUC__)
 static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
@@ -5950,7 +5960,8 @@ typedef enum _POWER_REQUEST_TYPE
 {
     PowerRequestDisplayRequired,
     PowerRequestSystemRequired,
-    PowerRequestAwayModeRequired
+    PowerRequestAwayModeRequired,
+    PowerRequestExecutionRequired
 } POWER_REQUEST_TYPE, *PPOWER_REQUEST_TYPE;
 
 #define POWER_REQUEST_CONTEXT_VERSION           0

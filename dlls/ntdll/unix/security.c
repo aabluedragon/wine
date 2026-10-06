@@ -716,7 +716,19 @@ NTSTATUS WINAPI NtSetInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS cla
         break;
 
     case TokenIntegrityLevel:
-        FIXME( "TokenIntegrityLevel stub!\n" );
+        if (length < sizeof(TOKEN_MANDATORY_LABEL))
+        {
+            ret = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+        if (!info)
+        {
+            ret = STATUS_ACCESS_VIOLATION;
+            break;
+        }
+        /* Mandatory integrity control isn't enforced anywhere here, so the
+         * level a process lowers itself to has nothing to act on. */
+        TRACE( "ignoring integrity level %p\n", ((TOKEN_MANDATORY_LABEL *)info)->Label.Sid );
         ret = STATUS_SUCCESS;
         break;
 

@@ -163,7 +163,15 @@ static struct list sources = LIST_INIT(sources);
 static struct list monitors = LIST_INIT(monitors);
 static INT64 last_query_display_time;
 static UINT64 monitor_update_serial;
+/* The display cache is read from paths the drivers themselves reach while it is
+ * being updated - creating an OpenGL context wants a display DC, and that asks
+ * for the virtual screen rect - so the lock has to be recursive, and a nested
+ * reader has to make do with the cache as it stands rather than start an update
+ * of its own. That only ever happens in the desktop process: everywhere else the
+ * graphics drivers are already initialised before the first update runs. */
 static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread unsigned int display_lock_depth;
+static BOOL updating_display_devices;
 
 static BOOL emulate_modeset;
 BOOL decorated_mode = TRUE;
@@ -2871,6 +2879,8 @@ void reset_monitor_update_serial(void)
     pthread_mutex_unlock( &display_lock );
 }
 
+static void unlock_display_devices(void);
+
 static BOOL lock_display_devices( BOOL force )
 {
     static const WCHAR wine_service_station_name[] =
@@ -2887,7 +2897,12 @@ static BOOL lock_display_devices( BOOL force )
 
     init_display_driver(); /* make sure to load the driver before anything else */
 
-    pthread_mutex_lock( &display_lock );
+    if (display_lock_depth) display_lock_depth++;
+    else
+    {
+        pthread_mutex_lock( &display_lock );
+        display_lock_depth = 1;
+    }
 
     serial = get_monitor_update_serial();
     if (!force && monitor_update_serial >= serial) return TRUE;
@@ -2903,13 +2918,15 @@ static BOOL lock_display_devices( BOOL force )
     }
 
     if (!force && !update_display_cache_from_registry( serial )) force = TRUE;
-    if (force)
+    if (force && !updating_display_devices)
     {
+        updating_display_devices = TRUE;
         if (!get_vulkan_gpus( &ctx.vulkan_gpus )) WARN( "Failed to find any Vulkan GPU\n" );
         if (!get_opengl_gpus( &ctx.opengl_gpus )) WARN( "Failed to find any OpenGL GPU\n" );
         if (!(status = update_display_devices( &ctx ))) commit_display_devices( &ctx );
         else WARN( "Failed to update display devices, status %#x\n", status );
         release_display_manager_ctx( &ctx );
+        updating_display_devices = FALSE;
 
         ret = update_display_cache_from_registry( serial );
     }
@@ -2917,13 +2934,14 @@ static BOOL lock_display_devices( BOOL force )
     if (!ret)
     {
         ERR( "Failed to read display config.\n" );
-        pthread_mutex_unlock( &display_lock );
+        unlock_display_devices();
     }
     return ret;
 }
 
 static void unlock_display_devices(void)
 {
+    if (--display_lock_depth) return;
     pthread_mutex_unlock( &display_lock );
 }
 
@@ -7903,12 +7921,41 @@ NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEAD
         unlock_display_devices();
         return ret;
     }
+    case DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL:
+    {
+        DISPLAYCONFIG_SDR_WHITE_LEVEL *white_level = (DISPLAYCONFIG_SDR_WHITE_LEVEL *)packet;
+        struct monitor *monitor;
+        NTSTATUS ret = STATUS_INVALID_PARAMETER;
+
+        TRACE( "DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL.\n" );
+
+        if (packet->size < sizeof(*white_level))
+            return STATUS_INVALID_PARAMETER;
+
+        if (!lock_display_devices( FALSE )) return STATUS_UNSUCCESSFUL;
+
+        LIST_FOR_EACH_ENTRY(monitor, &monitors, struct monitor, entry)
+        {
+            if (white_level->header.id != monitor->output_id) continue;
+            if (memcmp( &white_level->header.adapterId, &monitor->source->gpu->luid,
+                        sizeof(monitor->source->gpu->luid) ))
+                continue;
+
+            /* In units of 1/1000 of the 80 nits SDR reference white, so 1000
+             * is the level a display that isn't boosting SDR content reports. */
+            white_level->SDRWhiteLevel = 1000;
+            ret = STATUS_SUCCESS;
+            break;
+        }
+
+        unlock_display_devices();
+        return ret;
+    }
     case DISPLAYCONFIG_DEVICE_INFO_SET_TARGET_PERSISTENCE:
     case DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_BASE_TYPE:
     case DISPLAYCONFIG_DEVICE_INFO_GET_SUPPORT_VIRTUAL_RESOLUTION:
     case DISPLAYCONFIG_DEVICE_INFO_SET_SUPPORT_VIRTUAL_RESOLUTION:
     case DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE:
-    case DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL:
     default:
         FIXME( "Unimplemented packet type %u.\n", packet->type );
         return STATUS_INVALID_PARAMETER;

@@ -5048,7 +5048,13 @@ static void CDECL device_parent_activate(struct wined3d_device_parent *device_pa
 
     if (!activate)
     {
-        ddraw->device_state = DDRAW_DEVICE_STATE_LOST;
+        /* An exclusive fullscreen device on Windows loses its surfaces when the
+         * application is deactivated, because another application takes the
+         * display over. Nothing of the sort happens here - the window keeps its
+         * contents while it is in the background - and a game that clears its
+         * z-buffer before it gets around to restoring anything is left calling
+         * Clear on a surface we have declared lost for no reason. Keep the
+         * surfaces; a real mode change still loses them. */
         exclusive_window = NULL;
     }
     else

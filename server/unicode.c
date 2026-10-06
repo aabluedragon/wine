@@ -278,6 +278,16 @@ static char *build_relative_path( const char *base, const char *from, const char
 static char *get_nls_dir(void)
 {
     char *p, *dir, *ret;
+    const char *data_dir = getenv( "WINEDATADIR" );
+
+    /* the server's own path does not always say where the wine tree is: an
+     * Android app can only execute files out of one flat directory and reaches
+     * them through symlinks, so the tree is named explicitly instead */
+    if (data_dir && data_dir[0] == '/')
+    {
+        if (asprintf( &ret, "%s/nls", data_dir ) == -1) return NULL;
+        return ret;
+    }
 
 #if defined(__linux__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
     dir = realpath( "/proc/self/exe", NULL );

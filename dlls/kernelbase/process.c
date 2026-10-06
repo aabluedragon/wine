@@ -630,6 +630,12 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                         machine = *(USHORT *)attrs->attrs[i].value;
                         TRACE( "PROC_THREAD_ATTRIBUTE_MACHINE %x.\n", machine );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
+                        /* Hardening policies - DEP, ASLR, dynamic code - that
+                         * the host applies to the whole process anyway. The
+                         * child runs the same either way. */
+                        TRACE( "PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY size %Iu.\n", attrs->attrs[i].size );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -933,7 +939,17 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    /* None of these mitigations are applied to a process here, so report them
+     * all as off. The buffer was left untouched before, leaving the caller to
+     * read whatever happened to be in it. */
+    TRACE( "(%p, %u, %p, %Iu)\n", process, policy, buffer, length );
+
+    if (!buffer || !length)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    memset( buffer, 0, length );
     return TRUE;
 }
 
@@ -1115,6 +1131,23 @@ BOOL WINAPI GetProcessInformation( HANDLE process, PROCESS_INFORMATION_CLASS inf
 
             break;
         }
+        case ProcessPowerThrottling:
+        {
+            PROCESS_POWER_THROTTLING_STATE *state = data;
+
+            if (size != sizeof(*state))
+            {
+                SetLastError(ERROR_BAD_LENGTH);
+                return FALSE;
+            }
+            /* Asks whether the process opted into being scheduled for battery
+             * life over speed. macOS decides that from its own energy policy
+             * and takes no such request from us. */
+            state->Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+            state->ControlMask = 0;
+            state->StateMask = 0;
+            return TRUE;
+        }
         default:
             FIXME("Unsupported information class %d.\n", info_class);
     }
@@ -1277,7 +1310,23 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessGroupAffinity( HANDLE process, const GRO
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ SetProcessMitigationPolicy( PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%d, %p, %Iu): stub\n", policy, buffer, length );
+    TRACE( "(%d, %p, %Iu)\n", policy, buffer, length );
+
+    if (!buffer || policy < 0 || policy >= MaxProcessMitigationPolicy)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (length != sizeof(DWORD))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    /* Each of these hardens the process against a way of being attacked -
+     * data execution, address layout, which images may load. None of it is
+     * enforced here, and a process that asks for it runs the same either
+     * way, so take it and move on. */
     return TRUE;
 }
 

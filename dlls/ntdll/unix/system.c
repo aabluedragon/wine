@@ -61,11 +61,12 @@
 #ifdef HAVE_SYS_AUXV_H
 # include <sys/auxv.h>
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 # include <CoreFoundation/CoreFoundation.h>
 # include <IOKit/IOKitLib.h>
 # include <IOKit/ps/IOPSKeys.h>
 # include <IOKit/ps/IOPowerSources.h>
+# include <IOKit/pwr_mgt/IOPMLib.h>
 # include <mach/mach.h>
 # include <mach/machine.h>
 # include <mach/mach_init.h>
@@ -615,7 +616,7 @@ static BOOLEAN has_capability( int hwcap, unsigned long hwcap_bit )
 }
 
 #define HAS_FEATURE(hwcap, hwcap_bit, ...) has_capability( hwcap, hwcap_bit )
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 static BOOLEAN has_feature( const char *feature )
 {
     char buf[200];
@@ -1335,7 +1336,7 @@ static NTSTATUS create_logical_proc_info(void)
     return STATUS_SUCCESS;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 /* for 'data', max_len is the array count. for 'dataex', max_len is in bytes */
 static NTSTATUS create_logical_proc_info(void)
@@ -2310,7 +2311,7 @@ static struct smbios_prologue *create_smbios_data(void)
     return buf.prologue;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 static struct smbios_prologue *get_smbios_from_iokit(void)
 {
@@ -2560,15 +2561,29 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
                 info->IdleTime.QuadPart = (ULONGLONG)ptimes[CP_IDLE] * 10000000 / clockrate.stathz;
         }
     }
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
     {
         host_name_port_t host = mach_host_self();
         struct host_cpu_load_info load_info;
+        vm_statistics64_data_t vm_stat;
         mach_msg_type_number_t count;
 
         count = HOST_CPU_LOAD_INFO_COUNT;
         if (host_statistics(host, HOST_CPU_LOAD_INFO, (host_info_t)&load_info, &count) == KERN_SUCCESS)
             info->IdleTime.QuadPart = (ULONGLONG)load_info.cpu_ticks[CPU_STATE_IDLE] * 100000;
+
+        count = HOST_VM_INFO64_COUNT;
+        if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS)
+        {
+            info->PageFaults      = vm_stat.faults;
+            info->WriteCopyFaults = vm_stat.cow_faults;
+            info->DemandZeroFaults = vm_stat.zero_fill_count;
+            info->TransitionFaults = vm_stat.reactivations;
+            info->PagesRead       = vm_stat.pageins;
+            info->PageReadIos     = vm_stat.pageins;
+            info->PagefilePagesWritten = vm_stat.pageouts;
+            info->PagefilePageWriteIos = vm_stat.pageouts;
+        }
         mach_port_deallocate(mach_task_self(), host);
     }
 #else
@@ -2610,9 +2625,9 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
         }
     }
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__) || \
-    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+    defined(__OpenBSD__) || defined(__DragonFly__) || (defined(__APPLE__) && !TARGET_OS_IPHONE)
     {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         unsigned int val;
 #else
         unsigned long val;
@@ -3365,8 +3380,10 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
     case SystemPerformanceInformation:  /* 2 */
     {
         SYSTEM_PERFORMANCE_INFORMATION spi;
-        static BOOL fixme_written = FALSE;
 
+        /* Only the idle time, the memory counters and, where the host provides
+         * them, the paging counters are filled in; the rest of the structure is
+         * left zeroed. */
         get_performance_info( &spi );
         len = sizeof(spi);
         if (size >= len)
@@ -3375,10 +3392,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
             else memcpy( info, &spi, len);
         }
         else ret = STATUS_INFO_LENGTH_MISMATCH;
-        if(!fixme_written) {
-            FIXME("info_class SYSTEM_PERFORMANCE_INFORMATION\n");
-            fixme_written = TRUE;
-        }
         break;
     }
 
@@ -3423,7 +3436,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
             break;
         }
         else
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
         {
             processor_cpu_load_info_data_t *pinfo;
             mach_msg_type_number_t info_count;
@@ -4403,7 +4416,7 @@ static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
     return STATUS_SUCCESS;
 }
 
-#elif defined(__APPLE__)
+#elif (defined(__APPLE__) && !TARGET_OS_IPHONE)
 
 static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
 {
@@ -4805,15 +4818,56 @@ NTSTATUS WINAPI NtInitiatePowerAction( POWER_ACTION action, SYSTEM_POWER_STATE s
 }
 
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+
+/* Hold or drop one power assertion, so that it matches what is being asked for. */
+static void set_power_assertion( CFStringRef type, BOOL wanted, IOPMAssertionID *id )
+{
+    if (wanted)
+    {
+        if (*id) return;
+        if (IOPMAssertionCreateWithName( type, kIOPMAssertionLevelOn, CFSTR("Wine"), id ) != kIOReturnSuccess)
+            *id = 0;
+    }
+    else if (*id)
+    {
+        IOPMAssertionRelease( *id );
+        *id = 0;
+    }
+}
+
+static void apply_execution_state( EXECUTION_STATE state )
+{
+    static IOPMAssertionID display_assertion, system_assertion;
+
+    set_power_assertion( kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                         !!(state & ES_DISPLAY_REQUIRED), &display_assertion );
+    set_power_assertion( kIOPMAssertionTypePreventUserIdleSystemSleep,
+                         !!(state & (ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)), &system_assertion );
+}
+
+#else
+
+static void apply_execution_state( EXECUTION_STATE state )
+{
+}
+
+#endif
+
 /******************************************************************************
  *              NtSetThreadExecutionState  (NTDLL.@)
  */
 NTSTATUS WINAPI NtSetThreadExecutionState( EXECUTION_STATE new_state, EXECUTION_STATE *old_state )
 {
+    static pthread_mutex_t execution_state_mutex = PTHREAD_MUTEX_INITIALIZER;
     static EXECUTION_STATE current = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRESENT;
 
-    WARN( "(0x%x, %p): stub, harmless.\n", new_state, old_state );
+    TRACE( "(0x%x, %p)\n", new_state, old_state );
+
+    mutex_lock( &execution_state_mutex );
     *old_state = current;
     if (!(current & ES_CONTINUOUS) || (new_state & ES_CONTINUOUS)) current = new_state;
+    apply_execution_state( current );
+    mutex_unlock( &execution_state_mutex );
     return STATUS_SUCCESS;
 }

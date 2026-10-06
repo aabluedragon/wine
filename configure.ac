@@ -978,7 +978,6 @@ case $host_os in
     LIBEXT="dylib"
     DLLFLAGS="$DLLFLAGS -fPIC"
     LDDLLFLAGS="-fPIC"
-    enable_winemac_drv=${enable_winemac_drv:-yes}
     with_fontconfig=${with_fontconfig:-no}
     dnl declare needed frameworks
     AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
@@ -988,10 +987,40 @@ case $host_os in
     AC_SUBST(APPLICATIONSERVICES_LIBS,"-framework ApplicationServices")
     AC_SUBST(CORESERVICES_LIBS,"-framework CoreServices")
     AC_SUBST(APPKIT_LIBS,"-framework AppKit")
+    AC_SUBST(AUDIOTOOLBOX_LIBS,"-framework AudioToolbox")
     AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
     AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
 
-    WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+    dnl An iOS process cannot map anything below 4GB whatever its page zero
+    dnl says, and one built with a smaller page zero will not launch at all,
+    dnl so leave the default in place there.
+    AC_CACHE_CHECK([whether we are building for iOS],[wine_cv_target_ios],
+      [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <TargetConditionals.h>]],
+                                          [[#if !TARGET_OS_IPHONE
+                                            #error not iOS
+                                            #endif]])],
+                         [wine_cv_target_ios=yes],[wine_cv_target_ios=no])])
+    if test "$wine_cv_target_ios" = yes
+    then
+      WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+      dnl none of these have an API to build against on iOS: AppKit, the
+      dnl DiskArbitration and IOKit device stacks, the macOS keychain, and the
+      dnl printing stack ApplicationServices sits behind
+      enable_winemac_drv=${enable_winemac_drv:-no}
+      enable_winebus_sys=${enable_winebus_sys:-no}
+      enable_mountmgr_sys=${enable_mountmgr_sys:-no}
+      enable_nsiproxy_sys=${enable_nsiproxy_sys:-no}
+      enable_winspool_drv=${enable_winspool_drv:-no}
+      enable_wineios_drv=${enable_wineios_drv:-yes}
+      dnl win32u links AppKit without using it, which is fatal where there is
+      dnl none - but its font code does use CoreFoundation, which AppKit was
+      dnl dragging in
+      APPKIT_LIBS=""
+      CORETEXT_LIBS="-framework CoreText -framework CoreFoundation"
+    else
+      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+      enable_winemac_drv=${enable_winemac_drv:-yes}
+    fi
 
     case $HOST_ARCH in
       i386) wine_use_preloader=yes ;;
@@ -1138,6 +1167,7 @@ esac
 
 enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-no}
 enable_wineandroid_drv=${enable_wineandroid_drv:-no}
+enable_wineios_drv=${enable_wineios_drv:-no}
 enable_winemac_drv=${enable_winemac_drv:-no}
 
 dnl **** External libraries ****
@@ -2109,6 +2139,10 @@ dnl **** Check for functions ****
 
 dnl Check for -ldl
 AC_SEARCH_LIBS(dlopen, dl)
+
+dnl The iOS SDK exports pipe2 without declaring it for the deployment target,
+dnl and a link test on its own then reports a function the code cannot call.
+AC_CHECK_DECL([pipe2],,[ac_cv_func_pipe2=no],[[#include <unistd.h>]])
 
 ac_save_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS $BUILTINFLAG"
@@ -3331,6 +3365,7 @@ WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.enumeration)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.enumeration/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.devices.input)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.radios)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.radios/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.usb)
@@ -3395,6 +3430,7 @@ WINE_CONFIG_MAKEFILE(dlls/wined3d)
 WINE_CONFIG_MAKEFILE(dlls/winedmo)
 WINE_CONFIG_MAKEFILE(dlls/winegstreamer)
 WINE_CONFIG_MAKEFILE(dlls/winehid.sys)
+WINE_CONFIG_MAKEFILE(dlls/wineios.drv)
 WINE_CONFIG_MAKEFILE(dlls/winemac.drv)
 WINE_CONFIG_MAKEFILE(dlls/winemapi)
 WINE_CONFIG_MAKEFILE(dlls/wineoss.drv)

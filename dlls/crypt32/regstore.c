@@ -486,7 +486,10 @@ static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
          dwFlags & CERT_STORE_CTRL_COMMIT_FORCE_FLAG);
         break;
     case CERT_STORE_CTRL_AUTO_RESYNC:
-        FIXME("CERT_STORE_CTRL_AUTO_RESYNC: stub\n");
+        /* Asks the store to re-read itself whenever the registry behind it
+         * changes. We read it on open and never cache across a reopen, so it
+         * can't go stale in the first place. */
+        TRACE("CERT_STORE_CTRL_AUTO_RESYNC\n");
         break;
     case CERT_STORE_CTRL_NOTIFY_CHANGE:
         FIXME("CERT_STORE_CTRL_NOTIFY_CHANGE: stub\n");

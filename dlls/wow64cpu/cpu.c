@@ -33,11 +33,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(wow);
 #pragma pack(push,1)
 struct thunk_32to64
 {
-    BYTE  ljmp;   /* jump far, absolute indirect */
-    BYTE  modrm;  /* address=disp32, opcode=5 */
-    DWORD op;
+    /* Apple Silicon doesn't always switch to 64-bit mode on a far jump, and the
+     * 64-bit code then runs as 32-bit code; a far return is honored, so use that. */
+    BYTE  push_cs;    /* push imm32 (64-bit code selector) */
+    DWORD cs;
+    BYTE  push_addr;  /* push imm32 (64-bit entry point) */
     DWORD addr;
-    WORD  cs;
+    BYTE  lret;       /* return far, pops eip and cs */
 };
 struct thunk_opcodes
 {
@@ -335,17 +337,17 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     cs32_sel = context_i386.SegCs;
     ss32_sel = context_i386.SegSs;
 
-    thunk->syscall_thunk.ljmp  = 0xff;
-    thunk->syscall_thunk.modrm = 0x2d;
-    thunk->syscall_thunk.op    = PtrToUlong( &thunk->syscall_thunk.addr );
-    thunk->syscall_thunk.addr  = PtrToUlong( syscall_32to64 );
-    thunk->syscall_thunk.cs    = cs64_sel;
+    thunk->syscall_thunk.push_cs   = 0x68;
+    thunk->syscall_thunk.cs        = cs64_sel;
+    thunk->syscall_thunk.push_addr = 0x68;
+    thunk->syscall_thunk.addr      = PtrToUlong( syscall_32to64 );
+    thunk->syscall_thunk.lret      = 0xcb;
 
-    thunk->unix_thunk.ljmp  = 0xff;
-    thunk->unix_thunk.modrm = 0x2d;
-    thunk->unix_thunk.op    = PtrToUlong( &thunk->unix_thunk.addr );
-    thunk->unix_thunk.addr  = PtrToUlong( unix_call_32to64 );
-    thunk->unix_thunk.cs    = cs64_sel;
+    thunk->unix_thunk.push_cs   = 0x68;
+    thunk->unix_thunk.cs        = cs64_sel;
+    thunk->unix_thunk.push_addr = 0x68;
+    thunk->unix_thunk.addr      = PtrToUlong( unix_call_32to64 );
+    thunk->unix_thunk.lret      = 0xcb;
 
     NtProtectVirtualMemory( GetCurrentProcess(), (void **)&thunk, &size, PAGE_EXECUTE_READ, &old_prot );
     return STATUS_SUCCESS;

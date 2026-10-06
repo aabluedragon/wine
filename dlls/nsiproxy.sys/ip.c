@@ -1847,7 +1847,9 @@ static NTSTATUS ipv6_forward_enumerate_all( void *key_data, UINT key_size, void 
         fclose(fp);
     }
 #else
-    FIXME( "not implemented\n" );
+    /* The IPv6 routing table is only read from /proc on Linux; elsewhere we
+     * report no routes rather than a wrong set of them. */
+    WARN( "no IPv6 routing table to enumerate\n" );
     *count = 0;
     return STATUS_SUCCESS;
 #endif

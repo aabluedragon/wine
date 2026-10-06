@@ -80,13 +80,17 @@ INT WINAPI MulDiv( INT a, INT b, INT c )
     return ret;
 }
 
+/* The application model policies describe how a process is hosted. Everything
+ * Wine runs is a plain desktop application, which is what the values these
+ * return say, so there is nothing left to look up. */
+
 /***********************************************************************
  *          AppPolicyGetMediaFoundationCodecLoading (KERNELBASE.@)
  */
 
 LONG WINAPI AppPolicyGetMediaFoundationCodecLoading(HANDLE token, AppPolicyMediaFoundationCodecLoading *policy)
 {
-    FIXME("%p, %p\n", token, policy);
+    TRACE("%p, %p\n", token, policy);
 
     if(policy)
         *policy = AppPolicyMediaFoundationCodecLoading_All;
@@ -99,7 +103,7 @@ LONG WINAPI AppPolicyGetMediaFoundationCodecLoading(HANDLE token, AppPolicyMedia
  */
 LONG WINAPI AppPolicyGetProcessTerminationMethod(HANDLE token, AppPolicyProcessTerminationMethod *policy)
 {
-    FIXME("%p, %p\n", token, policy);
+    TRACE("%p, %p\n", token, policy);
 
     if(policy)
         *policy = AppPolicyProcessTerminationMethod_ExitProcess;
@@ -112,7 +116,7 @@ LONG WINAPI AppPolicyGetProcessTerminationMethod(HANDLE token, AppPolicyProcessT
  */
 LONG WINAPI AppPolicyGetThreadInitializationType(HANDLE token, AppPolicyThreadInitializationType *policy)
 {
-    FIXME("%p, %p\n", token, policy);
+    TRACE("%p, %p\n", token, policy);
 
     if(policy)
         *policy = AppPolicyThreadInitializationType_None;
@@ -125,7 +129,7 @@ LONG WINAPI AppPolicyGetThreadInitializationType(HANDLE token, AppPolicyThreadIn
  */
 LONG WINAPI AppPolicyGetShowDeveloperDiagnostic(HANDLE token, AppPolicyShowDeveloperDiagnostic *policy)
 {
-    FIXME("%p, %p\n", token, policy);
+    TRACE("%p, %p\n", token, policy);
 
     if(policy)
         *policy = AppPolicyShowDeveloperDiagnostic_ShowUI;
