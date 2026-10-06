@@ -46,6 +46,8 @@
 #include "msxml6.h"
 #include <activscp.h>
 #include "objsafe.h"
+#include "mshtml.h"
+#include "asptlb.h"
 
 #include "msxml_private.h"
 #include "saxreader_extensions.h"
@@ -690,7 +692,7 @@ HRESULT node_replace_child(struct domnode *node, IXMLDOMNode *newChild, IXMLDOMN
     return node_remove_child(node, oldChild, ret);
 }
 
-static void domnode_unlink_children(struct domnode *node)
+void node_unlink_children(struct domnode *node)
 {
     struct domnode *child, *next;
 
@@ -749,7 +751,7 @@ HRESULT node_put_data(struct domnode *node, const WCHAR *data)
     {
         case NODE_ATTRIBUTE:
         case NODE_ELEMENT:
-            domnode_unlink_children(node);
+            node_unlink_children(node);
 
             /* TODO: error handling */
             domnode_create(NODE_TEXT, NULL, 0, NULL, 0, node->owner, &child);
@@ -789,7 +791,7 @@ struct node_dump_context
 
     bool only_utf16_encoding_decl;
 
-    IStream *stream;
+    ISequentialStream *stream;
     UINT codepage;
     HRESULT status;
 };
@@ -844,7 +846,7 @@ static void node_dump_append(struct node_dump_context *context, const WCHAR *tex
     {
         if (context->codepage == ~0u)
         {
-            context->status = IStream_Write(context->stream, text, length * sizeof(WCHAR), &written);
+            context->status = ISequentialStream_Write(context->stream, text, length * sizeof(WCHAR), &written);
         }
         else
         {
@@ -860,7 +862,7 @@ static void node_dump_append(struct node_dump_context *context, const WCHAR *tex
             }
 
             WideCharToMultiByte(context->codepage, 0, text, length, context->scratch.data, required, NULL, NULL);
-            context->status = IStream_Write(context->stream, context->scratch.data, required, &written);
+            context->status = ISequentialStream_Write(context->stream, context->scratch.data, required, &written);
         }
     }
     else
@@ -2110,7 +2112,7 @@ static void node_dump(struct domnode *node, struct node_dump_context *context)
     }
 }
 
-static void node_dump_context_init(struct node_dump_context *context, UINT codepage, IStream *stream)
+static void node_dump_context_init(struct node_dump_context *context, UINT codepage, ISequentialStream *stream)
 {
     memset(context, 0, sizeof(*context));
     string_buffer_init(&context->buffer);
@@ -3274,6 +3276,52 @@ HRESULT node_transform_node_params(struct domnode *node, IXMLDOMNode *stylesheet
 HRESULT node_transform_node(struct domnode *node, IXMLDOMNode *stylesheet, BSTR *p)
 {
     return node_transform_node_params(node, stylesheet, p, NULL, NULL);
+}
+
+HRESULT node_transform_node_to_object(struct domnode *node, IXMLDOMNode *stylesheet, const VARIANT *output)
+{
+    IUnknown *unk;
+
+    switch (V_VT(output))
+    {
+        case VT_UNKNOWN:
+        case VT_DISPATCH:
+        {
+            ISequentialStream *stream;
+            HRESULT hr;
+
+            if (!V_UNKNOWN(output))
+                return E_INVALIDARG;
+
+            if (IUnknown_QueryInterface(V_UNKNOWN(output), &IID_IHTMLObjectElement, (void **)&unk) == S_OK)
+            {
+                FIXME("Output to IHTMLObjectElement is not supported.\n");
+                IUnknown_Release(unk);
+                return E_NOTIMPL;
+            }
+
+            if (IUnknown_QueryInterface(V_UNKNOWN(output), &IID_IStream, (void **)&stream) == S_OK
+                    || IUnknown_QueryInterface(V_UNKNOWN(output), &IID_ISequentialStream, (void **)&stream) == S_OK)
+            {
+                hr = node_transform_node_params(node, stylesheet, NULL, stream, NULL);
+                ISequentialStream_Release(stream);
+                return hr;
+            }
+
+            if (IUnknown_QueryInterface(V_UNKNOWN(output), &IID_IResponse, (void **)&unk) == S_OK)
+            {
+                FIXME("Output to IResponse is not supported.\n");
+                return E_NOTIMPL;
+            }
+
+            WARN("Unsupported destination type.\n");
+            return E_INVALIDARG;
+        }
+        default:
+            FIXME("Output %s not handled.\n", debugstr_variant(output));
+    }
+
+    return E_NOTIMPL;
 }
 
 HRESULT node_select_nodes(struct domnode *node, BSTR query, IXMLDOMNodeList **list)
@@ -4643,7 +4691,7 @@ xmlDocPtr create_xmldoc_from_domdoc(struct domnode *node, xmlNodePtr *xmlnode)
     return xmldoc;
 }
 
-HRESULT node_save(struct domnode *doc, IStream *stream)
+HRESULT node_save(struct domnode *doc, ISequentialStream *stream)
 {
     struct node_dump_context context = { 0 };
     struct domnode *child, *attr, *node;
@@ -4677,6 +4725,10 @@ HRESULT node_save(struct domnode *doc, IStream *stream)
     }
 
     node_dump_context_init(&context, codepage, stream);
+
+    /* UTF-16 BE BOM */
+    if (codepage == ~0u)
+        node_dump_append(&context, L"\xfeff", 1);
 
     LIST_FOR_EACH_ENTRY(node, &doc->children, struct domnode, entry)
     {
@@ -4911,7 +4963,7 @@ void node_move_children(struct domnode *dest, struct domnode *src)
 {
     struct domnode *child, *next;
 
-    domnode_unlink_children(dest);
+    node_unlink_children(dest);
 
     LIST_FOR_EACH_ENTRY_SAFE(child, next, &src->children, struct domnode, entry)
     {

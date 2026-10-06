@@ -60,17 +60,25 @@ typedef struct
     IXSLProcessor IXSLProcessor_iface;
     LONG ref;
 
-    xsltemplate *stylesheet;
+    xsltemplate *template;
     IXMLDOMNode *input;
 
-    union
+    struct
     {
-        IUnknown *unk;
-        ISequentialStream *stream;
-        IPersistStream *persiststream;
-        IResponse *response;
+        /* Resolved output object type */
+        union
+        {
+            IUnknown *obj;
+            ISequentialStream *stream;
+            IPersistStream *persiststream;
+            IResponse *response;
+        } object;
+        enum output_type type;
+
+        /* Originally set output object */
+        IUnknown *output;
     } output;
-    enum output_type output_type;
+
     BSTR outstr;
 
     struct xslprocessor_params params;
@@ -212,13 +220,20 @@ static HRESULT WINAPI xsltemplate_putref_stylesheet( IXSLTemplate *iface,
     return S_OK;
 }
 
-static HRESULT WINAPI xsltemplate_get_stylesheet( IXSLTemplate *iface,
-    IXMLDOMNode **node)
+static HRESULT WINAPI xsltemplate_get_stylesheet(IXSLTemplate *iface, IXMLDOMNode **node)
 {
-    xsltemplate *This = impl_from_IXSLTemplate( iface );
+    xsltemplate *template = impl_from_IXSLTemplate(iface);
 
-    FIXME("(%p)->(%p): stub\n", This, node);
-    return E_NOTIMPL;
+    TRACE("%p, %p.\n", iface, node);
+
+    if (!node)
+        return E_INVALIDARG;
+
+    *node = template->node;
+    if (*node)
+        IXMLDOMNode_AddRef(*node);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI xsltemplate_createProcessor( IXSLTemplate *iface,
@@ -330,14 +345,16 @@ static ULONG WINAPI xslprocessor_Release( IXSLProcessor *iface )
         struct xslprocessor_par *par, *par2;
 
         if (This->input) IXMLDOMNode_Release(This->input);
-        if (This->output.unk)
-            IUnknown_Release(This->output.unk);
+        if (This->output.object.obj)
+            IUnknown_Release(This->output.object.obj);
+        if (This->output.output)
+            IUnknown_Release(This->output.output);
         SysFreeString(This->outstr);
 
         LIST_FOR_EACH_ENTRY_SAFE(par, par2, &This->params.list, struct xslprocessor_par, entry)
             xslprocessor_par_free(&This->params, par);
 
-        IXSLTemplate_Release(&This->stylesheet->IXSLTemplate_iface);
+        IXSLTemplate_Release(&This->template->IXSLTemplate_iface);
         free(This);
     }
 
@@ -427,14 +444,19 @@ static HRESULT WINAPI xslprocessor_get_input( IXSLProcessor *iface, VARIANT *inp
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI xslprocessor_get_ownerTemplate(
-    IXSLProcessor *iface,
-    IXSLTemplate **template)
+static HRESULT WINAPI xslprocessor_get_ownerTemplate(IXSLProcessor *iface, IXSLTemplate **template)
 {
-    xslprocessor *This = impl_from_IXSLProcessor( iface );
+    xslprocessor *processor = impl_from_IXSLProcessor(iface);
 
-    FIXME("(%p)->(%p): stub\n", This, template);
-    return E_NOTIMPL;
+    TRACE("%p, %p.\n", iface, template);
+
+    if (!template)
+        return E_INVALIDARG;
+
+    *template = &processor->template->IXSLTemplate_iface;
+    IXSLTemplate_AddRef(*template);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI xslprocessor_setStartMode(
@@ -468,13 +490,50 @@ static HRESULT WINAPI xslprocessor_get_startModeURI(
     return E_NOTIMPL;
 }
 
+static HRESULT xslprocessor_resolve_output(IUnknown *output, enum output_type *output_type,
+        IUnknown **typed_output)
+{
+    HRESULT hr;
+
+    if (!output)
+    {
+        *output_type = PROCESSOR_OUTPUT_NOT_SET;
+        *typed_output = NULL;
+        return S_OK;
+    }
+
+    *output_type = PROCESSOR_OUTPUT_STREAM;
+    hr = IUnknown_QueryInterface(output, &IID_IStream, (void **)typed_output);
+    if (FAILED(hr))
+        hr = IUnknown_QueryInterface(output, &IID_ISequentialStream, (void **)typed_output);
+    if (FAILED(hr))
+    {
+        *output_type = PROCESSOR_OUTPUT_RESPONSE;
+        hr = IUnknown_QueryInterface(output, &IID_IResponse, (void **)typed_output);
+    }
+    if (FAILED(hr))
+    {
+        *output_type = PROCESSOR_OUTPUT_PERSISTSTREAM;
+        hr = IUnknown_QueryInterface(output, &IID_IPersistStream, (void **)typed_output);
+    }
+    if (FAILED(hr))
+        hr = IUnknown_QueryInterface(output, &IID_IPersistStreamInit, (void **)typed_output);
+    if (FAILED(hr))
+    {
+        *output_type = PROCESSOR_OUTPUT_NOT_SET;
+        WARN("failed to get output interface, hr %#lx.\n", hr);
+    }
+
+    return hr;
+}
+
 static HRESULT WINAPI xslprocessor_put_output(
     IXSLProcessor *iface,
     VARIANT var)
 {
     xslprocessor *This = impl_from_IXSLProcessor( iface );
     enum output_type output_type = PROCESSOR_OUTPUT_NOT_SET;
-    IUnknown *output = NULL;
+    IUnknown *output = NULL, *typed_output = NULL;
     HRESULT hr = S_OK;
 
     TRACE("(%p)->(%s)\n", This, debugstr_variant(&var));
@@ -488,27 +547,10 @@ static HRESULT WINAPI xslprocessor_put_output(
         if (!V_UNKNOWN(&var))
             break;
 
-        output_type = PROCESSOR_OUTPUT_STREAM;
-        hr = IUnknown_QueryInterface(V_UNKNOWN(&var), &IID_IStream, (void **)&output);
-        if (FAILED(hr))
-            hr = IUnknown_QueryInterface(V_UNKNOWN(&var), &IID_ISequentialStream, (void **)&output);
-        if (FAILED(hr))
-        {
-            output_type = PROCESSOR_OUTPUT_RESPONSE;
-            hr = IUnknown_QueryInterface(V_UNKNOWN(&var), &IID_IResponse, (void **)&output);
-        }
-        if (FAILED(hr))
-        {
-            output_type = PROCESSOR_OUTPUT_PERSISTSTREAM;
-            hr = IUnknown_QueryInterface(V_UNKNOWN(&var), &IID_IPersistStream, (void **)&output);
-        }
-        if (FAILED(hr))
-            hr = IUnknown_QueryInterface(V_UNKNOWN(&var), &IID_IPersistStreamInit, (void **)&output);
-        if (FAILED(hr))
-        {
-            output_type = PROCESSOR_OUTPUT_NOT_SET;
-            WARN("failed to get output interface, hr %#lx.\n", hr);
-        }
+        output = V_UNKNOWN(&var);
+        IUnknown_AddRef(output);
+
+        hr = xslprocessor_resolve_output(output, &output_type, &typed_output);
         break;
     default:
         FIXME("output type %d not handled\n", V_VT(&var));
@@ -517,10 +559,20 @@ static HRESULT WINAPI xslprocessor_put_output(
 
     if (hr == S_OK)
     {
-        if (This->output.unk)
-            IUnknown_Release(This->output.unk);
-        This->output.unk = output;
-        This->output_type = output_type;
+        if (This->output.object.obj)
+            IUnknown_Release(This->output.object.obj);
+        if (This->output.output)
+            IUnknown_Release(This->output.output);
+
+        This->output.output = output;
+
+        This->output.object.obj = typed_output;
+        This->output.type = output_type;
+    }
+    else
+    {
+        if (output)
+            IUnknown_Release(output);
     }
 
     return hr;
@@ -536,11 +588,11 @@ static HRESULT WINAPI xslprocessor_get_output(
 
     if (!output) return E_INVALIDARG;
 
-    if (This->output.unk)
+    if (This->output.output)
     {
         V_VT(output) = VT_UNKNOWN;
-        V_UNKNOWN(output) = This->output.unk;
-        IUnknown_AddRef(This->output.unk);
+        V_UNKNOWN(output) = This->output.output;
+        IUnknown_AddRef(This->output.output);
     }
     else if (This->outstr)
     {
@@ -566,13 +618,21 @@ static HRESULT WINAPI xslprocessor_transform(
     if (!ret)
         return E_INVALIDARG;
 
-    if (This->output_type == PROCESSOR_OUTPUT_STREAM)
+    /* Typed output instance is released after each transformation */
+    if (This->output.output && This->output.type == PROCESSOR_OUTPUT_NOT_SET)
     {
-        stream = This->output.stream;
+        hr = xslprocessor_resolve_output(This->output.output, &This->output.type, &This->output.object.obj);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    if (This->output.type == PROCESSOR_OUTPUT_STREAM)
+    {
+        stream = This->output.object.stream;
         ISequentialStream_AddRef(stream);
     }
-    else if (This->output_type == PROCESSOR_OUTPUT_PERSISTSTREAM ||
-            This->output_type == PROCESSOR_OUTPUT_RESPONSE)
+    else if (This->output.type == PROCESSOR_OUTPUT_PERSISTSTREAM ||
+            This->output.type == PROCESSOR_OUTPUT_RESPONSE)
     {
         if (FAILED(hr = CreateStreamOnHGlobal(NULL, TRUE, (IStream **)&stream)))
             return hr;
@@ -580,13 +640,13 @@ static HRESULT WINAPI xslprocessor_transform(
 
     SysFreeString(This->outstr);
 
-    hr = node_transform_node_params(get_node_obj(This->input), This->stylesheet->node,
+    hr = node_transform_node_params(get_node_obj(This->input), This->template->node,
             &This->outstr, stream, &This->params);
     if (SUCCEEDED(hr))
     {
         IStream *src = (IStream *)stream;
 
-        switch (This->output_type)
+        switch (This->output.type)
         {
         case PROCESSOR_OUTPUT_PERSISTSTREAM:
         {
@@ -595,7 +655,7 @@ static HRESULT WINAPI xslprocessor_transform(
             /* for IPersistStream* output seekable stream is used */
             zero.QuadPart = 0;
             IStream_Seek(src, zero, STREAM_SEEK_SET, NULL);
-            hr = IPersistStream_Load(This->output.persiststream, src);
+            hr = IPersistStream_Load(This->output.object.persiststream, src);
             break;
         }
         case PROCESSOR_OUTPUT_RESPONSE:
@@ -627,7 +687,7 @@ static HRESULT WINAPI xslprocessor_transform(
                 GlobalUnlock(hglobal);
                 SafeArrayUnaccessData(array);
 
-                IResponse_BinaryWrite(This->output.response, bin);
+                IResponse_BinaryWrite(This->output.object.response, bin);
             }
 
             VariantClear(&bin);
@@ -640,6 +700,12 @@ static HRESULT WINAPI xslprocessor_transform(
 
     if (stream)
         ISequentialStream_Release(stream);
+
+    /* Reset resolved typed output object. */
+    if (This->output.object.obj)
+        IUnknown_Release(This->output.object.obj);
+    This->output.object.obj = NULL;
+    This->output.type = PROCESSOR_OUTPUT_NOT_SET;
 
     *ret = hr == S_OK ? VARIANT_TRUE : VARIANT_FALSE;
     return hr;
@@ -815,9 +881,9 @@ HRESULT XSLProcessor_create(xsltemplate *template, IXSLProcessor **ret)
 
     object->IXSLProcessor_iface.lpVtbl = &XSLProcessorVtbl;
     object->ref = 1;
-    object->output_type = PROCESSOR_OUTPUT_NOT_SET;
+    object->output.type = PROCESSOR_OUTPUT_NOT_SET;
     list_init(&object->params.list);
-    object->stylesheet = template;
+    object->template = template;
     IXSLTemplate_AddRef(&template->IXSLTemplate_iface);
     init_dispex(&object->dispex, (IUnknown *)&object->IXSLProcessor_iface, &xslprocessor_dispex);
 

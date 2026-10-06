@@ -249,9 +249,10 @@ static void ios_surface_destroy( struct window_surface *surface )
 
 static const struct window_surface_funcs ios_surface_funcs =
 {
-    ios_surface_set_clip,
-    ios_surface_flush,
-    ios_surface_destroy,
+    .size = sizeof(struct ios_window_surface),
+    .set_clip = ios_surface_set_clip,
+    .flush = ios_surface_flush,
+    .destroy = ios_surface_destroy,
 };
 
 /**********************************************************************
@@ -278,8 +279,7 @@ static BOOL IOS_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surfac
     info->bmiHeader.biSizeImage   = width * height * 4;
     info->bmiHeader.biCompression = BI_RGB;
 
-    *surface = window_surface_create( sizeof(struct ios_window_surface), &ios_surface_funcs,
-                                      hwnd, surface_rect, info, 0 );
+    *surface = window_surface_create( &ios_surface_funcs, hwnd, surface_rect, info, 0 );
     return TRUE;
 }
 

@@ -474,7 +474,11 @@ static WCHAR *get_key_container_path(const CERT_CONTEXT *ctx)
         char *str;
         if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, NULL, &size, 0)) return NULL;
         if (!(str = malloc(size))) return NULL;
-        if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, (BYTE *)str, &size, 0)) return NULL;
+        if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, (BYTE *)str, &size, 0))
+        {
+            free(str);
+            return NULL;
+        }
 
         len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
         if (!(ret = malloc(sizeof(L"Software\\Wine\\Crypto\\RSA\\") + len * sizeof(WCHAR))))
@@ -739,8 +743,12 @@ static SECURITY_STATUS acquire_credentials_handle(ULONG fCredentialUse,
     free(key_blob);
     if (status) goto fail;
 
-    handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED);
-    if (handle == SCHAN_INVALID_HANDLE) goto fail;
+    if ((handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED)) == SCHAN_INVALID_HANDLE)
+    {
+        struct free_certificate_credentials_params free_params = { creds };
+        GNUTLS_CALL( free_certificate_credentials, &free_params );
+        goto fail;
+    }
 
     phCredential->dwLower = handle;
     phCredential->dwUpper = 0;
@@ -1170,7 +1178,8 @@ static SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
     dump_buffer_desc(pInput);
     dump_buffer_desc(pOutput);
 
-    return establish_context(phCredential, phContext, pszTargetName, pInput, fContextReq, TargetDataRep, phNewContext, pOutput, pfContextAttr, ptsExpiry, FALSE);
+    return establish_context(phCredential, phContext, pszTargetName, pInput, fContextReq, TargetDataRep,
+                             phNewContext, pOutput, pfContextAttr, ptsExpiry, FALSE);
 }
 
 /***********************************************************************
@@ -1218,7 +1227,8 @@ static SECURITY_STATUS SEC_ENTRY schan_AcceptSecurityContext(
     dump_buffer_desc(pInput);
     dump_buffer_desc(pOutput);
 
-    return establish_context(phCredential, phContext, NULL, pInput, fContextReq, TargetDataRep, phNewContext, pOutput, pfContextAttr, ptsTimeStamp, TRUE);
+    return establish_context(phCredential, phContext, NULL, pInput, fContextReq, TargetDataRep, phNewContext,
+                             pOutput, pfContextAttr, ptsTimeStamp, TRUE);
 }
 
 static void *get_alg_name(ALG_ID id, BOOL wide)
@@ -1282,8 +1292,11 @@ static SECURITY_STATUS ensure_remote_cert(struct schan_context *ctx)
             if (!CertAddEncodedCertificateToStore(store, X509_ASN_ENCODING, blob, sizes[i],
                     CERT_STORE_ADD_REPLACE_EXISTING, i ? NULL : &cert))
             {
+                status = GetLastError();
                 if (i) CertFreeCertificateContext(cert);
-                return GetLastError();
+                free(params.buffer);
+                CertCloseStore(store, 0);
+                return status;
             }
             blob += sizes[i];
         }
@@ -1293,6 +1306,40 @@ done:
     ctx->cert = cert;
     CertCloseStore(store, 0);
     return status;
+}
+
+static BCRYPT_ALG_HANDLE get_hash_alg( const char *oid, DWORD *size )
+{
+    if (!strcmp( oid, szOID_RSA_SHA1RSA ))
+    {
+        *size = 20;
+        return BCRYPT_SHA1_ALG_HANDLE;
+    }
+    if (!strcmp( oid, szOID_RSA_SHA256RSA ) || !strcmp( oid, szOID_ECDSA_SHA256 ))
+    {
+        *size = 32;
+        return BCRYPT_SHA256_ALG_HANDLE;
+    }
+    if (!strcmp( oid, szOID_RSA_SHA384RSA ) || !strcmp( oid, szOID_ECDSA_SHA384 ))
+    {
+        *size = 48;
+        return BCRYPT_SHA384_ALG_HANDLE;
+    }
+    if (!strcmp( oid, szOID_RSA_SHA512RSA ) || !strcmp( oid, szOID_ECDSA_SHA512 ))
+    {
+        *size = 64;
+        return BCRYPT_SHA512_ALG_HANDLE;
+    }
+    FIXME( "unhandled oid %s\n", debugstr_a(oid) );
+    return NULL;
+}
+
+static SECURITY_STATUS hash_certificate( const CERT_CONTEXT *cert, BYTE *hash, DWORD *hash_size )
+{
+    BCRYPT_ALG_HANDLE alg = get_hash_alg( cert->pCertInfo->SignatureAlgorithm.pszObjId, hash_size );
+
+    if (!alg) return SEC_E_INTERNAL_ERROR;
+    return BCryptHash( alg, NULL, 0, cert->pbCertEncoded, cert->cbCertEncoded, hash, *hash_size );
 }
 
 static SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
@@ -1369,22 +1416,12 @@ static SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
     {
         static const char prefix[] = "tls-server-end-point:";
         SecPkgContext_Bindings *bindings = buffer;
-        CCRYPT_OID_INFO *info;
-        ALG_ID hash_alg = CALG_SHA_256;
-        BYTE hash[1024];
+        BYTE hash[64];
         DWORD hash_size;
         char *p;
-        BOOL ret;
 
-        if ((status = ensure_remote_cert(ctx)) != SEC_E_OK) return status;
-
-        /* RFC 5929 */
-        info = CryptFindOIDInfo(CRYPT_OID_INFO_OID_KEY, ctx->cert->pCertInfo->SignatureAlgorithm.pszObjId, 0);
-        if (info && info->Algid != CALG_SHA1 && info->Algid != CALG_MD5) hash_alg = info->Algid;
-
-        hash_size = sizeof(hash);
-        ret = CryptHashCertificate(0, hash_alg, 0, ctx->cert->pbCertEncoded, ctx->cert->cbCertEncoded, hash, &hash_size);
-        if (!ret) return GetLastError();
+        if ((status = ensure_remote_cert(ctx)) != SEC_E_OK ||
+            (status = hash_certificate(ctx->cert, hash, &hash_size)) != SEC_E_OK) return status;
 
         bindings->BindingsLength = sizeof(*bindings->Bindings) + sizeof(prefix) - 1 + hash_size;
         /* freed with FreeContextBuffer */
@@ -1495,8 +1532,8 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
     TRACE("context_handle %p, quality %ld, message %p, message_seq_no %ld\n",
             context_handle, quality, message, message_seq_no);
 
-    if (!context_handle) return SEC_E_INVALID_HANDLE;
-    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!context_handle || !(ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX)))
+        return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 
@@ -1631,8 +1668,8 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
     TRACE("context_handle %p, message %p, message_seq_no %ld, quality %p\n",
             context_handle, message, message_seq_no, quality);
 
-    if (!context_handle) return SEC_E_INVALID_HANDLE;
-    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!context_handle || !(ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX)))
+        return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 

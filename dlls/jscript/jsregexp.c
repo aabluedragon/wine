@@ -56,6 +56,7 @@ static HRESULT do_regexp_match_next(script_ctx_t *ctx, RegExpInstance *regexp,
         DWORD rem_flags, jsstr_t *jsstr, const WCHAR *str, match_state_t *ret)
 {
     HRESULT hres;
+    DWORD last_index;
 
     hres = regexp_execute(regexp->jsregexp, ctx, &ctx->tmp_heap,
             str, jsstr_length(jsstr), ret);
@@ -89,7 +90,8 @@ static HRESULT do_regexp_match_next(script_ctx_t *ctx, RegExpInstance *regexp,
             memset(ctx->match_parens+n, 0, sizeof(ctx->match_parens) - n*sizeof(ctx->match_parens[0]));
     }
 
-    set_last_index(regexp, ret->cp-str);
+    last_index = ret->cp-str;
+    set_last_index(regexp, ret->match_len == 0 ? last_index + 1 : last_index);
 
     if(!(rem_flags & REM_NO_CTX_UPDATE)) {
         ctx->last_match_index = ret->cp-str-ret->match_len;
@@ -557,7 +559,7 @@ static void RegExp_destructor(jsdisp_t *dispex)
 
 static HRESULT RegExp_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *dispex)
 {
-    return gc_process_linked_val(gc_ctx, op, dispex, &regexp_from_jsdisp(dispex)->last_index_val);
+    return gc_process_linked_val(gc_ctx, op, &regexp_from_jsdisp(dispex)->last_index_val);
 }
 
 static const builtin_prop_t RegExp_props[] = {
