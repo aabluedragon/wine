@@ -23,8 +23,16 @@ The MF parser flag leaves DirectShow and WM reader layouts unchanged.
 
 Run `/home/alon/games/RoadRash/run-wine.sh`, or select **Road Rash (Wine fork)**
 in the applications menu. The launcher uses the patched fork installed under
-`/home/alon/.local`, the prefix at `/mnt/storage/roadrash-wine/prefix`, and a
-1024x768 Wine desktop window. Set `WINEPREFIX` to choose another prefix.
+`/usr/local` through the compatibility link `/home/alon/.local/bin/wine`, the
+prefix at `/mnt/storage/roadrash-wine/prefix`, and a 1024x768 Wine desktop
+window. Set `WINEPREFIX` to choose another prefix.
+
+The system-wide installation reports `wine-11.19-150-gbd1bf4bc31f`.
+Both `wine` and `/usr/bin/wine` select it through the `wine.collection`
+alternatives entry `/usr/local/share/wine/collection-fork`. Runtime libraries
+are installed in `/usr/local/lib/wine`, with `/home/alon/.local/lib/wine`
+retained as a compatibility link. The runtime and system binaries are owned
+by root and can be used by other accounts.
 
 Keyboard defaults are W/S for accelerate/brake and A/D for steering. Select
 **Restroom > Configure Input > Keyboard defaults** if controller mappings are
@@ -42,6 +50,11 @@ make -j4 dlls/evr/i386-windows/evr.dll dlls/evr/x86_64-windows/evr.dll \
   dlls/winegstreamer/x86_64-windows/winegstreamer.dll
 ```
 
+The global build is configured with `--prefix=/usr/local
+--enable-archs=i386,x86_64 --disable-tests` and installed with `make install`
+as root. The regression executables built with tests enabled were retained
+and also pass against the installed global Wine on both architectures.
+
 With tests enabled, build `dlls/evr/tests/{i386,x86_64}-windows/evr_test.exe`
 and run each executable with the argument `allocator`. Both architectures
 pass 22 checks. The unpatched installed build fails the three checks for
@@ -55,3 +68,5 @@ Runtime checks covered intro and prerace video playback, menus, a race with
 W-key acceleration to approximately 100 MPH, and nonzero game audio captured
 through PipeWire. Logs, screenshots and original installed libraries are in
 `/mnt/storage/roadrash-wine/`.
+Global installation logs and the previous user-local command backups are in
+`/mnt/storage/roadrash-wine/global-install/`.
