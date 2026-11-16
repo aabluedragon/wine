@@ -75,6 +75,7 @@ struct video_sample
     LONG refcount;
 
     IMFSample *sample;
+    BOOL buffer_operations;
 
     IMFAsyncResult *tracked_result;
     LONG tracked_refcount;
@@ -537,6 +538,8 @@ static HRESULT WINAPI sample_allocator_UninitializeSampleAllocator(IMFVideoSampl
     return S_OK;
 }
 
+static HRESULT create_video_sample(IUnknown *surface, IMFSample **sample, BOOL buffer_operations);
+
 static HRESULT sample_allocator_create_samples(struct sample_allocator *allocator, unsigned int sample_count,
         IMFMediaType *media_type)
 {
@@ -588,7 +591,9 @@ static HRESULT sample_allocator_create_samples(struct sample_allocator *allocato
         struct queued_sample *queued_sample;
         IMFMediaBuffer *buffer;
 
-        if (SUCCEEDED(hr = MFCreateVideoSampleFromSurface(NULL, &sample)))
+        /* Allocator samples expose their lockable buffers to software transforms,
+         * unlike the samples returned by MFCreateVideoSampleFromSurface(). */
+        if (SUCCEEDED(hr = create_video_sample(NULL, &sample, TRUE)))
         {
             if (service)
             {
@@ -1343,9 +1348,11 @@ static HRESULT WINAPI video_sample_GetBufferByIndex(IMFSample *iface, DWORD inde
 
 static HRESULT WINAPI video_sample_ConvertToContiguousBuffer(IMFSample *iface, IMFMediaBuffer **buffer)
 {
+    struct video_sample *sample = impl_from_IMFSample(iface);
+
     TRACE("%p, %p.\n", iface, buffer);
 
-    return E_NOTIMPL;
+    return sample->buffer_operations ? IMFSample_ConvertToContiguousBuffer(sample->sample, buffer) : E_NOTIMPL;
 }
 
 static HRESULT WINAPI video_sample_AddBuffer(IMFSample *iface, IMFMediaBuffer *buffer)
@@ -1377,7 +1384,12 @@ static HRESULT WINAPI video_sample_RemoveAllBuffers(IMFSample *iface)
 
 static HRESULT WINAPI video_sample_GetTotalLength(IMFSample *iface, DWORD *total_length)
 {
+    struct video_sample *sample = impl_from_IMFSample(iface);
+
     TRACE("%p, %p.\n", iface, total_length);
+
+    if (sample->buffer_operations)
+        return IMFSample_GetTotalLength(sample->sample, total_length);
 
     *total_length = 0;
 
@@ -1386,9 +1398,11 @@ static HRESULT WINAPI video_sample_GetTotalLength(IMFSample *iface, DWORD *total
 
 static HRESULT WINAPI video_sample_CopyToBuffer(IMFSample *iface, IMFMediaBuffer *buffer)
 {
+    struct video_sample *sample = impl_from_IMFSample(iface);
+
     TRACE("%p, %p.\n", iface, buffer);
 
-    return E_NOTIMPL;
+    return sample->buffer_operations ? IMFSample_CopyToBuffer(sample->sample, buffer) : E_NOTIMPL;
 }
 
 static const IMFSampleVtbl video_sample_vtbl =
@@ -1739,7 +1753,7 @@ static HRESULT create_surface_buffer(IUnknown *surface, IMFMediaBuffer **buffer)
     return S_OK;
 }
 
-HRESULT WINAPI MFCreateVideoSampleFromSurface(IUnknown *surface, IMFSample **sample)
+static HRESULT create_video_sample(IUnknown *surface, IMFSample **sample, BOOL buffer_operations)
 {
     struct video_sample *object;
     IMFMediaBuffer *buffer = NULL;
@@ -1754,6 +1768,7 @@ HRESULT WINAPI MFCreateVideoSampleFromSurface(IUnknown *surface, IMFSample **sam
     object->IMFTrackedSample_iface.lpVtbl = &tracked_video_sample_vtbl;
     object->IMFDesiredSample_iface.lpVtbl = &desired_video_sample_vtbl;
     object->refcount = 1;
+    object->buffer_operations = buffer_operations;
     InitializeCriticalSection(&object->cs);
 
     if (FAILED(hr = MFCreateSample(&object->sample)))
@@ -1779,4 +1794,9 @@ HRESULT WINAPI MFCreateVideoSampleFromSurface(IUnknown *surface, IMFSample **sam
     *sample = &object->IMFSample_iface;
 
     return S_OK;
+}
+
+HRESULT WINAPI MFCreateVideoSampleFromSurface(IUnknown *surface, IMFSample **sample)
+{
+    return create_video_sample(surface, sample, FALSE);
 }

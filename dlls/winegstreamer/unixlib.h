@@ -223,6 +223,7 @@ enum wg_parser_create_flag
     WG_PARSER_CREATE_FLAG_NONE = 0,
     WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED = 1,
     WG_PARSER_CREATE_FLAG_PTS_REBASED = 2,
+    WG_PARSER_CREATE_FLAG_MF_VIDEO_LAYOUT = 4,
 };
 
 struct wg_parser_create_params

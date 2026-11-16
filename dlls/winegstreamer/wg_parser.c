@@ -78,6 +78,7 @@ struct wg_parser
 
     pthread_cond_t init_cond;
     bool output_compressed, pts_rebased;
+    bool mf_video_layout;
     bool no_more_pads, has_duration, error;
     bool err_on, warn_on;
 
@@ -732,6 +733,60 @@ static gboolean sink_event_cb(GstPad *pad, GstObject *parent, GstEvent *event)
     return TRUE;
 }
 
+static bool repack_mf_video_buffer(GstCaps *caps, GstBuffer **buffer)
+{
+    GstVideoInfo src_info, dst_info;
+    GstVideoFrame src_frame, dst_frame;
+    GstBuffer *packed;
+    unsigned int width, height;
+    bool ret;
+
+    if (!caps || !gst_caps_is_fixed(caps)
+            || strcmp(gst_structure_get_name(gst_caps_get_structure(caps, 0)), "video/x-raw"))
+        return true;
+    if (!gst_video_info_from_caps(&src_info, caps))
+        return false;
+    if (GST_VIDEO_INFO_FORMAT(&src_info) != GST_VIDEO_FORMAT_I420
+            && GST_VIDEO_INFO_FORMAT(&src_info) != GST_VIDEO_FORMAT_YV12)
+        return true;
+
+    /* MF planar 4:2:0 buffers have tightly packed planes. GStreamer's default
+     * layout aligns each plane's rows to four bytes, including chroma rows. */
+    width = src_info.width;
+    height = src_info.height;
+    dst_info = src_info;
+    dst_info.stride[0] = width;
+    dst_info.stride[1] = dst_info.stride[2] = (width + 1) / 2;
+    dst_info.offset[0] = 0;
+    dst_info.offset[1] = width * height;
+    dst_info.offset[2] = dst_info.offset[1] + dst_info.stride[1] * ((height + 1) / 2);
+    dst_info.size = dst_info.offset[2] + dst_info.stride[2] * ((height + 1) / 2);
+
+    if (!gst_video_frame_map(&src_frame, &src_info, *buffer, GST_MAP_READ))
+        return false;
+    if (!(packed = gst_buffer_new_allocate(NULL, dst_info.size, NULL)))
+    {
+        gst_video_frame_unmap(&src_frame);
+        return false;
+    }
+    if ((ret = gst_video_frame_map(&dst_frame, &dst_info, packed, GST_MAP_WRITE)))
+    {
+        ret = gst_video_frame_copy(&dst_frame, &src_frame);
+        gst_video_frame_unmap(&dst_frame);
+    }
+    gst_video_frame_unmap(&src_frame);
+    if (!ret)
+    {
+        gst_buffer_unref(packed);
+        return false;
+    }
+
+    gst_buffer_copy_into(packed, *buffer, GST_BUFFER_COPY_FLAGS | GST_BUFFER_COPY_TIMESTAMPS, 0, -1);
+    gst_buffer_unref(*buffer);
+    *buffer = packed;
+    return true;
+}
+
 static GstFlowReturn sink_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *buffer)
 {
     struct wg_parser_stream *stream = gst_pad_get_element_private(pad);
@@ -780,7 +835,8 @@ static GstFlowReturn sink_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *bu
         return GST_FLOW_FLUSHING;
     }
 
-    if (!gst_buffer_map(buffer, &stream->map_info, GST_MAP_READ))
+    if ((parser->mf_video_layout && !repack_mf_video_buffer(stream->current_caps, &buffer))
+            || !gst_buffer_map(buffer, &stream->map_info, GST_MAP_READ))
     {
         pthread_mutex_unlock(&parser->mutex);
         GST_ERROR("Failed to map buffer.");
@@ -1915,6 +1971,7 @@ static NTSTATUS wg_parser_create(void *args)
     pthread_cond_init(&parser->read_done_cond, NULL);
     parser->output_compressed = params->flags & WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED;
     parser->pts_rebased = params->flags & WG_PARSER_CREATE_FLAG_PTS_REBASED;
+    parser->mf_video_layout = params->flags & WG_PARSER_CREATE_FLAG_MF_VIDEO_LAYOUT;
     parser->err_on = params->err_on;
     parser->warn_on = params->warn_on;
     parser->base_pts = GST_CLOCK_TIME_NONE;
